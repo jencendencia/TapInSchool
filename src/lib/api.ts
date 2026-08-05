@@ -1338,8 +1338,8 @@ onToggleAdmin(cb: () => void): () => void {
   async checkLicense(): Promise<LicenseStatus> {
     return { activated: true, licenseKey: 'DEV-MODE', machineId: 'browser-mock' };
   }
-  async activateLicense(licenseKey: string): Promise<ActivationResult> {
-    return { valid: true, message: 'Activated (browser mock)', machineId: 'browser-mock' };
+async activateLicense(licenseKey: string): Promise<ActivationResult> {
+    return { valid: true, message: `Activated ${licenseKey} (browser mock)`, machineId: 'browser-mock' };
   }
   async getMachineId(): Promise<string> {
     return 'browser-mock';

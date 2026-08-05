@@ -24,9 +24,9 @@ function getMachineId(): string {
   }
   hash.update(os.platform());
   hash.update(os.arch());
-  const interfaces = os.networkInterfaces();
+const interfaces = os.networkInterfaces();
   for (const name of Object.keys(interfaces)) {
-    for (const iface of interfaces[name]) {
+    for (const iface of interfaces[name] ?? []) {
       if (iface.mac && iface.mac !== '00:00:00:00:00:00') {
         hash.update(iface.mac);
         break;
@@ -68,8 +68,9 @@ export async function activateLicense(licenseKey: string): Promise<ActivationRes
     });
     const result = (await response.json()) as ActivationResult;
 
-    if (result.valid) {
+if (result.valid) {
       saveLicense({
+        activated: true,
         licenseKey: licenseKey.trim().toUpperCase(),
         machineId,
         activatedAt: new Date().toISOString(),

@@ -25,9 +25,19 @@ export function setupAutoUpdater(): void {
   autoUpdater.autoInstallOnAppQuit = true; // Install on quit
 
   autoUpdater.on('checking-for-update', () => sendUpdateStatus({ status: 'checking' }));
-  autoUpdater.on('update-available', (info) =>
-    sendUpdateStatus({ status: 'available', data: { version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes } }),
-  );
+autoUpdater.on('update-available', (info) => {
+    const notes = info.releaseNotes;
+    const releaseNotes =
+      typeof notes === 'string' ? notes : Array.isArray(notes) ? notes.map((n) => n.note).join('\n') : undefined;
+    sendUpdateStatus({
+      status: 'available',
+      data: {
+        version: info.version,
+        releaseDate: info.releaseDate,
+        releaseNotes,
+      },
+    });
+  });
   autoUpdater.on('update-not-available', (info) =>
     sendUpdateStatus({ status: 'not-available', data: { version: info.version } }),
   );
