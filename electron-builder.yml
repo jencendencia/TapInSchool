@@ -18,12 +18,14 @@ win:
   icon: JE_logo.png
   target:
     - nsis
-# Auto-update endpoint (P0-3.8). electron-updater checks this URL for new
-# builds and installs them on quit. Replace with your real update server or
-# GitHub releases URL before shipping; until then the check just fails silently.
+# Auto-update endpoint (P0-3.8). electron-updater checks GitHub releases for
+# new builds and installs them on quit. The latest.yml uploaded to each release
+# must reference the dotted asset filename (TapIn.School.Setup.X.X.X.exe) so the
+# auto-updater can resolve the download URL without a 404.
 publish:
-  provider: generic
-  url: https://updates.example.com/tapin-school
+  provider: github
+  owner: jencendencia
+  repo: TapInSchool
 nsis:
   oneClick: false
   perMachine: false
