@@ -27,6 +27,9 @@ import type {
   SmsAuditDay,
   SmsFailureRow,
   SmsStatus,
+  StudentDayRow,
+  StudentRecord,
+  StudentScanRow,
   TardinessFrequencyRow,
   TardinessRow,
 } from '../../shared/types';
@@ -65,6 +68,22 @@ function maskPhone(phone: string): string {
   return `+${digits.slice(0, 5)}*****${digits.slice(-2)}`;
 }
 
+/** Numeric grade extracted from a "Grade 7 - Section A" label ("7"). */
+function gradeNum(label: string): number {
+  const n = Number.parseInt(String(label || '').replace(/\D+/g, ''), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * MySQL expression ordering a section label by its numeric grade so reports
+ * read Grade 7 → 8 → … → 11 instead of the lexical "Grade 10"-before-"Grade 7"
+ * ordering. "Grade 7 - Section A" → SUBSTRING_INDEX(' ' 2) = "Grade 7" →
+ * last token "7" → CAST UNSIGNED.
+ */
+function gradeOrd(sqlExpr: string): string {
+  return `CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(${sqlExpr}, ' ', 2), ' ', -1) AS UNSIGNED)`;
+}
+
 export async function getReportData(query: ReportQuery): Promise<ReportData> {
   const settings = settingsStore.get();
   const today = fmtDay(new Date());
@@ -84,7 +103,18 @@ export async function getReportData(query: ReportQuery): Promise<ReportData> {
   const fromDt = `${fromStr} 00:00:00`;
   const toDt = `${toStr} 23:59:59`;
   const { late, early } = flagCutoffs(settings);
-  const sectionWhere = section ? ` AND s.grade_section = ?` : '';
+  const schoolYear = (query?.schoolYear ?? '').trim();
+  // Section groupings reflect the SELECTED school year's enrollments: each
+  // student appears under the section they were enrolled in that year, falling
+  // back to their live section (students.grade_section = current year) when no
+  // enrollment exists for the year (e.g. pre-backfill installs). Empty year =
+  // current sections (the original behavior).
+  const yearJoin = schoolYear
+    ? `LEFT JOIN enrollments e ON e.student_id = s.id AND e.school_year = ?`
+    : '';
+  const yearParams: unknown[] = schoolYear ? [schoolYear] : [];
+  const secExpr = schoolYear ? `COALESCE(NULLIF(e.grade_section, ''), s.grade_section)` : 's.grade_section';
+  const sectionWhere = section ? ` AND ${secExpr} = ?` : '';
   const sectionParams: unknown[] = section ? [section] : [];
 
   const count = async (sql: string, params?: unknown[]): Promise<number> => {
@@ -94,9 +124,16 @@ export async function getReportData(query: ReportQuery): Promise<ReportData> {
 
   // ---- Always-computed pieces (summary + daily) ---------------------------
   const sectionsRows = await db.query<{ grade_section: string }[]>(
-    `SELECT DISTINCT grade_section FROM students WHERE grade_section <> '' ORDER BY grade_section`,
+    schoolYear
+      ? `SELECT DISTINCT ${secExpr} grade_section FROM students s ${yearJoin}
+         WHERE ${secExpr} <> ''`
+      : `SELECT DISTINCT grade_section FROM students WHERE grade_section <> ''`,
+    schoolYear ? [...yearParams] : [],
   );
-  const sections = sectionsRows.map((r) => r.grade_section);
+  // Sort in JS: MySQL rejects ORDER BY on an expression not in the select list
+  // when DISTINCT is used (error 3065), so the numeric-grade ordering happens
+  // here on the bounded result set.
+  const sections = sectionsRows.map((r) => r.grade_section).sort((a, b) => gradeNum(a) - gradeNum(b) || a.localeCompare(b));
 
   const activeStudents = await count('SELECT COUNT(*) c FROM students WHERE is_active = 1');
 
@@ -208,34 +245,50 @@ export async function getReportData(query: ReportQuery): Promise<ReportData> {
   let tardinessFrequency: TardinessFrequencyRow[] = [];
   let smsAudit: { daily: SmsAuditDay[]; failures: SmsFailureRow[] } = { daily: [], failures: [] };
   let trends: ReportTrends = { weekly: [], dayOfWeek: [], gateHours: [] };
+  let studentRecord: StudentRecord | null = null;
 
+  const yearScope = { yearJoin, yearParams, secExpr };
   if (type === 'per-student') {
-    perStudent = await loadPerStudent({ section, maskPhones, late, fromDt, toDt, schoolDays, sectionWhere, sectionParams });
+    perStudent = await loadPerStudent({ ...yearScope, section, maskPhones, late, fromDt, toDt, schoolDays, sectionWhere, sectionParams });
   } else if (type === 'per-section') {
-    perSection = await loadPerSection({ late, early, fromDt, toDt, schoolDays });
+    perSection = await loadPerSection({ ...yearScope, late, early, fromDt, toDt, schoolDays });
   } else if (type === 'register') {
-    register = await loadRegister({ late, fromDt, toDt, sectionWhere, sectionParams });
+    register = await loadRegister({ ...yearScope, late, fromDt, toDt, sectionWhere, sectionParams });
   } else if (type === 'absentee') {
-    absentee = await loadAbsentee({ section, maskPhones, fromDt, toDt, sectionWhere, sectionParams });
-    absenteeTotals = await loadAbsenteeTotals({ maskPhones, fromDt, toDt, sectionWhere, sectionParams });
+    absentee = await loadAbsentee({ ...yearScope, section, maskPhones, fromDt, toDt, sectionWhere, sectionParams });
+    absenteeTotals = await loadAbsenteeTotals({ ...yearScope, maskPhones, fromDt, toDt, sectionWhere, sectionParams });
   } else if (type === 'tardiness') {
-    tardiness = await loadTardiness({ section, maskPhones, late, fromDt, toDt, sectionWhere, sectionParams });
-    tardinessFrequency = await loadTardinessFrequency({ late, fromDt, toDt, sectionWhere, sectionParams });
+    tardiness = await loadTardiness({ ...yearScope, section, maskPhones, late, fromDt, toDt, sectionWhere, sectionParams });
+    tardinessFrequency = await loadTardinessFrequency({ ...yearScope, late, fromDt, toDt, sectionWhere, sectionParams });
   } else if (type === 'sms-audit') {
     smsAudit = await loadSmsAudit({ maskPhones, fromDt, toDt });
   } else if (type === 'trends') {
     trends = await loadTrends({ dayPresence, activeStudents, fromDt, toDt });
+  } else if (type === 'student') {
+    studentRecord = await loadStudentRecord(query.studentId, {
+      late,
+      early,
+      fromDt,
+      toDt,
+      schoolDays,
+      presentByDay,
+      maskPhones,
+      ...yearScope,
+    });
   }
 
   return {
     schoolName: settings.school_name || 'TapIn School',
     from: fromStr,
     to: toStr,
+    schoolYear,
     generatedAt: new Date().toISOString(),
     type,
     section,
     maskPhones,
     sections,
+    studentId: query.studentId,
+    studentRecord,
     cutoffs: { late, early },
     summary: {
       scans: scanRow?.c ?? 0,
@@ -279,6 +332,10 @@ interface StudentScope {
   maskPhones: boolean;
   sectionWhere: string;
   sectionParams: unknown[];
+  /** Year-scoping: LEFT JOIN enrollments e + params + section expression. */
+  yearJoin: string;
+  yearParams: unknown[];
+  secExpr: string;
 }
 
 function phoneOf(phone: string, maskPhones: boolean): string {
@@ -311,7 +368,7 @@ async function loadPerStudent(
       last_status: string | null;
     }[]
   >(
-    `SELECT s.id student_id, s.student_no, s.full_name, s.grade_section, s.parent_phone,
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
             COUNT(DISTINCT CASE WHEN a.id IS NOT NULL THEN DATE(a.scanned_at) END) present_days,
             COUNT(DISTINCT CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ? THEN DATE(a.scanned_at) END) late_days,
             COALESCE(SUM(a.entry_type = 'IN'), 0) total_in,
@@ -319,7 +376,7 @@ async function loadPerStudent(
             ${lateMinsSel} late_mins,
             COALESCE(ssm.sms_count, 0) sms_count,
             ssm.last_status last_status
-     FROM students s
+     FROM students s ${args.yearJoin}
      LEFT JOIN attendance_logs a ON a.student_id = s.id AND a.scanned_at BETWEEN ? AND ?
      ${lateSub}
      LEFT JOIN (SELECT al.student_id, COUNT(*) sms_count,
@@ -327,9 +384,11 @@ async function loadPerStudent(
                 FROM sms_logs sm JOIN attendance_logs al ON al.id = sm.attendance_id
                 WHERE al.scanned_at BETWEEN ? AND ? GROUP BY al.student_id) ssm ON ssm.student_id = s.id
      WHERE s.is_active = 1${args.sectionWhere}
-     GROUP BY s.id, s.student_no, s.full_name, s.grade_section, s.parent_phone
-     ORDER BY s.grade_section, s.full_name`,
-    [args.late, args.late, args.fromDt, args.toDt, ...lateParams, args.fromDt, args.toDt, ...args.sectionParams],
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
+     ORDER BY ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name`,
+    // Placeholder order follows the SQL text: SELECT-clause late cutoffs first,
+    // then the yearJoin (FROM), then the rest of the joins + section filter.
+    [args.late, args.late, ...args.yearParams, args.fromDt, args.toDt, ...lateParams, args.fromDt, args.toDt, ...args.sectionParams],
   );
   const schoolDays = args.schoolDays;
   return rows.map((r) => ({
@@ -356,30 +415,35 @@ async function loadPerSection(args: {
   fromDt: string;
   toDt: string;
   schoolDays: number;
+  yearJoin: string;
+  yearParams: unknown[];
+  secExpr: string;
 }): Promise<PerSectionRow[]> {
   const enrolledRows = await db.query<{ grade_section: string; c: number }[]>(
-    `SELECT grade_section, COUNT(*) c FROM students WHERE is_active = 1 GROUP BY grade_section`,
+    `SELECT ${args.secExpr} grade_section, COUNT(*) c FROM students s ${args.yearJoin}
+     WHERE s.is_active = 1 GROUP BY ${args.secExpr}`,
+    [...args.yearParams],
   );
   const presentRows = await db.query<{ grade_section: string; present: number }[]>(
-    `SELECT s.grade_section, COUNT(DISTINCT a.student_id) present
-     FROM attendance_logs a JOIN students s ON s.id = a.student_id
-     WHERE a.scanned_at BETWEEN ? AND ? GROUP BY s.grade_section`,
-    [args.fromDt, args.toDt],
+    `SELECT ${args.secExpr} grade_section, COUNT(DISTINCT a.student_id) present
+     FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
+     WHERE a.scanned_at BETWEEN ? AND ? GROUP BY ${args.secExpr}`,
+    [...args.yearParams, args.fromDt, args.toDt],
   );
   const flagRows = await db.query<{ grade_section: string; late: number; early: number }[]>(
-    `SELECT s.grade_section,
+    `SELECT ${args.secExpr} grade_section,
             COUNT(DISTINCT CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ? THEN a.student_id END) late,
             COUNT(DISTINCT CASE WHEN a.entry_type = 'OUT' AND ? <> '' AND TIME(a.scanned_at) < ? THEN a.student_id END) early
-     FROM attendance_logs a JOIN students s ON s.id = a.student_id
-     WHERE a.scanned_at BETWEEN ? AND ? GROUP BY s.grade_section`,
-    [args.late, args.late, args.early, args.early, args.fromDt, args.toDt],
+     FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
+     WHERE a.scanned_at BETWEEN ? AND ? GROUP BY ${args.secExpr}`,
+    [...args.yearParams, args.late, args.late, args.early, args.early, args.fromDt, args.toDt],
   );
   const daySectionPresent = await db.query<{ grade_section: string; present: number }[]>(
-    `SELECT s.grade_section, COUNT(DISTINCT a.student_id) present
-     FROM attendance_logs a JOIN students s ON s.id = a.student_id
+    `SELECT ${args.secExpr} grade_section, COUNT(DISTINCT a.student_id) present
+     FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
      WHERE a.scanned_at BETWEEN ? AND ?
-     GROUP BY DATE(a.scanned_at), s.grade_section`,
-    [args.fromDt, args.toDt],
+     GROUP BY DATE(a.scanned_at), ${args.secExpr}`,
+    [...args.yearParams, args.fromDt, args.toDt],
   );
   const sumBySection = new Map<string, number>();
   for (const r of daySectionPresent) sumBySection.set(r.grade_section, (sumBySection.get(r.grade_section) ?? 0) + r.present);
@@ -389,7 +453,7 @@ async function loadPerSection(args: {
   const flags = new Map(flagRows.map((r) => [r.grade_section, r]));
   const sections = new Set([...enrolled.keys(), ...present.keys()]);
   return [...sections]
-    .sort()
+    .sort((a, b) => gradeNum(a) - gradeNum(b) || a.localeCompare(b))
     .map((gradeSection) => {
       const enrolledCount = enrolled.get(gradeSection) ?? 0;
       const presentCount = present.get(gradeSection) ?? 0;
@@ -414,6 +478,9 @@ async function loadRegister(args: {
   toDt: string;
   sectionWhere: string;
   sectionParams: unknown[];
+  yearJoin: string;
+  yearParams: unknown[];
+  secExpr: string;
 }): Promise<ReportRegister> {
   const rangeDays = Math.round((new Date(args.toDt.slice(0, 10)).getTime() - new Date(args.fromDt.slice(0, 10)).getTime()) / 86400000) + 1;
   const capped = rangeDays > REGISTER_MAX_DAYS;
@@ -423,16 +490,19 @@ async function loadRegister(args: {
   const toDt = `${fmtDay(windowTo)} 23:59:59`;
 
   const studentRows = await db.query<{ student_id: number; student_no: string; full_name: string; grade_section: string }[]>(
-    `SELECT id student_id, student_no, full_name, grade_section FROM students
-     WHERE is_active = 1${args.sectionWhere} ORDER BY grade_section, full_name`,
-    args.sectionParams,
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section
+     FROM students s ${args.yearJoin}
+     WHERE s.is_active = 1${args.sectionWhere}
+     ORDER BY ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name`,
+    [...args.yearParams, ...args.sectionParams],
   );
   const scanRows = await db.query<
     { student_id: number; day: string; first_in: string | null; last_out: string | null }[]
   >(
     `SELECT s.id student_id, DATE_FORMAT(a.scanned_at, '%Y-%m-%d') day,
             DATE_FORMAT(MIN(CASE WHEN a.entry_type = 'IN' THEN a.scanned_at END), '%H:%i') first_in,
-            DATE_FORMAT(MAX(CASE WHEN a.entry_type = 'OUT' THEN a.scanned_at END), '%H:%i') last_out     FROM students s
+            DATE_FORMAT(MAX(CASE WHEN a.entry_type = 'OUT' THEN a.scanned_at END), '%H:%i') last_out
+     FROM students s ${args.yearJoin}
      LEFT JOIN attendance_logs a ON a.student_id = s.id AND a.scanned_at BETWEEN ? AND ?
      -- a.id IS NOT NULL drops the LEFT-JOIN rows for students with zero scans
      -- in the window - those would have day = NULL and crash the matrix
@@ -441,7 +511,7 @@ async function loadRegister(args: {
      -- GROUP BY must use the SAME expression as the SELECT day column, else
      -- MySQL rejects the query under sql_mode=only_full_group_by (errno 1055).
      GROUP BY s.id, DATE_FORMAT(a.scanned_at, '%Y-%m-%d')`,
-    [fromDt, toDt, ...args.sectionParams],
+    [...args.yearParams, fromDt, toDt, ...args.sectionParams],
   );
   const scanWithDay = scanRows.filter((r) => r.day !== null);
   const days = [...new Set(scanWithDay.map((r) => r.day as string))].sort();
@@ -475,17 +545,18 @@ async function loadAbsentee(
       sms_sent: number;
     }[]
   >(
-    `SELECT s.id student_id, s.student_no, s.full_name, s.grade_section, s.parent_phone, d.day,
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone, d.day,
             EXISTS(SELECT 1 FROM sms_logs sm JOIN attendance_logs al ON al.id = sm.attendance_id
                    WHERE al.student_id = s.id AND DATE(al.scanned_at) = d.day) sms_sent
-     FROM students s
+     FROM students s ${args.yearJoin}
      JOIN (SELECT DISTINCT DATE(scanned_at) day FROM attendance_logs WHERE scanned_at BETWEEN ? AND ?) d
      WHERE s.is_active = 1${args.sectionWhere}
        AND NOT EXISTS (SELECT 1 FROM attendance_logs a
                        WHERE a.student_id = s.id AND a.scanned_at BETWEEN ? AND ? AND DATE(a.scanned_at) = d.day)
-     ORDER BY d.day DESC, s.grade_section, s.full_name
+     ORDER BY d.day DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name
      LIMIT ${DETAIL_ROW_CAP}`,
-    [args.fromDt, args.toDt, args.fromDt, args.toDt, ...args.sectionParams],
+    // Text order: yearJoin, derived-days BETWEEN, section filter, NOT-EXISTS BETWEEN.
+    [...args.yearParams, args.fromDt, args.toDt, ...args.sectionParams, args.fromDt, args.toDt],
   );
   return rows.map((r) => ({
     studentId: r.student_id,
@@ -511,16 +582,17 @@ async function loadAbsenteeTotals(
       days_absent: number;
     }[]
   >(
-    `SELECT s.id student_id, s.student_no, s.full_name, s.grade_section, s.parent_phone, COUNT(*) days_absent
-     FROM students s
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone, COUNT(*) days_absent
+     FROM students s ${args.yearJoin}
      JOIN (SELECT DISTINCT DATE(scanned_at) day FROM attendance_logs WHERE scanned_at BETWEEN ? AND ?) d
      WHERE s.is_active = 1${args.sectionWhere}
        AND NOT EXISTS (SELECT 1 FROM attendance_logs a
                        WHERE a.student_id = s.id AND a.scanned_at BETWEEN ? AND ? AND DATE(a.scanned_at) = d.day)
-     GROUP BY s.id, s.student_no, s.full_name, s.grade_section, s.parent_phone
-     ORDER BY days_absent DESC, s.grade_section, s.full_name
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
+     ORDER BY days_absent DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name
      LIMIT ${DETAIL_ROW_CAP}`,
-    [args.fromDt, args.toDt, args.fromDt, args.toDt, ...args.sectionParams],
+    // Text order: yearJoin, derived-days BETWEEN, section filter, NOT-EXISTS BETWEEN.
+    [...args.yearParams, args.fromDt, args.toDt, ...args.sectionParams, args.fromDt, args.toDt],
   );
   return rows.map((r) => ({
     studentId: r.student_id,
@@ -533,7 +605,16 @@ async function loadAbsenteeTotals(
 }
 
 async function loadTardinessFrequency(
-  args: { late: string; fromDt: string; toDt: string; sectionWhere: string; sectionParams: unknown[] },
+  args: {
+    late: string;
+    fromDt: string;
+    toDt: string;
+    sectionWhere: string;
+    sectionParams: unknown[];
+    yearJoin: string;
+    yearParams: unknown[];
+    secExpr: string;
+  },
 ): Promise<TardinessFrequencyRow[]> {
   if (!args.late) return [];
   const rows = await db.query<
@@ -545,14 +626,14 @@ async function loadTardinessFrequency(
       late_count: number;
     }[]
   >(
-    `SELECT s.id student_id, s.student_no, s.full_name, s.grade_section, COUNT(*) late_count
-     FROM attendance_logs a JOIN students s ON s.id = a.student_id
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, COUNT(*) late_count
+     FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
      WHERE a.scanned_at BETWEEN ? AND ? AND a.entry_type = 'IN' AND TIME(a.scanned_at) > ?
        ${args.sectionWhere}
-     GROUP BY s.id, s.student_no, s.full_name, s.grade_section
-     ORDER BY late_count DESC, s.grade_section, s.full_name
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}
+     ORDER BY late_count DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name
      LIMIT ${DETAIL_ROW_CAP}`,
-    [args.fromDt, args.toDt, args.late, ...args.sectionParams],
+    [...args.yearParams, args.fromDt, args.toDt, args.late, ...args.sectionParams],
   );
   return rows.map((r) => ({
     studentId: r.student_id,
@@ -579,16 +660,17 @@ async function loadTardiness(
       minutes_late: number;
     }[]
   >(
-    `SELECT a.id, s.student_no, s.full_name, s.grade_section, s.parent_phone,
+    `SELECT a.id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
             DATE_FORMAT(a.scanned_at, '%Y-%m-%d') day,
             DATE_FORMAT(a.scanned_at, '%H:%i') scanned_time,
             TIMESTAMPDIFF(MINUTE, TIMESTAMP(DATE(a.scanned_at), ?), a.scanned_at) minutes_late
-     FROM attendance_logs a JOIN students s ON s.id = a.student_id
+     FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
      WHERE a.scanned_at BETWEEN ? AND ? AND a.entry_type = 'IN' AND TIME(a.scanned_at) > ?
        ${args.sectionWhere}
      ORDER BY a.scanned_at DESC
      LIMIT ${DETAIL_ROW_CAP}`,
-    [args.late, args.fromDt, args.toDt, args.late, ...args.sectionParams],
+    // Text order: SELECT-clause minutes-late cutoff, yearJoin, BETWEEN, late, section.
+    [args.late, ...args.yearParams, args.fromDt, args.toDt, args.late, ...args.sectionParams],
   );
   return rows.map((r) => ({
     id: r.id,
@@ -600,6 +682,133 @@ async function loadTardiness(
     scannedTime: r.scanned_time,
     minutesLate: r.minutes_late,
   }));
+}
+
+async function loadStudentRecord(
+  studentId: number | undefined,
+  args: {
+    late: string;
+    early: string;
+    fromDt: string;
+    toDt: string;
+    schoolDays: number;
+    /** day → distinct-present count (school days have present > 0). */
+    presentByDay: Map<string, number>;
+    maskPhones: boolean;
+    yearJoin: string;
+    yearParams: unknown[];
+    secExpr: string;
+  },
+): Promise<StudentRecord | null> {
+  if (!studentId) return null;
+  const [stu] = await db.query<
+    { student_id: number; student_no: string; full_name: string; grade_section: string; parent_phone: string }[]
+  >(
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone
+     FROM students s ${args.yearJoin} WHERE s.id = ?`,
+    [...args.yearParams, studentId],
+  );
+  if (!stu) return null;
+
+  const scans = await db.query<
+    {
+      id: number;
+      entry_type: 'IN' | 'OUT';
+      day: string;
+      time: string;
+      source: string;
+      flag: string;
+      mins_late: number | null;
+    }[]
+  >(
+    `SELECT a.id, a.entry_type, DATE_FORMAT(a.scanned_at, '%Y-%m-%d') day,
+            DATE_FORMAT(a.scanned_at, '%H:%i') time, a.source,
+            CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ? THEN 'LATE'
+                 WHEN a.entry_type = 'OUT' AND ? <> '' AND TIME(a.scanned_at) < ? THEN 'EARLY'
+                 ELSE '' END flag,
+            CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ?
+                 THEN TIMESTAMPDIFF(MINUTE, TIMESTAMP(DATE(a.scanned_at), ?), a.scanned_at) END mins_late
+     FROM attendance_logs a
+     WHERE a.student_id = ? AND a.scanned_at BETWEEN ? AND ?
+     ORDER BY a.scanned_at ASC
+     LIMIT ${DETAIL_ROW_CAP}`,
+    // Text order: flag CASE (late×2, early×2), mins_late CASE (late×3), WHERE.
+    [args.late, args.late, args.early, args.early, args.late, args.late, args.late, studentId, args.fromDt, args.toDt],
+  );
+  const [smsRow] = await db.query<{ c: number; last_status: string | null }[]>(
+    `SELECT COUNT(*) c, SUBSTRING_INDEX(GROUP_CONCAT(sm.status ORDER BY sm.id DESC), ',', 1) last_status
+     FROM sms_logs sm JOIN attendance_logs al ON al.id = sm.attendance_id
+     WHERE al.student_id = ? AND al.scanned_at BETWEEN ? AND ?`,
+    [studentId, args.fromDt, args.toDt],
+  );
+
+  // Group scans by day (already ascending by scanned_at) and total the summary.
+  const byDay = new Map<string, StudentScanRow[]>();
+  const presentDays = new Set<string>();
+  const lateDays = new Set<string>();
+  let totalIn = 0;
+  let totalOut = 0;
+  let totalMinutesLate = 0;
+  for (const r of scans) {
+    const row: StudentScanRow = {
+      id: r.id,
+      time: r.time,
+      entryType: r.entry_type,
+      flag: r.flag as StudentScanRow['flag'],
+      source: r.source as StudentScanRow['source'],
+    };
+    if (!byDay.has(r.day)) byDay.set(r.day, []);
+    byDay.get(r.day)!.push(row);
+    if (r.entry_type === 'IN') {
+      totalIn++;
+      if (r.flag === 'LATE') {
+        lateDays.add(r.day);
+        totalMinutesLate += r.mins_late ?? 0;
+      }
+    } else {
+      totalOut++;
+    }
+    presentDays.add(r.day);
+  }
+
+  // One row per calendar day: present/late/absent plus the day's scans.
+  const from = parseDay(args.fromDt.slice(0, 10))!;
+  const to = parseDay(args.toDt.slice(0, 10))!;
+  const days: StudentDayRow[] = [];
+  for (let d = new Date(from); d.getTime() <= to.getTime(); d = addDays(d, 1)) {
+    const key = fmtDay(d);
+    const dayScans = byDay.get(key) ?? [];
+    days.push({
+      day: key,
+      schoolDay: (args.presentByDay.get(key) ?? 0) > 0,
+      present: dayScans.length > 0,
+      late: dayScans.some((s) => s.flag === 'LATE'),
+      early: dayScans.some((s) => s.flag === 'EARLY'),
+      firstIn: dayScans.find((s) => s.entryType === 'IN')?.time ?? null,
+      lastOut: [...dayScans].reverse().find((s) => s.entryType === 'OUT')?.time ?? null,
+      scans: dayScans,
+    });
+  }
+
+  return {
+    studentId: stu.student_id,
+    studentNo: stu.student_no,
+    fullName: stu.full_name,
+    gradeSection: stu.grade_section,
+    parentPhone: args.maskPhones ? maskPhone(stu.parent_phone) : stu.parent_phone,
+    summary: {
+      daysPresent: presentDays.size,
+      daysLate: lateDays.size,
+      daysAbsent: Math.max(0, args.schoolDays - presentDays.size),
+      attendanceRate: args.schoolDays > 0 ? (presentDays.size / args.schoolDays) * 100 : null,
+      totalIn,
+      totalOut,
+      totalMinutesLate,
+      smsCount: smsRow?.c ?? 0,
+      lastSmsStatus: (smsRow?.last_status as SmsStatus) || null,
+    },
+    days,
+  };
 }
 
 async function loadSmsAudit(args: { maskPhones: boolean; fromDt: string; toDt: string }): Promise<{

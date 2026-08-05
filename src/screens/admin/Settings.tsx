@@ -1,9 +1,10 @@
 // Settings: global toggles, debounce timeout, SMS provider + port selection,
-// and SMTP email config for report delivery.
+// school years, and SMTP email config for report delivery.
 import { useEffect, useRef, useState } from 'react';
-import type { Settings } from '../../../shared/types';
+import type { SchoolYear, Settings } from '../../../shared/types';
 import { api } from '../../lib/api';
 import { Spinner, Toast } from '../../components/shared';
+import { useSchoolYear } from './schoolYear';
 
 // Reads an image file, downscales it to a small thumbnail and returns it as a
 // JPEG data URI (same pattern as the Students photo upload). Works in Electron
@@ -41,15 +42,74 @@ function fileToResizedDataUrl(file: File, maxSize = 320, quality = 0.78): Promis
 }
 
 export function SettingsPage({ onSettingsSaved }: { onSettingsSaved?: () => void }) {
+  const { refresh: refreshYears } = useSchoolYear();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [logoError, setLogoError] = useState<string | null>(null);
   const [testingEmail, setTestingEmail] = useState(false);
+  const [schoolYears, setSchoolYears] = useState<SchoolYear[]>([]);
+  const [newYear, setNewYear] = useState('');
+  const [yearBusy, setYearBusy] = useState(false);
   const logoRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void api.getSettings().then(setSettings);
+    void api.listSchoolYears().then(setSchoolYears);
   }, []);
+
+  const addSchoolYear = async () => {
+    const name = newYear.trim();
+    if (!name) {
+      setToast('Enter a school year first — e.g. 2027 - 2028.');
+      setTimeout(() => setToast(null), 3500);
+      return;
+    }
+    setYearBusy(true);
+    try {
+      const sy = await api.saveSchoolYear(name);
+      setSchoolYears(await api.listSchoolYears());
+      void refreshYears();
+      setNewYear('');
+      setToast(`School year ${sy.name} added.`);
+    } catch (err) {
+      setToast(`Error: ${(err as Error).message}`);
+    } finally {
+      setYearBusy(false);
+      setTimeout(() => setToast(null), 3500);
+    }
+  };
+
+  const setCurrentYear = async (name: string) => {
+    if (!window.confirm(`Set ${name} as the current school year?\n\nStudents' current sections will be cleared for the new year unless it already has enrollments. Past years are kept as history.`)) return;
+    setYearBusy(true);
+    try {
+      await api.setCurrentSchoolYear(name);
+      setSchoolYears(await api.listSchoolYears());
+      void refreshYears();
+      setToast(`${name} is now the current school year.`);
+    } catch (err) {
+      setToast(`Error: ${(err as Error).message}`);
+    } finally {
+      setYearBusy(false);
+      setTimeout(() => setToast(null), 3500);
+    }
+  };
+
+  const deleteYear = async (name: string) => {
+    if (!window.confirm(`Delete school year ${name}? Its enrollment records will be removed.`)) return;
+    setYearBusy(true);
+    try {
+      await api.deleteSchoolYear(name);
+      setSchoolYears(await api.listSchoolYears());
+      void refreshYears();
+      setToast(`School year ${name} deleted.`);
+    } catch (err) {
+      setToast(`Error: ${(err as Error).message}`);
+    } finally {
+      setYearBusy(false);
+      setTimeout(() => setToast(null), 3500);
+    }
+  };
 
   const set = <K extends keyof Settings>(key: K, value: Settings[K]) =>
     setSettings((s) => (s ? { ...s, [key]: value } : s));
@@ -173,9 +233,41 @@ export function SettingsPage({ onSettingsSaved }: { onSettingsSaved?: () => void
               {' '}— <code>{'{{flag}}'}</code> shows LATE / EARLY for flagged scans (leave it out for plain alerts).
             </p>
           </div>
-        </div>
+        </div>          <div className="settings-card">
+            <h3>School years</h3>
+            <p className="field-hint" style={{ marginTop: -6 }}>
+              Students are enrolled in sections per school year (e.g. 2026 - 2027). The current year's roster drives attendance &amp; reports.
+            </p>
+            {schoolYears.map((y) => (
+              <div key={y.name} className="school-year-row">
+                <span className="mono">{y.name}</span>
+                {y.is_current ? (
+                  <span className="pill pill-success">CURRENT</span>
+                ) : (
+                  <div className="photo-btn-row">
+                    <button type="button" className="btn-ghost" disabled={yearBusy} onClick={() => void setCurrentYear(y.name)}>
+                      Set current
+                    </button>
+                    <button type="button" className="btn-icon danger" disabled={yearBusy} title="Delete year" onClick={() => void deleteYear(y.name)}>
+                      🗑
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+            <div className="field">
+              <label>Add school year</label>
+              <div className="field-row">
+                <input value={newYear} onChange={(e) => setNewYear(e.target.value)} placeholder="2027 - 2028" />
+                <button type="button" className="btn-ghost" disabled={yearBusy} onClick={() => void addSchoolYear()} style={{ whiteSpace: 'nowrap' }}>
+                  + Add year
+                </button>
+              </div>
+              <p className="field-hint">Example format: 2026 - 2027. Setting a year as current clears students' sections for the new year (past rosters are kept).</p>
+            </div>
+          </div>
 
-        <div className="settings-card">
+          <div className="settings-card">
           <h3>Bell times &amp; absence detection</h3>
           <div className="field-row">
             <div className="field">

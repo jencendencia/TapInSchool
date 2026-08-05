@@ -3,7 +3,9 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   ActivityItem,
+  AdviserSendResult,
   EmailResult,
+  EnrollmentRow,
   ExportResult,
   ImportResult,
   LogFilter,
@@ -13,6 +15,9 @@ import type {
   ReportQuery,
   ScanResult,
   ScanSource,
+  SchoolYear,
+  Section,
+  SectionInput,
   Settings,
   SmsFilter,
   SmsLog,
@@ -67,6 +72,21 @@ const api: TapinApi = {
   updateSettings: (patch: Partial<Settings>) =>
     ipcRenderer.invoke('tapin:updateSettings', patch) as Promise<Settings>,
 
+  listSections: () => ipcRenderer.invoke('tapin:listSections') as Promise<Section[]>,
+  saveSection: (input: SectionInput) => ipcRenderer.invoke('tapin:saveSection', input) as Promise<Section>,
+  deleteSection: (gradeSection: string) =>
+    ipcRenderer.invoke('tapin:deleteSection', gradeSection) as Promise<void>,
+  assignStudentsToSection: (studentIds: number[], gradeSection: string, schoolYear: string) =>
+    ipcRenderer.invoke('tapin:assignStudentsToSection', studentIds, gradeSection, schoolYear) as Promise<number>,
+  setStudentEnrollment: (studentId: number, schoolYear: string, gradeSection: string) =>
+    ipcRenderer.invoke('tapin:setStudentEnrollment', studentId, schoolYear, gradeSection) as Promise<void>,
+  listEnrollments: (schoolYear: string) =>
+    ipcRenderer.invoke('tapin:listEnrollments', schoolYear) as Promise<EnrollmentRow[]>,
+  listSchoolYears: () => ipcRenderer.invoke('tapin:listSchoolYears') as Promise<SchoolYear[]>,
+  saveSchoolYear: (name: string) => ipcRenderer.invoke('tapin:saveSchoolYear', name) as Promise<SchoolYear>,
+  setCurrentSchoolYear: (name: string) => ipcRenderer.invoke('tapin:setCurrentSchoolYear', name) as Promise<void>,
+  deleteSchoolYear: (name: string) => ipcRenderer.invoke('tapin:deleteSchoolYear', name) as Promise<void>,
+
   getReport: (query: ReportQuery) => ipcRenderer.invoke('tapin:getReport', query) as Promise<ReportData>,
   exportReportPdf: (report: ReportData) =>
     ipcRenderer.invoke('tapin:exportReportPdf', report) as Promise<ExportResult>,
@@ -75,6 +95,8 @@ const api: TapinApi = {
   sendReportEmail: (report: ReportData) =>
     ipcRenderer.invoke('tapin:sendReportEmail', report) as Promise<EmailResult>,
   testEmail: (to: string) => ipcRenderer.invoke('tapin:testEmail', to) as Promise<EmailResult>,
+  sendReportToAdvisers: (from: string, to: string, schoolYear?: string) =>
+    ipcRenderer.invoke('tapin:sendReportToAdvisers', from, to, schoolYear) as Promise<AdviserSendResult>,
 
   onScanResult: (cb) => on<ScanResult>('tapin:scan-result', cb),
   onActivity: (cb) => on<ActivityItem[]>('tapin:activity', cb),

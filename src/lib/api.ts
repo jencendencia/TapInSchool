@@ -7,9 +7,12 @@ import type {
   AbsenteeRow,
   AbsenteeTotalsRow,
   ActivityItem,
+  AdviserSendDetail,
+  AdviserSendResult,
   AttendanceFlag,
   AttendanceLogRow,
   EmailResult,
+  EnrollmentRow,
   EntryType,
   ExportResult,
   ImportResult,
@@ -25,18 +28,25 @@ import type {
   ReportType,
   ScanResult,
   ScanSource,
+  SchoolYear,
+  Section,
+  SectionInput,
   Settings,
   SmsFilter,
   SmsLogRow,
   SmsStatus,
   Student,
+  StudentDayRow,
   StudentInput,
+  StudentRecord,
+  StudentScanRow,
   SystemStatus,
   TapinApi,
   TardinessFrequencyRow,
   TardinessRow,
 } from '../../shared/types';
 import { buildReportHtml } from '../../shared/report-html';
+import { compareGrades } from './sort';
 
 export const isElectron = typeof window !== 'undefined' && !!window.tapin;
 
@@ -63,6 +73,17 @@ export function mockMaskPhone(phone: string): string {
   const digits = phone.replace(/\D/g, '');
   if (digits.length < 7) return phone;
   return `+${digits.slice(0, 5)}*****${digits.slice(-2)}`;
+}
+
+/**
+ * Splits "Grade 7 - Section A" into grade "Grade 7" / section "Section A".
+ * Matches the SQL backfill in electron/db/schema.ts and the IPC splitSection.
+ */
+function splitSection(name: string): { grade: string; section: string } {
+  const first = name.indexOf(' - ');
+  const last = name.lastIndexOf(' - ');
+  if (first >= 0) return { grade: name.slice(0, first).trim(), section: name.slice(last + 3).trim() };
+  return { grade: name.trim(), section: '' };
 }
 
 const DEFAULT_MOCK_SETTINGS: Settings = {
@@ -104,9 +125,14 @@ class MockApi implements TapinApi {
   private students: Student[];
   private logs: AttendanceLogRow[] = [];
   private sms: SmsLogRow[] = [];
+  private sections: Section[] = [];
+  private schoolYears: SchoolYear[] = [];
+  private enrollments: { studentId: number; schoolYear: string; gradeSection: string }[] = [];
   private settings: Settings = { ...DEFAULT_MOCK_SETTINGS };
   private idSeq = 1;
   private smsIdSeq = 1;
+  private sectionIdSeq = 1;
+  private schoolYearIdSeq = 1;
   private lastScanByStudent = new Map<number, { time: number; type: EntryType }>();
   private scanCbs = new Set<(r: ScanResult) => void>();
   private activityCbs = new Set<(items: ActivityItem[]) => void>();
@@ -132,6 +158,34 @@ class MockApi implements TapinApi {
       is_active: true,
       created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
     }));
+
+    // Demo sections cover every section the demo students belong to (so the
+    // registry matches the roster). First two have adviser emails; the rest
+    // are registered without one (NO EMAIL pill) to demo the flow.
+    const demoSections: Array<[string, string, string]> = [
+      ['Grade 7 - Section A', 'Ms. Maria Reyes', 'maria.reyes@example.com'],
+      ['Grade 8 - Section B', 'Mr. Carlo Mendoza', 'carlo.mendoza@example.com'],
+      ['Grade 9 - Section C', '', ''],
+      ['Grade 10 - Section D', '', ''],
+      ['Grade 11 - STEM', '', ''],
+    ];
+    this.sections = demoSections.map(([grade_section, adviser_name, email]) => ({
+      id: this.sectionIdSeq++,
+      grade_section,
+      ...splitSection(grade_section),
+      adviser_name,
+      email,
+      created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
+    }));
+
+    // Demo school year + enrollments: one current year, seeded from the demo
+    // students' sections so the roster matches the current roster.
+    this.schoolYears = [
+      { id: this.schoolYearIdSeq++, name: '2026 - 2027', is_current: true, created_at: new Date().toISOString() },
+    ];
+    this.enrollments = this.students
+      .filter((s) => s.grade_section)
+      .map((s) => ({ studentId: s.id, schoolYear: '2026 - 2027', gradeSection: s.grade_section }));
 
     // Seed a week of history so the admin dashboard looks alive.
     for (let d = 6; d >= 0; d--) {
@@ -388,30 +442,54 @@ class MockApi implements TapinApi {
   }
 
   async createStudent(input: StudentInput): Promise<Student> {
+    // students.grade_section is the CURRENT year's live section — a student
+    // enrolled into a past year starts unassigned this year (mirrors ipc.ts).
+    const year = (input.school_year || '').trim() || this.currentYearName();
+    const isCurrent = year ? (this.schoolYears.find((y) => y.name === year)?.is_current ?? false) : false;
     const s: Student = {
       id: this.idSeq++,
       student_no: input.student_no,
       qr_hash_payload: mockPayload(input.student_no),
       full_name: input.full_name,
-      grade_section: input.grade_section || '',
+      grade_section: isCurrent ? (input.grade_section || '') : '',
       parent_phone: input.parent_phone || '',
       photo_url: input.photo_url ?? null,
       is_active: input.is_active ?? true,
       created_at: new Date().toISOString(),
     };
     this.students.push(s);
+    // The enrollment is recorded for the requested (or current) school year.
+    if (input.grade_section && year) {
+      this.enrollments.push({ studentId: s.id, schoolYear: year, gradeSection: input.grade_section });
+    }
     return s;
   }
 
   async updateStudent(id: number, input: Partial<StudentInput>): Promise<Student> {
     const s = this.students.find((x) => x.id === id);
     if (!s) throw new Error('Student not found');
-    Object.assign(s, input);
+    // school_year is an enrollment hint, not a student column — keep it off the row.
+    const { school_year, ...studentFields } = input;
+    const prevSection = s.grade_section;
+    Object.assign(s, studentFields);
+    // Keep the requested (or current) school year's enrollment in sync when the
+    // section changes. Only the current year's enrollment mirrors onto
+    // students.grade_section (the live section).
+    if ('grade_section' in input) {
+      const year = (school_year || '').trim() || this.currentYearName();
+      const isCurrent = year ? (this.schoolYears.find((y) => y.name === year)?.is_current ?? false) : false;
+      if (!isCurrent) s.grade_section = prevSection;
+      this.enrollments = this.enrollments.filter((e) => !(e.studentId === id && e.schoolYear === year));
+      if (year && input.grade_section) {
+        this.enrollments.push({ studentId: id, schoolYear: year, gradeSection: input.grade_section });
+      }
+    }
     return { ...s };
   }
 
   async deleteStudent(id: number): Promise<void> {
     this.students = this.students.filter((s) => s.id !== id);
+    this.enrollments = this.enrollments.filter((e) => e.studentId !== id);
   }
 
   async generateQrPayload(studentNo: string): Promise<string> {
@@ -469,6 +547,14 @@ class MockApi implements TapinApi {
     if (filter.entryType) rows = rows.filter((r) => r.entry_type === filter.entryType);
     if (filter.from) rows = rows.filter((r) => r.scanned_at >= filter.from!);
     if (filter.to) rows = rows.filter((r) => r.scanned_at <= filter.to!);
+    // Grouped by grade (numerically: Grade 7 before Grade 10), section, then
+    // newest first — mirrors the real listLogs ordering.
+    rows.sort(
+      (a, b) =>
+        compareGrades(a.grade_section, b.grade_section) ||
+        a.grade_section.localeCompare(b.grade_section) ||
+        (a.scanned_at < b.scanned_at ? 1 : -1),
+    );
     const total = rows.length;
     const offset = filter.offset ?? 0;
     const limit = filter.limit ?? 50;
@@ -520,10 +606,144 @@ class MockApi implements TapinApi {
     return { ...this.settings };
   }
 
+  async listSections(): Promise<Section[]> {
+    return [...this.sections].sort((a, b) => a.grade_section.localeCompare(b.grade_section));
+  }
+
+  async saveSection(input: SectionInput): Promise<Section> {
+    const gradeSection = (input.grade_section || '').trim();
+    const grade = (input.grade || '').trim() || splitSection(gradeSection).grade;
+    const section = (input.section || '').trim() || splitSection(gradeSection).section;
+    const existing = this.sections.find((a) => a.grade_section === gradeSection);
+    if (existing) {
+      existing.grade = grade;
+      existing.section = section;
+      existing.adviser_name = (input.adviser_name || '').trim();
+      existing.email = (input.email || '').trim();
+      return { ...existing };
+    }
+    const sectionRow: Section = {
+      id: this.sectionIdSeq++,
+      grade_section: gradeSection,
+      grade,
+      section,
+      adviser_name: (input.adviser_name || '').trim(),
+      email: (input.email || '').trim(),
+      created_at: new Date().toISOString(),
+    };
+    this.sections.push(sectionRow);
+    return { ...sectionRow };
+  }
+
+  async deleteSection(gradeSection: string): Promise<void> {
+    this.sections = this.sections.filter((a) => a.grade_section !== gradeSection);
+  }
+
+  private currentYearName(): string {
+    return this.schoolYears.find((y) => y.is_current)?.name ?? this.schoolYears[0]?.name ?? '';
+  }
+
+  async assignStudentsToSection(studentIds: number[], gradeSection: string, schoolYear: string): Promise<number> {
+    const section = (gradeSection || '').trim();
+    const year = (schoolYear || '').trim();
+    if (!section || !year) throw new Error('Section and school year are required.');
+    if (!this.sections.some((s) => s.grade_section === section)) {
+      const { grade, section: part } = splitSection(section);
+      await this.saveSection({ grade_section: section, grade, section: part, adviser_name: '', email: '' });
+    }
+    const isCurrent = this.schoolYears.find((y) => y.name === year)?.is_current ?? false;
+    const ids = new Set(studentIds);
+    let count = 0;
+    for (const st of this.students) {
+      if (!ids.has(st.id)) continue;
+      this.enrollments = this.enrollments.filter((e) => !(e.studentId === st.id && e.schoolYear === year));
+      this.enrollments.push({ studentId: st.id, schoolYear: year, gradeSection: section });
+      if (isCurrent) st.grade_section = section;
+      count++;
+    }
+    return count;
+  }
+
+  async setStudentEnrollment(studentId: number, schoolYear: string, gradeSection: string): Promise<void> {
+    const year = (schoolYear || '').trim();
+    const section = (gradeSection || '').trim();
+    if (!year) throw new Error('School year is required.');
+    const isCurrent = this.schoolYears.find((y) => y.name === year)?.is_current ?? false;
+    this.enrollments = this.enrollments.filter((e) => !(e.studentId === studentId && e.schoolYear === year));
+    const st = this.students.find((s) => s.id === studentId);
+    if (section) {
+      this.enrollments.push({ studentId, schoolYear: year, gradeSection: section });
+      if (st && isCurrent) st.grade_section = section;
+    } else if (st && isCurrent) {
+      st.grade_section = '';
+    }
+  }
+
+  async listEnrollments(schoolYear: string): Promise<EnrollmentRow[]> {
+    return this.enrollments
+      .filter((e) => e.schoolYear === schoolYear && e.gradeSection)
+      .map((e) => ({ studentId: e.studentId, gradeSection: e.gradeSection }));
+  }
+
+  async listSchoolYears(): Promise<SchoolYear[]> {
+    if (!this.schoolYears.length) {
+      this.schoolYears = [
+        { id: this.schoolYearIdSeq++, name: '2026 - 2027', is_current: true, created_at: new Date().toISOString() },
+      ];
+    }
+    if (!this.schoolYears.some((y) => y.is_current) && this.schoolYears.length) {
+      this.schoolYears.forEach((y, i) => (y.is_current = i === 0));
+    }
+    return [...this.schoolYears].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async saveSchoolYear(name: string): Promise<SchoolYear> {
+    const year = (name || '').trim();
+    if (!year) throw new Error('School year is required.');
+    const existing = this.schoolYears.find((y) => y.name === year);
+    if (existing) return { ...existing };
+    const sy: SchoolYear = {
+      id: this.schoolYearIdSeq++,
+      name: year,
+      is_current: false,
+      created_at: new Date().toISOString(),
+    };
+    this.schoolYears.push(sy);
+    return { ...sy };
+  }
+
+  async setCurrentSchoolYear(name: string): Promise<void> {
+    const year = (name || '').trim();
+    if (!this.schoolYears.some((y) => y.name === year)) throw new Error('School year not found.');
+    this.schoolYears.forEach((y) => (y.is_current = y.name === year));
+    // Rollover: rebuild current sections from the new year's enrollments
+    // (a fresh year clears every student's section).
+    for (const st of this.students) {
+      const enr = this.enrollments.find((e) => e.studentId === st.id && e.schoolYear === year);
+      st.grade_section = enr?.gradeSection ?? '';
+    }
+  }
+
+  async deleteSchoolYear(name: string): Promise<void> {
+    const year = (name || '').trim();
+    const row = this.schoolYears.find((y) => y.name === year);
+    if (row?.is_current) throw new Error('Cannot delete the current school year.');
+    this.schoolYears = this.schoolYears.filter((y) => y.name !== year);
+    this.enrollments = this.enrollments.filter((e) => e.schoolYear !== year);
+  }
+
   async getReport(query: ReportQuery): Promise<ReportData> {
     const type: ReportType = query.type ?? 'summary';
     const section = (query.section ?? '').trim();
     const maskPhones = !!query.maskPhones;
+    const schoolYear = (query.schoolYear ?? '').trim();
+    const studentId = query.studentId;
+    // Section groupings reflect the SELECTED school year's enrollments, falling
+    // back to the live (current-year) section — mirrors electron/services/report.ts.
+    const yearSection = new Map(
+      this.enrollments.filter((e) => e.schoolYear === schoolYear && e.gradeSection).map((e) => [e.studentId, e.gradeSection]),
+    );
+    const secOf = (s: Student) => yearSection.get(s.id) ?? s.grade_section;
     const { from, to } = query;
     const dayOf = (iso: string) => iso.slice(0, 10);
     const pad = (n: number) => String(n).padStart(2, '0');
@@ -533,7 +753,7 @@ class MockApi implements TapinApi {
 
     const logs = this.logs.filter((l) => dayOf(l.scanned_at) >= from && dayOf(l.scanned_at) <= to);
     const active = this.students.filter((s) => s.is_active);
-    const activeSection = section ? active.filter((s) => s.grade_section === section) : active;
+    const activeSection = section ? active.filter((s) => secOf(s) === section) : active;
 
     // Cutoffs mirroring electron/services/bell-times.ts.
     const parseT = (raw: string) => {
@@ -590,7 +810,7 @@ class MockApi implements TapinApi {
 
     const smsInRange = this.sms.filter((s) => dayOf(s.created_at) >= from && dayOf(s.created_at) <= to);
     const presentDistinct = new Set(logs.map((l) => l.student_id)).size;
-    const sections = [...new Set(this.students.map((s) => s.grade_section).filter(Boolean))].sort();
+    const sections = [...new Set(this.students.map((s) => secOf(s)).filter(Boolean))].sort(compareGrades);
 
     // At-risk: active students with attendance < 80%.
     let atRiskCount = 0;
@@ -624,6 +844,7 @@ class MockApi implements TapinApi {
     const tardinessFrequency: TardinessFrequencyRow[] = [];
     const smsAudit: ReportData['smsAudit'] = { daily: [], failures: [] };
     let trends: ReportTrends = { weekly: [], dayOfWeek: [], gateHours: [] };
+    let studentRecord: StudentRecord | null = null;
 
     if (type === 'per-student') {
       for (const s of activeSection) {
@@ -639,7 +860,7 @@ class MockApi implements TapinApi {
           studentId: s.id,
           studentNo: s.student_no,
           fullName: s.full_name,
-          gradeSection: s.grade_section,
+          gradeSection: secOf(s),
           parentPhone: phone(s.parent_phone),
           daysPresent: presentDays,
           daysLate: lateDays,
@@ -652,13 +873,17 @@ class MockApi implements TapinApi {
           lastSmsStatus: (lastSmsForStudent.get(s.id)?.status as SmsStatus) ?? null,
         });
       }
+      perStudent.sort(
+        (a, b) => compareGrades(a.gradeSection, b.gradeSection) || a.fullName.localeCompare(b.fullName),
+      );
     } else if (type === 'per-section') {
       const bySection = new Map<string, typeof active>();
       for (const s of active) {
-        if (!bySection.has(s.grade_section)) bySection.set(s.grade_section, []);
-        bySection.get(s.grade_section)!.push(s);
+        const gs = secOf(s);
+        if (!bySection.has(gs)) bySection.set(gs, []);
+        bySection.get(gs)!.push(s);
       }
-      for (const [gradeSection, studs] of [...bySection.entries()].sort()) {
+      for (const [gradeSection, studs] of [...bySection.entries()].sort((a, b) => compareGrades(a[0], b[0]))) {
         const sectionLogs = logs.filter((l) => studs.some((s) => s.id === l.student_id));
         const present = new Set(sectionLogs.map((l) => l.student_id)).size;
         const dayPresentSum = new Map<string, Set<number>>();
@@ -691,12 +916,14 @@ class MockApi implements TapinApi {
         windowTo,
         capped,
         days: schoolDayList.filter((d) => d >= windowFrom && d <= windowTo),
-        students: activeSection.map((s) => ({
-          studentId: s.id,
-          studentNo: s.student_no,
-          fullName: s.full_name,
-          gradeSection: s.grade_section,
-        })),
+        students: activeSection
+          .map((s) => ({
+            studentId: s.id,
+            studentNo: s.student_no,
+            fullName: s.full_name,
+            gradeSection: secOf(s),
+          }))
+          .sort((a, b) => compareGrades(a.gradeSection, b.gradeSection) || a.fullName.localeCompare(b.fullName)),
         rows: [],
       };
       const windowLogs = logs.filter((l) => dayOf(l.scanned_at) >= windowFrom && dayOf(l.scanned_at) <= windowTo);
@@ -725,7 +952,7 @@ class MockApi implements TapinApi {
             studentId: s.id,
             studentNo: s.student_no,
             fullName: s.full_name,
-            gradeSection: s.grade_section,
+            gradeSection: secOf(s),
             parentPhone: phone(s.parent_phone),
             day: d,
             smsSent,
@@ -744,25 +971,27 @@ class MockApi implements TapinApi {
           studentId: s.id,
           studentNo: s.student_no,
           fullName: s.full_name,
-          gradeSection: s.grade_section,
+          gradeSection: secOf(s),
           parentPhone: phone(s.parent_phone),
           daysAbsent,
         });
       }
-      absenteeTotals.sort((a, b) => b.daysAbsent - a.daysAbsent || a.fullName.localeCompare(b.fullName));
+      absenteeTotals.sort(
+        (a, b) => b.daysAbsent - a.daysAbsent || compareGrades(a.gradeSection, b.gradeSection) || a.fullName.localeCompare(b.fullName),
+      );
     } else if (type === 'tardiness') {
       const lateLogs = logs.filter((l) => l.entry_type === 'IN' && flag(l) === 'LATE');
       const freq = new Map<number, number>();
       for (const l of lateLogs.slice(0, 3000)) {
         const student = this.students.find((s) => s.id === l.student_id);
         if (!student) continue;
-        if (section && student.grade_section !== section) continue;
+        if (section && secOf(student) !== section) continue;
         const at = scanOf(l);
         tardiness.push({
           id: l.id,
           studentNo: student.student_no,
           fullName: student.full_name,
-          gradeSection: student.grade_section,
+          gradeSection: secOf(student),
           parentPhone: phone(student.parent_phone),
           day: dayOf(l.scanned_at),
           scannedTime: hm(at),
@@ -778,12 +1007,12 @@ class MockApi implements TapinApi {
           studentId: sid,
           studentNo: student.student_no,
           fullName: student.full_name,
-          gradeSection: student.grade_section,
+          gradeSection: secOf(student),
           lateCount,
         });
       }
       tardinessFrequency.sort(
-        (a, b) => b.lateCount - a.lateCount || a.fullName.localeCompare(b.fullName),
+        (a, b) => b.lateCount - a.lateCount || compareGrades(a.gradeSection, b.gradeSection) || a.fullName.localeCompare(b.fullName),
       );
     } else if (type === 'sms-audit') {
       const byDay = new Map<string, { sent: number; pending: number; failed: number }>();
@@ -810,6 +1039,69 @@ class MockApi implements TapinApi {
           error: sm.error,
           createdAt: sm.created_at,
         }));
+    } else if (type === 'student') {
+      const s = studentId ? this.students.find((x) => x.id === Number(studentId)) : undefined;
+      if (s) {
+        const sLogs = logs.filter((l) => l.student_id === s.id);
+        const byDay = new Map<string, StudentScanRow[]>();
+        const presentDays = new Set<string>();
+        const lateDays = new Set<string>();
+        let totalIn = 0;
+        let totalOut = 0;
+        let totalMinutesLate = 0;
+        for (const l of sLogs) {
+          const d = dayOf(l.scanned_at);
+          const at = scanOf(l);
+          const f = flag(l);
+          const row: StudentScanRow = { id: l.id, time: hm(at), entryType: l.entry_type, flag: f, source: l.source };
+          if (!byDay.has(d)) byDay.set(d, []);
+          byDay.get(d)!.push(row);
+          if (l.entry_type === 'IN') {
+            totalIn++;
+            if (f === 'LATE' && lateMins !== null) {
+              lateDays.add(d);
+              totalMinutesLate += Math.max(0, at.getHours() * 60 + at.getMinutes() - lateMins);
+            }
+          } else {
+            totalOut++;
+          }
+          presentDays.add(d);
+        }
+        const days: StudentDayRow[] = [];
+        for (let t = new Date(`${from}T00:00:00`); t <= end; t.setDate(t.getDate() + 1)) {
+          const d = dayOf(t.toISOString());
+          const scans = byDay.get(d) ?? [];
+          days.push({
+            day: d,
+            schoolDay: dayPresent.has(d),
+            present: scans.length > 0,
+            late: scans.some((x) => x.flag === 'LATE'),
+            early: scans.some((x) => x.flag === 'EARLY'),
+            firstIn: scans.find((x) => x.entryType === 'IN')?.time ?? null,
+            lastOut: [...scans].reverse().find((x) => x.entryType === 'OUT')?.time ?? null,
+            scans,
+          });
+        }
+        studentRecord = {
+          studentId: s.id,
+          studentNo: s.student_no,
+          fullName: s.full_name,
+          gradeSection: secOf(s),
+          parentPhone: phone(s.parent_phone),
+          summary: {
+            daysPresent: presentDays.size,
+            daysLate: lateDays.size,
+            daysAbsent: Math.max(0, schoolDays - presentDays.size),
+            attendanceRate: schoolDays > 0 ? (presentDays.size / schoolDays) * 100 : null,
+            totalIn,
+            totalOut,
+            totalMinutesLate,
+            smsCount: smsForStudent.get(s.id) ?? 0,
+            lastSmsStatus: (lastSmsForStudent.get(s.id)?.status as SmsStatus) ?? null,
+          },
+          days,
+        };
+      }
     } else if (type === 'trends') {
       const isoWeekStart = (day: string) => {
         const [y, m, d] = day.split('-').map(Number);
@@ -850,11 +1142,14 @@ class MockApi implements TapinApi {
       schoolName: this.settings.school_name || 'TapIn School',
       from,
       to,
+      schoolYear,
       generatedAt: new Date().toISOString(),
       type,
       section,
       maskPhones,
       sections,
+      studentId,
+      studentRecord,
       cutoffs,
       summary: {
         scans: logs.length,
@@ -934,6 +1229,48 @@ class MockApi implements TapinApi {
     const body = encodeURIComponent('This is a test email from TapIn School (browser demo mode).');
     window.location.href = `mailto:${encodeURIComponent(to)}?subject=${subject}&body=${body}`;
     return { ok: true, message: `Opened your email app for ${to}.` };
+  }
+
+  async sendReportToAdvisers(from: string, to: string, schoolYear?: string): Promise<AdviserSendResult> {
+    // Browser mock: no SMTP, so this just builds each per-section report and
+    // reports a per-adviser success (nothing is actually emailed).
+    const valid = (e: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+    const withEmail = this.sections.filter((a) => a.email && valid(a.email));
+    const skipped = this.sections.length - withEmail.length;
+    const details: AdviserSendDetail[] = [];
+    for (const a of withEmail) {
+      try {
+        await this.getReport({ from, to, type: 'per-student', section: a.grade_section, maskPhones: false, schoolYear });
+        details.push({
+          gradeSection: a.grade_section,
+          adviserName: a.adviser_name,
+          email: a.email,
+          ok: true,
+          detail: `Sent to ${a.email} (demo)`,
+        });
+      } catch (err) {
+        details.push({
+          gradeSection: a.grade_section,
+          adviserName: a.adviser_name,
+          email: a.email,
+          ok: false,
+          detail: (err as Error).message,
+        });
+      }
+    }
+    const sent = details.filter((d) => d.ok).length;
+    const failed = details.length - sent;
+    return {
+      ok: sent > 0 && failed === 0,
+      message:
+        `Reports emailed to ${sent} adviser${sent === 1 ? '' : 's'}` +
+        `${skipped ? `; ${skipped} skipped (no valid email)` : ''}` +
+        `${failed ? `; ${failed} failed` : ''}. (Browser demo — no real email sent.)`,
+      sent,
+      skipped,
+      failed,
+      details,
+    };
   }
 
   async exportReportXlsx(report: ReportData): Promise<ExportResult> {

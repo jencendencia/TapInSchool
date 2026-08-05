@@ -4,19 +4,23 @@ import { useEffect, useState } from 'react';
 import type { Settings } from '../../../shared/types';
 import { api, isElectron } from '../../lib/api';
 import { WindowControls } from '../../components/WindowControls';
+import { SchoolYearSelect } from '../../components/SchoolYearSelect';
+import { SchoolYearProvider } from './schoolYear';
 import { OverviewPage } from './Overview';
 import { StudentsPage } from './Students';
+import { SectionsPage } from './Sections';
 import { LogsPage } from './Logs';
 import { SmsOutboxPage } from './SmsOutbox';
 import { SettingsPage } from './Settings';
 import { ReportsPage } from './Reports';
 import { SchoolLogo } from '../../components/shared';
 
-type Tab = 'overview' | 'students' | 'logs' | 'reports' | 'sms' | 'settings';
+type Tab = 'overview' | 'students' | 'sections' | 'logs' | 'reports' | 'sms' | 'settings';
 
 const NAV: { id: Tab; label: string; icon: string }[] = [
   { id: 'overview', label: 'Overview', icon: '📊' },
   { id: 'students', label: 'Students', icon: '🧑‍🎓' },
+  { id: 'sections', label: 'Sections', icon: '🧑‍🏫' },
   { id: 'logs', label: 'Attendance Logs', icon: '🕐' },
   { id: 'reports', label: 'Reports', icon: '📄' },
   { id: 'sms', label: 'SMS Outbox', icon: '✉' },
@@ -34,14 +38,16 @@ export function AdminDashboard({ onBackToKiosk, onLogout }: { onBackToKiosk: () 
   }, [tab]);
 
   return (
-    <div className="admin">
-      {isElectron && (
+    <SchoolYearProvider>
+      <div className="admin">
         <div className="admin-titlebar">
           <span className="admin-titlebar-label">{settings?.school_name || 'TapIn School'} · Admin</span>
-          <WindowControls />
+          <div className="admin-titlebar-right">
+            <SchoolYearSelect />
+            {isElectron && <WindowControls />}
+          </div>
         </div>
-      )}
-      <div className="admin-body">
+        <div className="admin-body">
         <aside className="admin-sidebar">
           <div className="admin-brand">
             <div className="kiosk-logo">
@@ -76,6 +82,7 @@ export function AdminDashboard({ onBackToKiosk, onLogout }: { onBackToKiosk: () 
         <main className="admin-main">
           {tab === 'overview' && <OverviewPage />}
           {tab === 'students' && <StudentsPage />}
+          {tab === 'sections' && <SectionsPage />}
           {tab === 'logs' && <LogsPage />}
           {tab === 'reports' && <ReportsPage />}
           {tab === 'sms' && <SmsOutboxPage />}
@@ -87,7 +94,8 @@ export function AdminDashboard({ onBackToKiosk, onLogout }: { onBackToKiosk: () 
             />
           )}
         </main>
+        </div>
       </div>
-    </div>
+    </SchoolYearProvider>
   );
 }

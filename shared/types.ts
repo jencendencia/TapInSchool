@@ -42,6 +42,12 @@ export interface StudentInput {
   /** URL or inline data URI of the uploaded student photo (resized thumbnail). */
   photo_url?: string | null;
   is_active?: boolean;
+  /**
+   * School year to record the enrollment in (defaults to the current year).
+   * Only the CURRENT year's enrollment is mirrored onto students.grade_section
+   * (the live section); editing a past year only touches that year's history.
+   */
+  school_year?: string;
 }
 
 export interface AttendanceLog {
@@ -226,7 +232,8 @@ export type ReportType =
   | 'absentee'
   | 'tardiness'
   | 'sms-audit'
-  | 'trends';
+  | 'trends'
+  | 'student';
 
 export interface ReportQuery {
   /** Inclusive start date, YYYY-MM-DD. */
@@ -239,6 +246,13 @@ export interface ReportQuery {
   section?: string;
   /** Mask parent phone numbers in the returned data (applies to exports too). */
   maskPhones?: boolean;
+  /**
+   * School year the section groupings should reflect (students appear under
+   * the section they were enrolled in that year). Empty = current sections.
+   */
+  schoolYear?: string;
+  /** Required for type 'student' — whose full attendance record to build. */
+  studentId?: number;
 }
 
 export interface ReportDailyRow {
@@ -360,6 +374,65 @@ export interface TardinessFrequencyRow {
   lateCount: number;
 }
 
+/** One individual scan inside a single-student attendance record. */
+export interface StudentScanRow {
+  id: number;
+  /** 'HH:MM' scan time. */
+  time: string;
+  entryType: EntryType;
+  /** '' when on time. */
+  flag: AttendanceFlag;
+  source: ScanSource;
+}
+
+/** One calendar day inside a single-student attendance record. */
+export interface StudentDayRow {
+  /** YYYY-MM-DD. */
+  day: string;
+  /** True when the gate was used that day (≥1 scan anywhere). */
+  schoolDay: boolean;
+  /** The student had ≥1 scan that day. */
+  present: boolean;
+  /** ≥1 flagged-late IN that day. */
+  late: boolean;
+  /** ≥1 flagged-early OUT that day. */
+  early: boolean;
+  /** First IN time 'HH:MM' or null. */
+  firstIn: string | null;
+  /** Last OUT time 'HH:MM' or null. */
+  lastOut: string | null;
+  /** Every scan that day, oldest first. */
+  scans: StudentScanRow[];
+}
+
+/** Full attendance record for a single student (report type 'student'). */
+export interface StudentRecord {
+  studentId: number;
+  studentNo: string;
+  fullName: string;
+  /** The section they were enrolled in for the selected school year. */
+  gradeSection: string;
+  parentPhone: string;
+  summary: {
+    /** Distinct days with ≥1 scan in range. */
+    daysPresent: number;
+    /** Distinct days with ≥1 flagged-late IN. */
+    daysLate: number;
+    /** schoolDays − daysPresent (≥ 0). */
+    daysAbsent: number;
+    /** daysPresent / schoolDays × 100; null when no school days. */
+    attendanceRate: number | null;
+    totalIn: number;
+    totalOut: number;
+    /** Sum of minutes past the late cutoff on flagged IN scans. */
+    totalMinutesLate: number;
+    smsCount: number;
+    lastSmsStatus: SmsStatus | null;
+  };
+  /** One entry per calendar day in range, oldest first. */
+  days: StudentDayRow[];
+}
+
 export interface SmsAuditDay {
   day: string;
   total: number;
@@ -411,6 +484,8 @@ export interface ReportData {
   schoolName: string;
   from: string;
   to: string;
+  /** School year the report's section groupings reflect ('' = current). */
+  schoolYear: string;
   generatedAt: string;
   /** The section that produced this report. */
   type: ReportType;
@@ -422,6 +497,10 @@ export interface ReportData {
   sections: string[];
   /** Late / early cutoff 'HH:MM:SS' strings ('' when disabled). */
   cutoffs: { late: string; early: string };
+  /** Echo of the student filter (type 'student'). */
+  studentId?: number;
+  /** Populated for type 'student' (null when no student selected). */
+  studentRecord: StudentRecord | null;
   summary: {
     scans: number;
     in: number;
@@ -485,6 +564,73 @@ export interface EmailResult {
   error?: string;
 }
 
+// ---- Sections (section registry + adviser report email delivery) -----------
+
+/**
+ * A registered grade/section. The adviser name + email are optional extras
+ * used by the Reports → "Send to advisers" feature. `grade` and `section` are
+ * the separated parts ("Grade 7" / "Section A"); `grade_section` is the
+ * composite display key ("Grade 7 - Section A") that enrollments + students
+ * join on.
+ */
+export interface Section {
+  id: number;
+  grade_section: string;
+  grade: string;
+  section: string;
+  adviser_name: string;
+  email: string;
+  created_at: string;
+}
+
+export interface SectionInput {
+  /** Full composite name, e.g. "Grade 7 - Section A" (the registry key). */
+  grade_section: string;
+  /** Grade part, e.g. "Grade 7". */
+  grade: string;
+  /** Section part, e.g. "Section A". */
+  section: string;
+  adviser_name: string;
+  email: string;
+}
+
+// ---- School years & enrollments --------------------------------------------
+
+/** A school year label (e.g. "2026 - 2027"); exactly one is current. */
+export interface SchoolYear {
+  id: number;
+  name: string;
+  is_current: boolean;
+  created_at: string;
+}
+
+/** One student's section within a school year (join with students client-side). */
+export interface EnrollmentRow {
+  studentId: number;
+  gradeSection: string;
+}
+
+/** Outcome of a per-adviser report send. */
+export interface AdviserSendDetail {
+  gradeSection: string;
+  adviserName: string;
+  email: string;
+  ok: boolean;
+  /** Success note or the error message for this adviser. */
+  detail: string;
+}
+
+export interface AdviserSendResult {
+  ok: boolean;
+  /** Human-readable summary (shown as the toast / dialog text). */
+  message: string;
+  sent: number;
+  /** Advisers skipped because no valid email was configured. */
+  skipped: number;
+  failed: number;
+  details: AdviserSendDetail[];
+}
+
 // ---------------------------------------------------------------------------
 // The full API surface exposed on window.tapin by the preload script.
 // The renderer mock (used when running in a plain browser) implements this too.
@@ -524,6 +670,27 @@ export interface TapinApi {
   getSettings(): Promise<Settings>;
   updateSettings(patch: Partial<Settings>): Promise<Settings>;
 
+  /** Registered sections (one row per grade_section, with adviser + email). */
+  listSections(): Promise<Section[]>;
+  /** Inserts or updates a section (upsert by grade_section). */
+  saveSection(input: SectionInput): Promise<Section>;
+  /** Removes a section from the registry. */
+  deleteSection(gradeSection: string): Promise<void>;
+  /** Enrolls the given students into a section for a school year (bulk). */
+  assignStudentsToSection(studentIds: number[], gradeSection: string, schoolYear: string): Promise<number>;
+  /** Sets (or clears, with '') a single student's section within a school year. */
+  setStudentEnrollment(studentId: number, schoolYear: string, gradeSection: string): Promise<void>;
+  /** All enrollments for a school year (studentId → gradeSection). */
+  listEnrollments(schoolYear: string): Promise<EnrollmentRow[]>;
+  /** School years (exactly one flagged current). */
+  listSchoolYears(): Promise<SchoolYear[]>;
+  /** Adds a new school year (e.g. "2027 - 2028"). */
+  saveSchoolYear(name: string): Promise<SchoolYear>;
+  /** Sets the current school year; students' current sections rebuild from it. */
+  setCurrentSchoolYear(name: string): Promise<void>;
+  /** Removes a non-current school year and its enrollments. */
+  deleteSchoolYear(name: string): Promise<void>;
+
   getReport(query: ReportQuery): Promise<ReportData>;
   /** Generates a PDF of the given report (main-process hidden-window print). */
   exportReportPdf(report: ReportData): Promise<ExportResult>;
@@ -533,6 +700,8 @@ export interface TapinApi {
   sendReportEmail(report: ReportData): Promise<EmailResult>;
   /** Sends a plain test message to verify the SMTP settings. */
   testEmail(to: string): Promise<EmailResult>;
+  /** Emails each section adviser a per-student report for their section. */
+  sendReportToAdvisers(from: string, to: string, schoolYear?: string): Promise<AdviserSendResult>;
 
   // ---- Push events (return unsubscribe functions) -------------------------
   onScanResult(cb: (result: ScanResult) => void): () => void;

@@ -136,6 +136,7 @@ const TYPE_SHEETS: Record<ReportData['type'], string> = {
   tardiness: 'Tardiness',
   'sms-audit': 'SMS Audit',
   trends: 'Trends',
+  student: 'Student Record',
 };
 
 export async function buildReportWorkbook(report: ReportData): Promise<Buffer> {
@@ -299,6 +300,47 @@ export async function buildReportWorkbook(report: ReportData): Promise<Buffer> {
       [true, true, true, true, false, true],
     );
     ws.views = [{ state: 'frozen', ySplit: dHead }];
+  } else if (report.type === 'student') {
+    const rec = report.studentRecord;
+    for (let c = 1; c <= 8; c++) ws.getColumn(c).width = [16, 14, 12, 10, 10, 9, 9, 10][c - 1];
+    banner(ws, report, 'Student Attendance Record', 8);
+    if (!rec) {
+      headerRow(ws, 5, ['No student selected']);
+      ws.views = [{ state: 'frozen', ySplit: 5 }];
+    } else {
+      let rowIdx = pairGrid(ws, 5, [
+        ['Student', rec.fullName], ['Student No', rec.studentNo],
+        ['Section', rec.gradeSection], ['Phone', rec.parentPhone],
+        ['Present days', rec.summary.daysPresent], ['Late days', rec.summary.daysLate],
+        ['Absent days', rec.summary.daysAbsent], ['Attendance rate', pct(rec.summary.attendanceRate)],
+        ['Total IN', rec.summary.totalIn], ['Total OUT', rec.summary.totalOut],
+        ['Minutes late', rec.summary.totalMinutesLate], ['SMS sent', rec.summary.smsCount],
+        ['Last SMS', rec.summary.lastSmsStatus ?? '—'],
+      ]);
+      rowIdx += 2;
+      const dHead = rowIdx;
+      const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      headerRow(ws, dHead, ['Day', 'Weekday', 'Status', 'IN', 'OUT', 'Late', 'Early', 'Scans'], [true]);
+      rowIdx = bodyRows(
+        ws,
+        dHead + 1,
+        rec.days.map((d) => {
+          const status = !d.present ? (d.schoolDay ? 'ABSENT' : '—') : d.late ? 'LATE' : 'PRESENT';
+          return [d.day, dow[new Date(d.day + 'T00:00:00').getDay()], status, d.firstIn ?? '—', d.lastOut ?? '—', d.late ? 'YES' : '', d.early ? 'YES' : '', d.scans.length];
+        }),
+        [true],
+      );
+      rowIdx += 2;
+      const sHead = rowIdx;
+      headerRow(ws, sHead, ['Date', 'Time', 'Type', 'Flag', 'Source'], [true]);
+      bodyRows(
+        ws,
+        sHead + 1,
+        rec.days.flatMap((d) => d.scans.map((s) => [d.day, s.time, s.entryType, s.flag || '—', s.source])),
+        [true],
+      );
+      ws.views = [{ state: 'frozen', ySplit: dHead }];
+    }
   } else if (report.type === 'trends') {
     for (let c = 1; c <= 6; c++) ws.getColumn(c).width = [12, 9, 12, 9, 9, 9][c - 1];
     banner(ws, report, 'Attendance Trends', 6);

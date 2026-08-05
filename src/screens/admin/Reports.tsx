@@ -4,14 +4,17 @@
 // styled Excel, or emailed as a PDF attachment.
 import { useCallback, useEffect, useState } from 'react';
 import type {
+  AdviserSendResult,
   ExportResult,
   GateHourTrend,
   RegisterRow,
   ReportData,
   ReportType,
+  Student,
 } from '../../../shared/types';
 import { api } from '../../lib/api';
-import { Spinner, Toast } from '../../components/shared';
+import { Modal, Spinner, Toast } from '../../components/shared';
+import { useSchoolYear } from './schoolYear';
 
 function fmtDayOffset(daysAgo: number): string {
   const d = new Date();
@@ -29,6 +32,7 @@ const TYPE_LABELS: Record<ReportType, string> = {
   tardiness: 'Tardiness',
   'sms-audit': 'SMS audit',
   trends: 'Trends',
+  student: 'Student record',
 };
 
 const TYPE_OPTIONS: { value: ReportType; hint: string }[] = [
@@ -36,6 +40,7 @@ const TYPE_OPTIONS: { value: ReportType; hint: string }[] = [
   { value: 'register', hint: 'SF2-style matrix: student × day (IN/OUT/LATE/ABSENT)' },
   { value: 'per-student', hint: 'Per-student attendance summary' },
   { value: 'per-section', hint: 'Rollup per grade/section' },
+  { value: 'student', hint: "One student's full day-by-day record (every scan)" },
   { value: 'absentee', hint: 'Who was absent, with parent phones' },
   { value: 'tardiness', hint: 'Every flagged-late arrival with minutes late' },
   { value: 'sms-audit', hint: 'SMS delivery per day + failures' },
@@ -413,6 +418,102 @@ function HourBar({ h, max }: { h: GateHourTrend; max: number }) {
   );
 }
 
+function StudentView({ report }: { report: ReportData }) {
+  const rec = report.studentRecord;
+  const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  if (!rec) {
+    return <div className="report-empty">Select a student from the toolbar to see their full attendance record.</div>;
+  }
+  const s = rec.summary;
+  const flatScans = rec.days.flatMap((d) => d.scans.map((sc) => ({ day: d.day, sc })));
+  return (
+    <>
+      <div className="student-record-head">
+        <div>
+          <div className="student-record-name">{rec.fullName}</div>
+          <div className="text-dim">{rec.studentNo} · {rec.gradeSection} · {rec.parentPhone}</div>
+        </div>
+        <div className="student-record-rate">
+          <span className="text-dim">Attendance</span>
+          <RateBar rate={s.attendanceRate} />
+        </div>
+      </div>
+      <div className="stat-grid">
+        <StatCard label="Present days" value={s.daysPresent} accent="#34D399" />
+        <StatCard label="Late days" value={s.daysLate} accent="#F59E0B" />
+        <StatCard label="Absent days" value={s.daysAbsent} accent={s.daysAbsent > 0 ? '#FB7185' : '#94A3B8'} />
+        <StatCard label="Attendance rate" value={pct(s.attendanceRate)} accent="#34D399" />
+        <StatCard label="Total IN" value={s.totalIn} accent="#6366F1" />
+        <StatCard label="Total OUT" value={s.totalOut} accent="#A5B4FC" />
+        <StatCard label="Minutes late" value={s.totalMinutesLate} accent={s.totalMinutesLate > 0 ? '#FBBF24' : '#94A3B8'} />
+        <StatCard label="SMS sent" value={s.smsCount} accent="#2DD4BF" hint="Parent alert texts sent for this student in the range" />
+        <StatCard label="Last SMS" value={s.lastSmsStatus ?? '—'} accent="#A5B4FC" hint="Status of the student's most recent parent alert in the range" />
+      </div>
+
+      <h3 className="report-section-title">Day by day</h3>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr><th>Day</th><th>Weekday</th><th>Status</th><th>IN</th><th>OUT</th><th>Late</th><th>Early</th><th>Scans</th></tr>
+          </thead>
+          <tbody>
+            {rec.days.map((d) => {
+              const status = !d.present ? (d.schoolDay ? 'ABSENT' : '—') : d.late ? 'LATE' : 'PRESENT';
+              return (
+                <tr key={d.day} className={!d.present && d.schoolDay ? 'row-absent' : d.late ? 'row-late' : undefined}>
+                  <td className="mono">{d.day}</td>
+                  <td>{dow[new Date(d.day + 'T00:00:00').getDay()]}</td>
+                  <td>
+                    {status === 'ABSENT' && <span className="badge err">ABSENT</span>}
+                    {status === 'LATE' && <span className="badge warn">LATE</span>}
+                    {status === 'PRESENT' && <span className="badge ok">PRESENT</span>}
+                    {status === '—' && <span className="text-dim">—</span>}
+                  </td>
+                  <td className="mono">{d.firstIn ?? '—'}</td>
+                  <td className="mono">{d.lastOut ?? '—'}</td>
+                  <td className="num">{d.late ? '✓' : '—'}</td>
+                  <td className="num">{d.early ? '✓' : '—'}</td>
+                  <td className="num">{d.scans.length}</td>
+                </tr>
+              );
+            })}
+            {rec.days.length === 0 && (
+              <tr><td colSpan={8} className="empty-cell">No days in the selected range.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <h3 className="report-section-title">All scans</h3>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr><th>Date</th><th>Time</th><th>Type</th><th>Flag</th><th>Source</th></tr>
+          </thead>
+          <tbody>
+            {flatScans.map(({ day, sc }) => (
+              <tr key={sc.id}>
+                <td className="mono">{day}</td>
+                <td className="mono">{sc.time}</td>
+                <td>{sc.entryType}</td>
+                <td>
+                  {sc.flag === 'LATE' && <span className="badge warn">LATE</span>}
+                  {sc.flag === 'EARLY' && <span className="badge info">EARLY</span>}
+                  {!sc.flag && <span className="text-dim">—</span>}
+                </td>
+                <td>{sc.source}</td>
+              </tr>
+            ))}
+            {flatScans.length === 0 && (
+              <tr><td colSpan={5} className="empty-cell">No scans in the selected range.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
 function TrendsView({ report }: { report: ReportData }) {
   const maxHour = Math.max(1, ...report.trends.gateHours.map((h) => Math.max(h.in, h.out)));
   const dowNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -463,31 +564,66 @@ function TrendsView({ report }: { report: ReportData }) {
 // ---- Page ------------------------------------------------------------------
 
 export function ReportsPage() {
+  // The GLOBALLY selected school year scopes the report's section groupings.
+  const { year } = useSchoolYear();
   const [from, setFrom] = useState(fmtDayOffset(6));
   const [to, setTo] = useState(fmtDayOffset(0));
   const [type, setType] = useState<ReportType>('summary');
   const [section, setSection] = useState('');
+  const [studentId, setStudentId] = useState('');
   const [maskPhones, setMaskPhones] = useState(false);
   const [report, setReport] = useState<ReportData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<'pdf' | 'xlsx' | 'email' | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [busy, setBusy] = useState<'pdf' | 'xlsx' | 'email' | 'advisers' | null>(null);
+  const [toast, setToast] = useState<{ message: string; tone: 'success' | 'error' } | null>(null);
+  const [sendResult, setSendResult] = useState<AdviserSendResult | null>(null);
+
+  // Student picker for the 'student' record report — all students, with their
+  // section resolved from the selected school year's enrollments (falling back
+  // to the live section, same as the report loader).
+  const [students, setStudents] = useState<Student[]>([]);
+  const [enrollMap, setEnrollMap] = useState<Map<number, string>>(new Map());
+  useEffect(() => {
+    void api.listStudents().then(setStudents).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (!year) {
+      setEnrollMap(new Map());
+      return;
+    }
+    void api.listEnrollments(year).then((rows) => setEnrollMap(new Map(rows.map((r) => [r.studentId, r.gradeSection])))).catch(() => undefined);
+  }, [year]);
+  const sectionOf = (id: number) => enrollMap.get(id) ?? students.find((s) => s.id === id)?.grade_section ?? '';
+  const pickableStudents = students
+    .filter((s) => !section || sectionOf(s.id) === section)
+    .sort((a, b) => a.full_name.localeCompare(b.full_name));
 
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
     api
-      .getReport({ from, to, type, section, maskPhones })
+      .getReport({ from, to, type, section, maskPhones, schoolYear: year, studentId: studentId ? Number(studentId) : undefined })
       .then(setReport)
       .catch((err) => setError((err as Error).message || 'Could not load the report.'))
       .finally(() => setLoading(false));
-  }, [from, to, type, section, maskPhones]);
+  }, [from, to, type, section, maskPhones, year, studentId]);
+
+  // A section from a previous school year won't exist in the new one — reset
+  // the filter whenever the globally selected year changes.
+  useEffect(() => {
+    setSection('');
+  }, [year]);
+
+  // Keep the picked student inside the current section filter.
+  useEffect(() => {
+    if (studentId && section && sectionOf(Number(studentId)) !== section) setStudentId('');
+  }, [studentId, section, enrollMap, students]);
 
   useEffect(load, [load]);
 
-  const notify = (m: string) => {
-    setToast(m);
+  const notify = (m: string, tone: 'success' | 'error' = 'success') => {
+    setToast({ message: m, tone });
     setTimeout(() => setToast(null), 4000);
   };
 
@@ -513,9 +649,27 @@ export function ReportsPage() {
     try {
       const res = await api.sendReportEmail(report);
       if (res.ok) notify(res.message || 'Report emailed.');
-      else if (res.error) notify(`Email failed: ${res.error}`);
+      else if (res.error) notify(`Email failed: ${res.error}`, 'error');
     } catch (err) {
-      notify(`Email failed: ${(err as Error).message}`);
+      notify(`Email failed: ${(err as Error).message}`, 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleSendToAdvisers = async () => {
+    if (!report || busy) return;
+    setBusy('advisers');
+    try {
+      const res = await api.sendReportToAdvisers(report.from, report.to, year);
+      if (res.failed > 0) {
+        // Open the per-adviser breakdown so the admin can see who failed and why.
+        setSendResult(res);
+      } else {
+        notify(res.message || 'Reports sent to advisers.', res.ok ? 'success' : 'error');
+      }
+    } catch (err) {
+      notify(`Send failed: ${(err as Error).message}`, 'error');
     } finally {
       setBusy(null);
     }
@@ -528,7 +682,10 @@ export function ReportsPage() {
       <div className="page-head">
         <div>
           <h2>Reports</h2>
-          <p className="text-dim">{TYPE_LABELS[type]} — {TYPE_OPTIONS.find((o) => o.value === type)?.hint}</p>
+          <p className="text-dim">
+            {TYPE_LABELS[type]} — {TYPE_OPTIONS.find((o) => o.value === type)?.hint}
+            {year ? ` · School year: ${year}` : ''}
+          </p>
         </div>
         <div className="page-actions">
           <button className="btn-ghost" disabled={!report || busy !== null} onClick={() => void handleExport('pdf')}>
@@ -544,6 +701,14 @@ export function ReportsPage() {
             title="Email the report (PDF attachment) to the recipient(s) set in Settings"
           >
             {busy === 'email' ? 'Sending…' : '✉ Email report'}
+          </button>
+          <button
+            className="btn-ghost"
+            disabled={!report || busy !== null}
+            onClick={() => void handleSendToAdvisers()}
+            title="Email each section adviser their section's per-student report (advisers & emails managed in the Sections tab)"
+          >
+            {busy === 'advisers' ? 'Sending…' : '👥 Send to advisers'}
           </button>
         </div>
       </div>
@@ -578,6 +743,17 @@ export function ReportsPage() {
             ))}
           </select>
         </label>
+        {type === 'student' && (
+          <label className="report-range-label text-dim">
+            Student
+            <select value={studentId} onChange={(e) => setStudentId(e.target.value)}>
+              <option value="">— Select a student —</option>
+              {pickableStudents.map((s) => (
+                <option key={s.id} value={s.id}>{s.full_name} · {sectionOf(s.id) || 'No section'}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="switch-row report-mask">
           <span className="text-dim">Mask phones</span>
           <span className={`switch ${maskPhones ? 'on' : ''}`} onClick={() => setMaskPhones(!maskPhones)}>
@@ -596,6 +772,7 @@ export function ReportsPage() {
           {type === 'register' && <RegisterView report={report} />}
           {type === 'per-student' && <PerStudentView report={report} />}
           {type === 'per-section' && <PerSectionView report={report} />}
+          {type === 'student' && <StudentView report={report} />}
           {type === 'absentee' && <AbsenteeView report={report} />}
           {type === 'tardiness' && <TardinessView report={report} />}
           {type === 'sms-audit' && <SmsAuditView report={report} />}
@@ -603,7 +780,40 @@ export function ReportsPage() {
         </div>
       )}
 
-      {toast && <Toast message={toast} />}
+      {sendResult && (
+        <Modal title="Adviser report delivery" onClose={() => setSendResult(null)} wide>
+          <p className="text-dim">{sendResult.message}</p>
+          <div className="table-wrap" style={{ marginTop: 12 }}>
+            <table className="table">
+              <thead>
+                <tr><th>Section</th><th>Adviser</th><th>Email</th><th>Result</th></tr>
+              </thead>
+              <tbody>
+                {sendResult.details.map((d) => (
+                  <tr key={d.gradeSection}>
+                    <td>{d.gradeSection}</td>
+                    <td>{d.adviserName || '—'}</td>
+                    <td className="mono">{d.email}</td>
+                    <td>
+                      {d.ok ? (
+                        <span className="pill pill-success">SENT</span>
+                      ) : (
+                        <span className="pill pill-danger">FAILED</span>
+                      )}
+                      <span className="text-dim" style={{ marginLeft: 8, wordBreak: 'break-word' }}>{d.detail}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="form-actions" style={{ marginTop: 14 }}>
+            <button className="btn-primary" onClick={() => setSendResult(null)}>Close</button>
+          </div>
+        </Modal>
+      )}
+
+      {toast && <Toast message={toast.message} tone={toast.tone} />}
     </div>
   );
 }

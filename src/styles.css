@@ -508,6 +508,75 @@ button { font-family: inherit; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.admin-titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  -webkit-app-region: no-drag;
+}
+
+/* ---- Title-bar school-year selector (global) ---- */
+.titlebar-year {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 6px 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.titlebar-year:hover {
+  border-color: rgba(16, 185, 129, 0.55);
+  background: rgba(16, 185, 129, 0.08);
+}
+.titlebar-year:focus-within {
+  border-color: var(--emerald);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+}
+.titlebar-year-icon { font-size: 12px; line-height: 1; }
+.titlebar-year-label {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.titlebar-year-select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 2px;
+  cursor: pointer;
+  outline: none;
+  min-width: 140px;
+}
+.titlebar-year-select option { background: var(--surface); color: var(--text); }
+.titlebar-year-caret { font-size: 10px; color: var(--text-dim); pointer-events: none; }
+.titlebar-year-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  border: 1.5px solid var(--text-dim);
+  opacity: 0.55;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.titlebar-year-dot.dot-ok {
+  background: var(--emerald);
+  border-color: var(--emerald);
+  opacity: 1;
+}
+.titlebar-year:has(.titlebar-year-select:disabled) { opacity: 0.55; cursor: default; }
+
 .admin-body { display: flex; flex: 1; min-height: 0; }
 
 .admin-sidebar {
@@ -978,6 +1047,38 @@ button { font-family: inherit; }
   border-radius: 10px;
   margin-bottom: 16px;
 }
+
+/* ---- Sections ---- */
+.section-link {
+  background: transparent;
+  border: none;
+  color: #a5b4fc;
+  font-size: 14px;
+  font-weight: 650;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+.section-link:hover { color: #c7d2fe; text-decoration: underline; }
+
+input[type='checkbox'] {
+  accent-color: var(--emerald);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+/* School years (Settings) */
+.school-year-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.school-year-row:last-of-type { border-bottom: none; }
 .table .num { font-variant-numeric: tabular-nums; text-align: center; }
 .report-loading { opacity: 0.45; pointer-events: none; transition: opacity 0.15s ease; }
 
@@ -1100,3 +1201,23 @@ button { font-family: inherit; }
 }
 .freq-filter:hover { border-color: var(--emerald); }
 .err-cell { color: #fb7185; font-size: 12.5px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- Reports: single-student record (type 'student') ---- */
+.badge.info { background: rgba(56, 189, 248, 0.12); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.35); }
+.student-record-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 22px;
+  margin-bottom: 16px;
+}
+.student-record-name { font-size: 21px; font-weight: 750; }
+.student-record-rate { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.table tbody tr.row-late { background: rgba(245, 158, 11, 0.07); }
+.table tbody tr.row-late:hover { background: rgba(245, 158, 11, 0.12); }
+.table tbody tr.row-absent { background: rgba(244, 63, 94, 0.06); }
+.table tbody tr.row-absent:hover { background: rgba(244, 63, 94, 0.11); }

@@ -14,12 +14,14 @@ import { generatePayload } from './services/qr';
 import { getReportData } from './services/report';
 import { exportReportToPdf } from './services/report-pdf';
 import { buildReportWorkbook } from './services/report-export';
-import { sendReportEmail, sendTestEmail } from './services/report-email';
+import { sendAdviserReportEmails, sendReportEmail, sendTestEmail } from './services/report-email';
 import { getProvider } from './sms/providers';
 import type {
   ActivityItem,
+  AdviserSendResult,
   AttendanceLogRow,
   EmailResult,
+  EnrollmentRow,
   ExportResult,
   ImportResult,
   LogFilter,
@@ -29,6 +31,9 @@ import type {
   ReportQuery,
   ScanResult,
   ScanSource,
+  SchoolYear,
+  Section,
+  SectionInput,
   Settings,
   SmsFilter,
   SmsLog,
@@ -199,8 +204,68 @@ export function registerIpc(scanner: ScannerHook): void {
     return db.query<Student[]>('SELECT * FROM students ORDER BY full_name');
   });
 
+  /**
+   * Splits "Grade 7 - Section A" into grade "Grade 7" / section "Section A".
+   * Must match the SQL backfill in db/schema.ts (grade = before the FIRST
+   * ' - ', section = after the LAST ' - ') so both paths parse identically.
+   */
+  function splitSection(name: string): { grade: string; section: string } {
+    const first = name.indexOf(' - ');
+    const last = name.lastIndexOf(' - ');
+    if (first >= 0) return { grade: name.slice(0, first).trim(), section: name.slice(last + 3).trim() };
+    return { grade: name.trim(), section: '' };
+  }
+
+  /** Registers a section (auto-created by enrollment paths), deriving grade/section. */
+  async function upsertSectionRow(gradeSection: string): Promise<void> {
+    const { grade, section } = splitSection(gradeSection);
+    await db.execute(
+      `INSERT INTO sections (grade_section, grade, section) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE grade = ?, section = ?`,
+      [gradeSection, grade, section, grade, section],
+    );
+  }
+
+  /**
+   * Keeps a student's section in sync within a school year (default: the
+   * current year). Only the CURRENT year's enrollment is mirrored onto
+   * students.grade_section — the live section attendance/SMS/reports read.
+   * Editing a past year only touches that year's enrollment history.
+   */
+  async function syncEnrollment(studentId: number, section: string, schoolYear?: string): Promise<void> {
+    const [cur] = await db.query<{ name: string }[]>(
+      'SELECT name FROM school_years WHERE is_current = 1 ORDER BY id LIMIT 1',
+    );
+    const year = String(schoolYear ?? '').trim() || (cur?.name ?? '');
+    if (!year) return;
+    const [yearRow] = await db.query<SchoolYearRow[]>('SELECT * FROM school_years WHERE name = ?', [year]);
+    const isCurrent = !!yearRow?.is_current;
+    if (section) {
+      await upsertSectionRow(section);
+      await db.execute(
+        `INSERT INTO enrollments (student_id, school_year, grade_section) VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE grade_section = ?`,
+        [studentId, year, section, section],
+      );
+      if (isCurrent) await db.execute('UPDATE students SET grade_section = ? WHERE id = ?', [section, studentId]);
+    } else {
+      await db.execute('DELETE FROM enrollments WHERE student_id = ? AND school_year = ?', [studentId, year]);
+      if (isCurrent) await db.execute('UPDATE students SET grade_section = ? WHERE id = ?', ['', studentId]);
+    }
+  }
+
   ipcMain.handle('tapin:createStudent', async (_e, input: StudentInput): Promise<Student> => {
     const payload = generatePayload(input.student_no);
+    // students.grade_section is the CURRENT year's live section — a student
+    // enrolled into a past year starts unassigned this year.
+    const [cur] = await db.query<{ name: string }[]>(
+      'SELECT name FROM school_years WHERE is_current = 1 ORDER BY id LIMIT 1',
+    );
+    const year = String(input.school_year ?? '').trim() || (cur?.name ?? '');
+    const [yearRow] = year
+      ? await db.query<SchoolYearRow[]>('SELECT * FROM school_years WHERE name = ?', [year])
+      : [];
+    const liveSection = yearRow?.is_current ? String(input.grade_section ?? '').trim() : '';
     const res = await db.execute(
       `INSERT INTO students (student_no, qr_hash_payload, full_name, grade_section, parent_phone, photo_url, is_active)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -208,12 +273,15 @@ export function registerIpc(scanner: ScannerHook): void {
         input.student_no,
         payload,
         input.full_name,
-        input.grade_section || '',
+        liveSection,
         input.parent_phone || '',
         input.photo_url || null,
         input.is_active ?? true,
       ],
     );
+    // A new student with a section is enrolled in the requested school year
+    // (defaults to the current year).
+    await syncEnrollment(res.insertId, String(input.grade_section ?? '').trim(), year);
     const [row] = await db.query<Student[]>('SELECT * FROM students WHERE id = ?', [res.insertId]);
     // Keep the offline snapshot current so offline scans see new students.
     void refreshOfflineCache();
@@ -221,24 +289,56 @@ export function registerIpc(scanner: ScannerHook): void {
   });
 
   ipcMain.handle('tapin:updateStudent', async (_e, id: number, input: Partial<StudentInput>): Promise<Student> => {
-    await db.execute(
-      'UPDATE students SET student_no = ?, full_name = ?, grade_section = ?, parent_phone = ?, photo_url = ?, is_active = ? WHERE id = ?',
-      [
-        input.student_no ?? '',
-        input.full_name ?? '',
-        input.grade_section ?? '',
-        input.parent_phone ?? '',
-        input.photo_url ?? null,
-        input.is_active ?? true,
-        id,
-      ],
-    );
+    // Partial semantics: only the keys actually provided are updated, so a
+    // caller like the Sections roster can safely send { grade_section: '' }
+    // without wiping the student's other fields. Matches the mock's merge.
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    const add = (col: string, key: keyof StudentInput, fallback: unknown) => {
+      if (key in input) {
+        sets.push(`${col} = ?`);
+        params.push(input[key] ?? fallback);
+      }
+    };
+    add('student_no', 'student_no', '');
+    add('full_name', 'full_name', '');
+    add('parent_phone', 'parent_phone', '');
+    add('photo_url', 'photo_url', null);
+    add('is_active', 'is_active', true);
+    // students.grade_section (the live, current-year section) only changes when
+    // the requested school year IS the current year — editing a past year must
+    // not rewrite the live section.
+    if ('grade_section' in input) {
+      const [cur] = await db.query<{ name: string }[]>(
+        'SELECT name FROM school_years WHERE is_current = 1 ORDER BY id LIMIT 1',
+      );
+      const year = String(input.school_year ?? '').trim() || (cur?.name ?? '');
+      const [yearRow] = year
+        ? await db.query<SchoolYearRow[]>('SELECT * FROM school_years WHERE name = ?', [year])
+        : [];
+      if (yearRow?.is_current) {
+        sets.push('grade_section = ?');
+        params.push(input.grade_section ?? '');
+      }
+    }
+    if (!sets.length) throw new Error('Nothing to update.');
+    params.push(id);
+    await db.execute(`UPDATE students SET ${sets.join(', ')} WHERE id = ?`, params);
+    // Keep the (requested) school year's enrollment in sync when the section
+    // changes — the Students page edits the globally selected year. Only the
+    // current year's enrollment is mirrored onto students.grade_section.
+    if ('grade_section' in input) {
+      await syncEnrollment(id, String(input.grade_section ?? '').trim(), input.school_year);
+    }
     const [row] = await db.query<Student[]>('SELECT * FROM students WHERE id = ?', [id]);
     void refreshOfflineCache();
     return row;
   });
 
   ipcMain.handle('tapin:deleteStudent', async (_e, id: number): Promise<void> => {
+    // Remove the student's enrollments first — the FK on enrollments.student_id
+    // (no cascade on pre-existing installs) would otherwise block the delete.
+    await db.execute('DELETE FROM enrollments WHERE student_id = ?', [id]);
     await db.execute('DELETE FROM students WHERE id = ?', [id]);
     void refreshOfflineCache();
   });
@@ -246,6 +346,142 @@ export function registerIpc(scanner: ScannerHook): void {
   ipcMain.handle('tapin:generateQrPayload', (_e, studentNo: string): string => {
     return generatePayload(studentNo);
   });
+
+  // ---- Sections (registry wired to the Students page + report emailing) ----
+  ipcMain.handle('tapin:listSections', async (): Promise<Section[]> => {
+    return db.query<Section[]>('SELECT * FROM sections ORDER BY grade_section');
+  });
+
+  ipcMain.handle('tapin:saveSection', async (_e, input: SectionInput): Promise<Section> => {
+    const gradeSection = String(input?.grade_section ?? '').trim();
+    // Prefer the form's separated grade/section; fall back to parsing the
+    // composite (legacy rows / auto-created sections).
+    const grade = String(input?.grade ?? '').trim() || splitSection(gradeSection).grade;
+    const section = String(input?.section ?? '').trim() || splitSection(gradeSection).section;
+    const adviserName = String(input?.adviser_name ?? '').trim();
+    const email = String(input?.email ?? '').trim();
+    if (!gradeSection) throw new Error('Section is required.');
+    // Upsert by grade_section — a section has at most one registry row.
+    await db.execute(
+      `INSERT INTO sections (grade_section, grade, section, adviser_name, email) VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE grade = ?, section = ?, adviser_name = ?, email = ?`,
+      [gradeSection, grade, section, adviserName, email, grade, section, adviserName, email],
+    );
+    const [row] = await db.query<Section[]>('SELECT * FROM sections WHERE grade_section = ?', [gradeSection]);
+    return row;
+  });
+
+  ipcMain.handle('tapin:deleteSection', async (_e, gradeSection: string): Promise<void> => {
+    await db.execute('DELETE FROM sections WHERE grade_section = ?', [String(gradeSection ?? '')]);
+  });
+
+  /** Sets (or clears, with '') one student's section within a school year. */
+  ipcMain.handle(
+    'tapin:setStudentEnrollment',
+    async (_e, studentId: number, schoolYear: string, gradeSection: string): Promise<void> => {
+      const id = Number(studentId);
+      const year = String(schoolYear ?? '').trim();
+      const section = String(gradeSection ?? '').trim();
+      if (!Number.isInteger(id) || !year) throw new Error('Student and school year are required.');
+      await syncEnrollment(id, section, year);
+      void refreshOfflineCache();
+    },
+  );
+
+  ipcMain.handle('tapin:listEnrollments', async (_e, schoolYear: string): Promise<EnrollmentRow[]> => {
+    const rows = await db.query<{ student_id: number; grade_section: string }[]>(
+      `SELECT student_id, grade_section FROM enrollments WHERE school_year = ? AND grade_section <> ''`,
+      [String(schoolYear ?? '')],
+    );
+    return rows.map((r) => ({ studentId: r.student_id, gradeSection: r.grade_section }));
+  });
+
+  // ---- School years ---------------------------------------------------------
+  type SchoolYearRow = { id: number; name: string; is_current: number; created_at: string };
+  const toSchoolYear = (r: SchoolYearRow): SchoolYear => ({
+    id: r.id,
+    name: r.name,
+    is_current: !!r.is_current,
+    created_at: r.created_at,
+  });
+
+  ipcMain.handle('tapin:listSchoolYears', async (): Promise<SchoolYear[]> => {
+    let rows = await db.query<SchoolYearRow[]>('SELECT * FROM school_years ORDER BY name');
+    // Self-heal: never empty, and exactly one current year.
+    if (!rows.length) {
+      await db.execute("INSERT IGNORE INTO school_years (name, is_current) VALUES ('2026 - 2027', 1)");
+      rows = await db.query<SchoolYearRow[]>('SELECT * FROM school_years ORDER BY name');
+    }
+    if (!rows.some((r) => r.is_current)) {
+      await db.execute('UPDATE school_years SET is_current = 0');
+      await db.execute('UPDATE school_years SET is_current = 1 ORDER BY id LIMIT 1');
+      rows = await db.query<SchoolYearRow[]>('SELECT * FROM school_years ORDER BY name');
+    }
+    return rows.map(toSchoolYear);
+  });
+
+  ipcMain.handle('tapin:saveSchoolYear', async (_e, name: string): Promise<SchoolYear> => {
+    const year = String(name ?? '').trim();
+    if (!year) throw new Error('School year is required.');
+    if (year.length > 32) throw new Error('School year is too long (max 32 characters).');
+    await db.execute('INSERT IGNORE INTO school_years (name) VALUES (?)', [year]);
+    const [row] = await db.query<SchoolYearRow[]>('SELECT * FROM school_years WHERE name = ?', [year]);
+    return toSchoolYear(row);
+  });
+
+  ipcMain.handle('tapin:setCurrentSchoolYear', async (_e, name: string): Promise<void> => {
+    const year = String(name ?? '').trim();
+    if (!year) throw new Error('School year is required.');
+    const [existing] = await db.query<SchoolYearRow[]>('SELECT * FROM school_years WHERE name = ?', [year]);
+    if (!existing) throw new Error('School year not found.');
+    await db.execute('UPDATE school_years SET is_current = 0');
+    await db.execute('UPDATE school_years SET is_current = 1 WHERE name = ?', [year]);
+    // Rollover: rebuild each student's current section from the new year's
+    // enrollments — a fresh year has none, so sections are cleared until the
+    // new year's rosters are built. Past years stay intact in enrollments.
+    await db.execute(
+      `UPDATE students s LEFT JOIN enrollments e ON e.student_id = s.id AND e.school_year = ?
+       SET s.grade_section = COALESCE(e.grade_section, '')`,
+      [year],
+    );
+    void refreshOfflineCache();
+  });
+
+  ipcMain.handle('tapin:deleteSchoolYear', async (_e, name: string): Promise<void> => {
+    const year = String(name ?? '').trim();
+    if (!year) return;
+    const [row] = await db.query<SchoolYearRow[]>('SELECT * FROM school_years WHERE name = ?', [year]);
+    if (row?.is_current) throw new Error('Cannot delete the current school year.');
+    await db.execute('DELETE FROM enrollments WHERE school_year = ?', [year]);
+    await db.execute('DELETE FROM school_years WHERE name = ?', [year]);
+  });
+
+  /** Bulk-enrolls students into a section for a school year. Returns count. */
+  ipcMain.handle(
+    'tapin:assignStudentsToSection',
+    async (_e, studentIds: number[], gradeSection: string, schoolYear: string): Promise<number> => {
+      const section = String(gradeSection ?? '').trim();
+      const year = String(schoolYear ?? '').trim();
+      if (!section || !year) throw new Error('Section and school year are required.');
+      const ids = (Array.isArray(studentIds) ? studentIds : []).filter((n) => Number.isInteger(n));
+      if (!ids.length) return 0;
+      // The section must exist in the registry for the strict Students picker.
+      await upsertSectionRow(section);
+      const yearRows = await db.query<SchoolYearRow[]>('SELECT * FROM school_years WHERE name = ?', [year]);
+      const isCurrent = !!yearRows[0]?.is_current;
+      for (const id of ids) {
+        await db.execute(
+          `INSERT INTO enrollments (student_id, school_year, grade_section) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE grade_section = ?`,
+          [id, year, section, section],
+        );
+        // The current year's enrollment also drives the student's live section.
+        if (isCurrent) await db.execute('UPDATE students SET grade_section = ? WHERE id = ?', [section, id]);
+      }
+      void refreshOfflineCache();
+      return ids.length;
+    },
+  );
 
   ipcMain.handle('tapin:importStudentsCsv', async (_e, csv: string): Promise<ImportResult> => {
     return importCsv(csv);
@@ -268,6 +504,17 @@ export function registerIpc(scanner: ScannerHook): void {
     const lines = csv.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     const result: ImportResult = { added: 0, skipped: 0, errors: [] };
     if (lines.length <= 1) return result;
+    const syncSectionRegistry = async () => {
+      // Also derive grade/section so the Sections page grade filter is correct
+      // immediately after an import (startup backfill would only cover restarts).
+      await db.execute(
+        `INSERT IGNORE INTO sections (grade_section, grade, section)
+         SELECT DISTINCT grade_section,
+           CASE WHEN grade_section LIKE '% - %' THEN SUBSTRING_INDEX(grade_section, ' - ', 1) ELSE grade_section END,
+           CASE WHEN grade_section LIKE '% - %' THEN SUBSTRING_INDEX(grade_section, ' - ', -1) ELSE '' END
+         FROM students WHERE grade_section <> ''`,
+      );
+    };
     const header = lines[0].toLowerCase();
     const start = header.includes('student_no') ? 1 : 0;
     for (let i = start; i < lines.length; i++) {
@@ -279,10 +526,11 @@ export function registerIpc(scanner: ScannerHook): void {
       }
       try {
         const payload = generatePayload(studentNo);
-        await db.execute(
+        const res = await db.execute(
           'INSERT INTO students (student_no, qr_hash_payload, full_name, grade_section, parent_phone) VALUES (?, ?, ?, ?, ?)',
           [studentNo, payload, fullName, gradeSection || '', parentPhone || ''],
         );
+        if (gradeSection) await syncEnrollment(res.insertId, gradeSection);
         result.added++;
       } catch (err) {
         if ((err as { code?: string }).code === 'ER_DUP_ENTRY') {
@@ -293,6 +541,7 @@ export function registerIpc(scanner: ScannerHook): void {
         }
       }
     }
+    await syncSectionRegistry();
     void refreshOfflineCache();
     return result;
   }
@@ -350,13 +599,16 @@ export function registerIpc(scanner: ScannerHook): void {
       params,
     );
     const flagParams = flagSelectParams(settingsStore.get());
+    // Grouped by grade (numerically: Grade 7 before Grade 10), newest scans
+    // first within each grade. "Grade 7 - Section A" → second token "7".
+    const gradeOrd = `CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(s.grade_section, ' ', 2), ' ', -1) AS UNSIGNED)`;
     const rows = await db.query<AttendanceLogRow[]>(
       `SELECT a.id, a.student_id, a.entry_type, a.scanned_at, a.source,
               s.full_name, s.student_no, s.grade_section,
               ${flagSelectSql()}
        FROM attendance_logs a JOIN students s ON s.id = a.student_id
        ${whereSql}
-       ORDER BY a.scanned_at DESC LIMIT ? OFFSET ?`,
+       ORDER BY ${gradeOrd}, s.grade_section, a.scanned_at DESC LIMIT ? OFFSET ?`,
       [...flagParams, ...params, limit, offset],
     );
     return { rows, total: count?.c ?? 0 };
@@ -384,13 +636,14 @@ export function registerIpc(scanner: ScannerHook): void {
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const flagParams = flagSelectParams(settingsStore.get());
+    const gradeOrd = `CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(s.grade_section, ' ', 2), ' ', -1) AS UNSIGNED)`;
     const rows = await db.query<AttendanceLogRow[]>(
       `SELECT a.id, a.student_id, a.entry_type, a.scanned_at, a.source,
               s.full_name, s.student_no, s.grade_section,
               ${flagSelectSql()}
        FROM attendance_logs a JOIN students s ON s.id = a.student_id
        ${whereSql}
-       ORDER BY a.scanned_at DESC LIMIT 5000`,
+       ORDER BY ${gradeOrd}, s.grade_section, a.scanned_at DESC LIMIT 5000`,
       [...flagParams, ...params],
     );
     const header = 'ID,Student No,Full Name,Grade Section,Type,Source,Flag,Scanned At';
@@ -521,6 +774,18 @@ export function registerIpc(scanner: ScannerHook): void {
     if (!report) return { ok: false, error: 'No report data to send.' };
     return sendReportEmail(report, settingsStore.get());
   });
+
+  ipcMain.handle(
+    'tapin:sendReportToAdvisers',
+    async (_e, from: string, to: string, schoolYear?: string): Promise<AdviserSendResult> => {
+      return sendAdviserReportEmails(
+        String(from ?? ''),
+        String(to ?? ''),
+        settingsStore.get(),
+        String(schoolYear ?? '').trim() || undefined,
+      );
+    },
+  );
 
   ipcMain.handle('tapin:testEmail', async (_e, to: string): Promise<EmailResult> => {
     return sendTestEmail(String(to ?? '').trim(), settingsStore.get());
