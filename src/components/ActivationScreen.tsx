@@ -3,7 +3,7 @@
 // the main process and, on success, signals the parent to render the app.
 import { useEffect, useState, type FormEvent } from 'react';
 import { api } from '../lib/api';
-import { SchoolLogo } from './shared';
+import jeLogo from '../../JE_logo.png';
 
 export function ActivationScreen({ onActivated }: { onActivated: () => void }) {
   const [key, setKey] = useState('');
@@ -34,11 +34,11 @@ export function ActivationScreen({ onActivated }: { onActivated: () => void }) {
     }
   };
 
-  return (
+return (
     <div className="activation-screen">
       <div className="activation-card">
         <div className="clogo">
-          <SchoolLogo fallback="🎓" />
+          <img src={jeLogo} alt="Logo" className="activation-logo" />
         </div>
         <h2>Activate TapIn School</h2>
         <p className="text-dim">Enter your license key to unlock the app.</p>
