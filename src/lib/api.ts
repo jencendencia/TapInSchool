@@ -1226,7 +1226,7 @@ class MockApi implements TapinApi {
     return { ok: true, message: 'Opened your email app — attach the exported PDF to send it.' };
   }
 
-  async testEmail(to: string): Promise<EmailResult> {
+async testEmail(to: string, _settings: Settings): Promise<EmailResult> {
     const subject = encodeURIComponent('TapIn test email');
     const body = encodeURIComponent('This is a test email from TapIn School (browser demo mode).');
     window.location.href = `mailto:${encodeURIComponent(to)}?subject=${subject}&body=${body}`;

@@ -152,9 +152,9 @@ export function SettingsPage({ onSettingsSaved }: { onSettingsSaved?: () => void
       setTimeout(() => setToast(null), 3500);
       return;
     }
-    setTestingEmail(true);
+setTestingEmail(true);
     try {
-      const res = await api.testEmail(to);
+      const res = await api.testEmail(to, settings);
       setToast(res.ok ? res.message || 'Test email sent.' : `Test failed: ${res.error}`);
     } catch (err) {
       setToast(`Test failed: ${(err as Error).message}`);

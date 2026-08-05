@@ -748,10 +748,14 @@ export interface TapinApi {
   exportReportPdf(report: ReportData): Promise<ExportResult>;
   /** Exports a styled .xlsx of the given report data. */
   exportReportXlsx(report: ReportData): Promise<ExportResult>;
-  /** Emails the report (PDF attachment) via the configured SMTP server. */
+/** Emails the report (PDF attachment) via the configured SMTP server. */
   sendReportEmail(report: ReportData): Promise<EmailResult>;
-  /** Sends a plain test message to verify the SMTP settings. */
-  testEmail(to: string): Promise<EmailResult>;
+  /**
+   * Sends a plain test message to verify the SMTP settings.
+   * Passes the current form settings so the test reflects exactly what the
+   * admin typed (no separate save required first).
+   */
+  testEmail(to: string, settings: Settings): Promise<EmailResult>;
   /** Emails each section adviser a per-student report for their section. */
   sendReportToAdvisers(from: string, to: string, schoolYear?: string): Promise<AdviserSendResult>;
 

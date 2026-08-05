@@ -789,8 +789,10 @@ export function registerIpc(scanner: ScannerHook): void {
     },
   );
 
-  ipcMain.handle('tapin:testEmail', async (_e, to: string): Promise<EmailResult> => {
-    return sendTestEmail(String(to ?? '').trim(), settingsStore.get());
+ipcMain.handle('tapin:testEmail', async (_e, to: string, settings: Settings): Promise<EmailResult> => {
+    // Use the settings the admin currently has in the form so the test reflects
+    // exactly what they typed (no separate save required first).
+    return sendTestEmail(String(to ?? '').trim(), settings ?? settingsStore.get());
   });
 
   // ---- Admin auth ----------------------------------------------------------

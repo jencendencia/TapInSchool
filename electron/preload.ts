@@ -97,7 +97,8 @@ const api: TapinApi = {
     ipcRenderer.invoke('tapin:exportReportXlsx', report) as Promise<ExportResult>,
   sendReportEmail: (report: ReportData) =>
     ipcRenderer.invoke('tapin:sendReportEmail', report) as Promise<EmailResult>,
-  testEmail: (to: string) => ipcRenderer.invoke('tapin:testEmail', to) as Promise<EmailResult>,
+testEmail: (to: string, settings: Settings) =>
+    ipcRenderer.invoke('tapin:testEmail', to, settings) as Promise<EmailResult>,
   sendReportToAdvisers: (from: string, to: string, schoolYear?: string) =>
     ipcRenderer.invoke('tapin:sendReportToAdvisers', from, to, schoolYear) as Promise<AdviserSendResult>,
 
