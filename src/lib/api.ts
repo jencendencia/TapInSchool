@@ -6,6 +6,7 @@
 import type {
   AbsenteeRow,
   AbsenteeTotalsRow,
+  ActivationResult,
   ActivityItem,
   AdviserSendDetail,
   AdviserSendResult,
@@ -15,7 +16,8 @@ import type {
   EnrollmentRow,
   EntryType,
   ExportResult,
-  ImportResult,
+ImportResult,
+  LicenseStatus,
   LogFilter,
   LoginResult,
   OverviewStats,
@@ -1303,7 +1305,7 @@ class MockApi implements TapinApi {
     return () => this.statusCbs.delete(cb);
   }
 
-  onToggleAdmin(cb: () => void): () => void {
+onToggleAdmin(cb: () => void): () => void {
     const key = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.shiftKey && (e.key === 'A' || e.key === 'a')) {
         e.preventDefault();
@@ -1312,6 +1314,35 @@ class MockApi implements TapinApi {
     };
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
+  }
+
+  // ---- Auto-update (browser mock) -----------------------------------------
+  async checkForUpdates(): Promise<{ success: boolean; message?: string }> {
+    return { success: true, message: 'Browser mock mode: updates are managed by the packaged app.' };
+  }
+  async downloadUpdate(): Promise<{ success: boolean; message?: string }> {
+    return { success: false, message: 'Updates require the packaged Electron app.' };
+  }
+  async installUpdate(): Promise<{ success: boolean }> {
+    return { success: false };
+  }
+  async getAppVersion(): Promise<string> {
+    // Report the package version so the Updates panel shows something sensible.
+    return 'dev';
+  }
+  onUpdateStatus(): () => void {
+    return () => undefined;
+  }
+
+  // ---- App activation (browser mock — dev bypasses gating) ----------------
+  async checkLicense(): Promise<LicenseStatus> {
+    return { activated: true, licenseKey: 'DEV-MODE', machineId: 'browser-mock' };
+  }
+  async activateLicense(licenseKey: string): Promise<ActivationResult> {
+    return { valid: true, message: 'Activated (browser mock)', machineId: 'browser-mock' };
+  }
+  async getMachineId(): Promise<string> {
+    return 'browser-mock';
   }
 }
 

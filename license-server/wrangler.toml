@@ -1,0 +1,14 @@
+name = "tapin-license-server"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# KV namespace for license keys. Create it with:
+#   npx wrangler login
+#   npx wrangler kv:namespace create LICENSE_KV
+# then paste the returned id below.
+kv_namespaces = [
+  { binding = "LICENSE_KV", id = "REPLACE_WITH_YOUR_KV_ID" }
+]
+
+# The admin secret is set as a Worker secret (never committed):
+#   npx wrangler secret put ADMIN_SECRET

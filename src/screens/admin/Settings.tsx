@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { SchoolYear, Settings } from '../../../shared/types';
 import { api } from '../../lib/api';
 import { Spinner, Toast } from '../../components/shared';
+import { UpdatePanel } from '../../components/UpdatePanel';
 import { useSchoolYear } from './schoolYear';
 
 // Reads an image file, downscales it to a small thumbnail and returns it as a
@@ -307,7 +308,12 @@ export function SettingsPage({ onSettingsSaved }: { onSettingsSaved?: () => void
               <span className="switch-knob" />
             </span>
           </label>
-          <p className="field-hint">One message per student per day, using the template above with “was marked absent today”.</p>
+<p className="field-hint">One message per student per day, using the template above with “was marked absent today”.</p>
+        </div>
+
+        <div className="settings-card">
+          <h3>App updates</h3>
+          <UpdatePanel />
         </div>
 
         <div className="settings-card">

@@ -1,6 +1,6 @@
 // IPC surface for the renderer. Every channel maps 1:1 to a method on the
 // shared TapinApi contract (shared/types.ts).
-import { ipcMain, BrowserWindow, dialog } from 'electron';
+import { ipcMain, app, BrowserWindow, dialog } from 'electron';
 import { promises as fs } from 'fs';
 import { db } from './db/connection';
 import { settingsStore } from './db/settings';
@@ -15,6 +15,8 @@ import { getReportData } from './services/report';
 import { exportReportToPdf } from './services/report-pdf';
 import { buildReportWorkbook } from './services/report-export';
 import { sendAdviserReportEmails, sendReportEmail, sendTestEmail } from './services/report-email';
+import { checkForUpdates, downloadUpdate, installUpdate } from './services/updater';
+import { activateLicense, checkLicense, getMachineIdValue } from './services/license';
 import { getProvider } from './sms/providers';
 import type {
   ActivityItem,
@@ -829,9 +831,42 @@ export function registerIpc(scanner: ScannerHook): void {
     } else if (patch.logo_url === null) {
       await deleteAllLogos();
     }
-    const next = await settingsStore.update(patch);
+const next = await settingsStore.update(patch);
     const provider = getProvider(next.sms_provider);
     broadcast('tapin:status', { db: db.getStatus(), sms: await provider.verify(next) });
     return next;
+  });
+
+  // ---- Auto-update (GitHub Releases) --------------------------------------
+  ipcMain.handle('tapin:checkForUpdates', async (): Promise<{ success: boolean; message?: string }> => {
+    return checkForUpdates();
+  });
+
+  ipcMain.handle('tapin:downloadUpdate', async (): Promise<{ success: boolean; message?: string }> => {
+    return downloadUpdate();
+  });
+
+  ipcMain.handle('tapin:installUpdate', async (): Promise<{ success: boolean }> => {
+    return installUpdate();
+  });
+
+  ipcMain.handle('tapin:getAppVersion', async (): Promise<string> => {
+    return app.getVersion();
+  });
+
+  // ---- App activation (license server) ------------------------------------
+  ipcMain.handle('tapin:checkLicense', async (): Promise<import('../shared/types').LicenseStatus> => {
+    return checkLicense();
+  });
+
+  ipcMain.handle(
+    'tapin:activateLicense',
+    async (_e, licenseKey: string): Promise<import('../shared/types').ActivationResult> => {
+      return activateLicense(String(licenseKey ?? ''));
+    },
+  );
+
+  ipcMain.handle('tapin:getMachineId', async (): Promise<string> => {
+    return getMachineIdValue();
   });
 }

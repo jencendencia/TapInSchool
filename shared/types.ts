@@ -631,6 +631,58 @@ export interface AdviserSendResult {
   details: AdviserSendDetail[];
 }
 
+// ---- Auto-update (electron-updater → GitHub Releases) ----------------------
+
+export type UpdateStatusKind =
+  | 'checking'
+  | 'available'
+  | 'not-available'
+  | 'downloading'
+  | 'downloaded'
+  | 'error';
+
+export interface UpdateInfo {
+  version?: string;
+  releaseDate?: string;
+  releaseNotes?: string;
+}
+
+/** Payload pushed to the renderer over the `update-status` channel. */
+export interface UpdateStatus {
+  status: UpdateStatusKind;
+  data?: UpdateInfo | { percent?: number; transferred?: number; total?: number } | string;
+}
+
+/** Shape of the auto-updater API exposed on window.tapin. */
+export interface UpdateApi {
+  checkForUpdates(): Promise<{ success: boolean; message?: string }>;
+  downloadUpdate(): Promise<{ success: boolean; message?: string }>;
+  installUpdate(): Promise<{ success: boolean }>;
+  getAppVersion(): Promise<string>;
+  onUpdateStatus(cb: (status: UpdateStatus) => void): () => void;
+}
+
+// ---- App activation (license server → Cloudflare Worker) --------------------
+
+export interface LicenseStatus {
+  activated: boolean;
+  licenseKey?: string;
+  machineId?: string;
+}
+
+export interface ActivationResult {
+  valid: boolean;
+  message?: string;
+  machineId?: string;
+}
+
+/** Shape of the license API exposed on window.tapin. */
+export interface LicenseApi {
+  checkLicense(): Promise<LicenseStatus>;
+  activateLicense(licenseKey: string): Promise<ActivationResult>;
+  getMachineId(): Promise<string>;
+}
+
 // ---------------------------------------------------------------------------
 // The full API surface exposed on window.tapin by the preload script.
 // The renderer mock (used when running in a plain browser) implements this too.
@@ -703,10 +755,22 @@ export interface TapinApi {
   /** Emails each section adviser a per-student report for their section. */
   sendReportToAdvisers(from: string, to: string, schoolYear?: string): Promise<AdviserSendResult>;
 
-  // ---- Push events (return unsubscribe functions) -------------------------
+// ---- Push events (return unsubscribe functions) -------------------------
   onScanResult(cb: (result: ScanResult) => void): () => void;
   onActivity(cb: (items: ActivityItem[]) => void): () => void;
   onStatus(cb: (status: SystemStatus) => void): () => void;
   /** Fired when the user presses Ctrl+Shift+A (global shortcut in main). */
   onToggleAdmin(cb: () => void): () => void;
+
+  // ---- Auto-update (GitHub Releases) --------------------------------------
+  checkForUpdates(): Promise<{ success: boolean; message?: string }>;
+  downloadUpdate(): Promise<{ success: boolean; message?: string }>;
+  installUpdate(): Promise<{ success: boolean }>;
+  getAppVersion(): Promise<string>;
+  onUpdateStatus(cb: (status: UpdateStatus) => void): () => void;
+
+  // ---- App activation (license server) ------------------------------------
+  checkLicense(): Promise<LicenseStatus>;
+  activateLicense(licenseKey: string): Promise<ActivationResult>;
+  getMachineId(): Promise<string>;
 }

@@ -1221,3 +1221,83 @@ input[type='checkbox'] {
 .table tbody tr.row-late:hover { background: rgba(245, 158, 11, 0.12); }
 .table tbody tr.row-absent { background: rgba(244, 63, 94, 0.06); }
 .table tbody tr.row-absent:hover { background: rgba(244, 63, 94, 0.11); }
+
+/* ===========================================================================
+   App activation screen
+   =========================================================================== */
+.activation-screen {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(700px 420px at 18% 12%, rgba(99, 102, 241, 0.14), transparent 62%),
+    radial-gradient(720px 460px at 85% 88%, rgba(16, 185, 129, 0.12), transparent 62%),
+    var(--bg);
+}
+.activation-card {
+  width: 400px;
+  max-width: calc(100vw - 40px);
+  background: linear-gradient(180deg, #131f38, #0f172a);
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  padding: 34px 34px 26px;
+  box-shadow:
+    0 30px 90px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(99, 102, 241, 0.08),
+    0 0 60px rgba(16, 185, 129, 0.07);
+  text-align: center;
+  animation: loginIn 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.12);
+}
+.activation-card .clogo {
+  width: 64px; height: 64px;
+  margin: 0 auto 16px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #10b981, #6366f1);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 28px;
+  box-shadow: 0 10px 30px rgba(16, 185, 129, 0.35), 0 4px 14px rgba(99, 102, 241, 0.3);
+}
+.activation-card h2 { font-size: 24px; font-weight: 750; margin-bottom: 6px; }
+.activation-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
+}
+.activation-card input {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 13px 14px;
+  font-size: 15px;
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  outline: none;
+  text-align: center;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.activation-card input:focus {
+  border-color: var(--emerald);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+}
+
+/* ===========================================================================
+   Update panel (Settings → App updates)
+   =========================================================================== */
+.update-progress { display: flex; align-items: center; gap: 10px; }
+.progress-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: #1e293b;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #10b981, #6366f1);
+  transition: width 0.2s ease;
+}

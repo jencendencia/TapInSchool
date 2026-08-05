@@ -4,10 +4,12 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   ActivityItem,
   AdviserSendResult,
+  ActivationResult,
   EmailResult,
   EnrollmentRow,
   ExportResult,
   ImportResult,
+  LicenseStatus,
   LogFilter,
   LoginResult,
   OverviewStats,
@@ -26,6 +28,7 @@ import type {
   StudentInput,
   SystemStatus,
   TapinApi,
+  UpdateStatus,
 } from '../shared/types';
 
 function on<T>(channel: string, cb: (data: T) => void): () => void {
@@ -98,10 +101,21 @@ const api: TapinApi = {
   sendReportToAdvisers: (from: string, to: string, schoolYear?: string) =>
     ipcRenderer.invoke('tapin:sendReportToAdvisers', from, to, schoolYear) as Promise<AdviserSendResult>,
 
-  onScanResult: (cb) => on<ScanResult>('tapin:scan-result', cb),
+onScanResult: (cb) => on<ScanResult>('tapin:scan-result', cb),
   onActivity: (cb) => on<ActivityItem[]>('tapin:activity', cb),
   onStatus: (cb) => on<SystemStatus>('tapin:status', cb),
   onToggleAdmin: (cb) => on<undefined>('tapin:toggle-admin', () => cb()),
+
+  checkForUpdates: () => ipcRenderer.invoke('tapin:checkForUpdates') as Promise<{ success: boolean; message?: string }>,
+  downloadUpdate: () => ipcRenderer.invoke('tapin:downloadUpdate') as Promise<{ success: boolean; message?: string }>,
+  installUpdate: () => ipcRenderer.invoke('tapin:installUpdate') as Promise<{ success: boolean }>,
+  getAppVersion: () => ipcRenderer.invoke('tapin:getAppVersion') as Promise<string>,
+  onUpdateStatus: (cb) => on<UpdateStatus>('update-status', cb),
+
+  checkLicense: () => ipcRenderer.invoke('tapin:checkLicense') as Promise<LicenseStatus>,
+  activateLicense: (licenseKey: string) =>
+    ipcRenderer.invoke('tapin:activateLicense', licenseKey) as Promise<ActivationResult>,
+  getMachineId: () => ipcRenderer.invoke('tapin:getMachineId') as Promise<string>,
 };
 
 contextBridge.exposeInMainWorld('tapin', api);
