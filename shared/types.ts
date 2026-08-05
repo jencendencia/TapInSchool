@@ -1,0 +1,543 @@
+// ---------------------------------------------------------------------------
+// Shared type contract between the Electron main process, the preload bridge,
+// and the React renderer. Keep this file dependency-free.
+// ---------------------------------------------------------------------------
+
+export type EntryType = 'IN' | 'OUT';
+export type SmsStatus = 'PENDING' | 'SENT' | 'FAILED';
+export type ScanSource = 'SCANNER' | 'WEBCAM' | 'MANUAL';
+
+/** Attendance quality flag derived from bell times ('' when on time). */
+export type AttendanceFlag = '' | 'LATE' | 'EARLY';
+
+/** How the student photo renders on the kiosk scan-result card. */
+export type KioskPhotoStyle = 'avatar' | 'zoom' | 'fullbleed';
+
+export type ScanResultKind =
+  | 'SUCCESS'
+  | 'BLOCKED'
+  | 'UNRECOGNIZED'
+  | 'DUPLICATE'
+  | 'OFFLINE'
+  | 'ERROR';
+
+export interface Student {
+  id: number;
+  student_no: string;
+  qr_hash_payload: string;
+  full_name: string;
+  grade_section: string;
+  parent_phone: string;
+  /** URL or inline data URI of the uploaded student photo (resized thumbnail). */
+  photo_url: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface StudentInput {
+  student_no: string;
+  full_name: string;
+  grade_section: string;
+  parent_phone: string;
+  /** URL or inline data URI of the uploaded student photo (resized thumbnail). */
+  photo_url?: string | null;
+  is_active?: boolean;
+}
+
+export interface AttendanceLog {
+  id: number;
+  student_id: number;
+  entry_type: EntryType;
+  scanned_at: string;
+  source: ScanSource;
+  /** LATE (IN after bell_time_in + grace) / EARLY (OUT before bell_time_out). */
+  flag: AttendanceFlag;
+}
+
+export interface AttendanceLogRow extends AttendanceLog {
+  full_name: string;
+  student_no: string;
+  grade_section: string;
+}
+
+export interface SmsLog {
+  id: number;
+  /** Null for non-attendance alerts (e.g. automated absence SMS). */
+  attendance_id: number | null;
+  parent_phone: string;
+  message: string;
+  status: SmsStatus;
+  provider: string | null;
+  attempts: number;
+  error: string | null;
+  created_at: string;
+  sent_at: string | null;
+}
+
+export interface SmsLogRow extends SmsLog {
+  full_name: string | null;
+  entry_type: EntryType | null;
+  scanned_at: string | null;
+}
+
+export interface ScanResult {
+  kind: ScanResultKind;
+  message: string;
+  student?: Student;
+  entryType?: EntryType;
+  log?: AttendanceLog;
+  smsQueued?: boolean;
+  parentPhoneMasked?: string;
+  /** True when the scan was accepted while MySQL was offline and queued for sync. */
+  queuedOffline?: boolean;
+}
+
+export interface LoginResult {
+  ok: boolean;
+  error?: string;
+}
+
+export type SmsProviderId = 'simulator' | 'gsm' | 'cloud';
+
+export type CloudProviderId = 'semaphore' | 'messagebird' | 'philsms' | 'generic';
+
+export interface Settings {
+  school_name: string;
+  /** URL or inline data URI of the uploaded school logo (resized thumbnail). */
+  logo_url: string | null;
+  show_photos: boolean;
+  debounce_seconds: number;
+  sms_provider: SmsProviderId;
+  gsm_com_port: string;
+  gsm_baud: number;
+  /** When true, the GSM provider locates the modem by probing serial ports. */
+  gsm_auto_port: boolean;
+  /** Kiosk scan-result photo layout: round avatar / zoomed square / full-bleed. */
+  kiosk_photo_style: KioskPhotoStyle;
+  cloud_provider: CloudProviderId;
+  cloud_api_key: string;
+  cloud_sender: string;
+  cloud_endpoint: string;
+  sms_template: string;
+  /** Bell / attendance-intelligence settings (Phase 2, 4.1 + 4.2). */
+  bell_time_in: string;
+  bell_time_out: string;
+  bell_grace_minutes: number;
+  absence_detect: boolean;
+  absence_sms: boolean;
+  /** Internal: last date (YYYY-MM-DD) the absence detector ran. */
+  absence_last_run: string;
+
+  // ---- Report email delivery (SMTP) -------------------------------------
+  smtp_host: string;
+  /** SMTP port — 587 (STARTTLS) is the default; 465 pairs with smtp_secure. */
+  smtp_port: number;
+  /** True = implicit TLS (usually port 465); false = STARTTLS (port 587). */
+  smtp_secure: boolean;
+  smtp_user: string;
+  smtp_password: string;
+  /** Allow self-signed TLS certs — needed for some on-prem school mail servers. */
+  smtp_allow_self_signed: boolean;
+  /** From header — falls back to smtp_user when blank. */
+  email_from: string;
+  /** Report recipient(s), comma or semicolon separated. */
+  email_recipient: string;
+}
+
+export interface ProviderStatus {
+  provider: SmsProviderId;
+  online: boolean;
+  detail: string;
+}
+
+export interface SystemStatus {
+  db: { online: boolean; detail: string };
+  sms: ProviderStatus;
+  /** Offline scans still waiting to be replayed into MySQL. */
+  queue: { pending: number };
+}
+
+export interface ActivityItem {
+  id: number;
+  full_name: string;
+  grade_section: string;
+  student_no: string;
+  entry_type: EntryType;
+  scanned_at: string;
+  source: ScanSource;
+  sms_status: SmsStatus | null;
+  parent_phone: string | null;
+  flag: AttendanceFlag;
+}
+
+export interface OverviewStats {
+  todayTotal: number;
+  todayIn: number;
+  todayOut: number;
+  activeStudents: number;
+  totalStudents: number;
+  smsSentToday: number;
+  smsPendingToday: number;
+  smsFailedToday: number;
+  /** IN scans after bell_time_in + grace today. */
+  lateToday: number;
+  /** OUT scans before bell_time_out today. */
+  earlyToday: number;
+  /** Active students with no scan today ("not scanned yet" live view). */
+  absentToday: number;
+  hourlyToday: { hour: number; in: number; out: number }[];
+  last7Days: { date: string; total: number }[];
+}
+
+export interface Paged<T> {
+  rows: T[];
+  total: number;
+}
+
+export interface ImportResult {
+  added: number;
+  skipped: number;
+  errors: string[];
+}
+
+export interface LogFilter {
+  search?: string;
+  from?: string;
+  to?: string;
+  entryType?: EntryType;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SmsFilter {
+  status?: SmsStatus;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+// ---- Reports (admin → PDF / Excel / email export) -------------------------
+
+export type ReportType =
+  | 'summary'
+  | 'register'
+  | 'per-student'
+  | 'per-section'
+  | 'absentee'
+  | 'tardiness'
+  | 'sms-audit'
+  | 'trends';
+
+export interface ReportQuery {
+  /** Inclusive start date, YYYY-MM-DD. */
+  from: string;
+  /** Inclusive end date, YYYY-MM-DD. */
+  to: string;
+  /** Which report section to build (controls which payloads are populated). */
+  type?: ReportType;
+  /** Optional exact grade_section filter for the student-level lists. */
+  section?: string;
+  /** Mask parent phone numbers in the returned data (applies to exports too). */
+  maskPhones?: boolean;
+}
+
+export interface ReportDailyRow {
+  day: string;
+  scans: number;
+  in: number;
+  out: number;
+  /** Live-computed IN-after-cutoff scans that day. */
+  late: number;
+  /** Live-computed OUT-before-dismissal scans that day. */
+  early: number;
+  /** Active students with zero scans that day (scan-derived; 0 on non-gate days). */
+  absent: number;
+  /** Distinct students with ≥1 scan that day (gate-used days only). */
+  present: number;
+}
+
+export interface PerStudentRow {
+  studentId: number;
+  studentNo: string;
+  fullName: string;
+  gradeSection: string;
+  parentPhone: string;
+  /** Distinct days with ≥1 scan. */
+  daysPresent: number;
+  /** Distinct days with ≥1 flagged-late IN (a second IN after returning also flags the day). */
+  daysLate: number;
+  /** schoolDays − daysPresent (≥ 0). */
+  daysAbsent: number;
+  /** daysPresent / schoolDays × 100; null when there are no school days. */
+  attendanceRate: number | null;
+  totalIn: number;
+  totalOut: number;
+  /** Sum of minutes past the cutoff on flagged IN scans. */
+  totalMinutesLate: number;
+  smsCount: number;
+  /** Status of that student's most recent SMS in range (null when none). */
+  lastSmsStatus: SmsStatus | null;
+}
+
+export interface PerSectionRow {
+  gradeSection: string;
+  /** Active students in the section. */
+  enrolled: number;
+  /** Distinct students with ≥1 scan in the range. */
+  present: number;
+  /** Distinct active students with zero scans. */
+  absent: number;
+  /** Distinct students with ≥1 flagged-late IN. */
+  late: number;
+  /** Distinct students with ≥1 flagged-early OUT. */
+  early: number;
+  /** Σ daily present / (enrolled × schoolDays) × 100; null when undefined. */
+  attendanceRate: number | null;
+}
+
+/** One (student, day) cell in the SF2-style register matrix. */
+export interface RegisterRow {
+  studentId: number;
+  /** YYYY-MM-DD. */
+  day: string;
+  /** First IN time 'HH:MM' or null (no IN scan that day). */
+  firstIn: string | null;
+  /** Last OUT time 'HH:MM' or null. */
+  lastOut: string | null;
+}
+
+export interface ReportRegister {
+  windowFrom: string;
+  windowTo: string;
+  /** True when the requested range exceeded the 35-day matrix cap. */
+  capped: boolean;
+  /** Gate-used (school) days inside the window. */
+  days: string[];
+  students: { studentId: number; studentNo: string; fullName: string; gradeSection: string }[];
+  rows: RegisterRow[];
+}
+
+export interface AbsenteeRow {
+  studentId: number;
+  studentNo: string;
+  fullName: string;
+  gradeSection: string;
+  parentPhone: string;
+  /** YYYY-MM-DD the student had zero scans on a school day. */
+  day: string;
+  /** Whether a scan-triggered SMS was sent for that student that day. */
+  smsSent: boolean;
+}
+
+export interface AbsenteeTotalsRow {
+  studentId: number;
+  studentNo: string;
+  fullName: string;
+  gradeSection: string;
+  parentPhone: string;
+  /** Number of absent days for this student in the range. */
+  daysAbsent: number;
+}
+
+export interface TardinessRow {
+  id: number;
+  studentNo: string;
+  fullName: string;
+  gradeSection: string;
+  parentPhone: string;
+  day: string;
+  /** 'HH:MM' scan time. */
+  scannedTime: string;
+  minutesLate: number;
+}
+
+export interface TardinessFrequencyRow {
+  studentId: number;
+  studentNo: string;
+  fullName: string;
+  gradeSection: string;
+  /** Number of flagged-late IN scans in the range. */
+  lateCount: number;
+}
+
+export interface SmsAuditDay {
+  day: string;
+  total: number;
+  sent: number;
+  pending: number;
+  failed: number;
+}
+
+export interface SmsFailureRow {
+  id: number;
+  parentPhone: string;
+  fullName: string | null;
+  provider: string | null;
+  attempts: number;
+  error: string | null;
+  createdAt: string;
+}
+
+export interface WeeklyTrend {
+  /** Monday of the ISO week, YYYY-MM-DD. */
+  weekStart: string;
+  days: number;
+  /** Σ daily distinct-present across the week. */
+  presentDays: number;
+  attendanceRate: number | null;
+}
+
+export interface DayOfWeekTrend {
+  /** 0 = Sunday … 6 = Saturday. */
+  weekday: number;
+  days: number;
+  presentDays: number;
+  attendanceRate: number | null;
+}
+
+export interface GateHourTrend {
+  hour: number;
+  in: number;
+  out: number;
+}
+
+export interface ReportTrends {
+  weekly: WeeklyTrend[];
+  dayOfWeek: DayOfWeekTrend[];
+  gateHours: GateHourTrend[];
+}
+
+export interface ReportData {
+  schoolName: string;
+  from: string;
+  to: string;
+  generatedAt: string;
+  /** The section that produced this report. */
+  type: ReportType;
+  /** Echo of the section filter ('' = all). */
+  section: string;
+  /** Echo of the mask toggle (phones are already masked in the data). */
+  maskPhones: boolean;
+  /** Distinct grade_sections with at least one student (for filters). */
+  sections: string[];
+  /** Late / early cutoff 'HH:MM:SS' strings ('' when disabled). */
+  cutoffs: { late: string; early: string };
+  summary: {
+    scans: number;
+    in: number;
+    out: number;
+    late: number;
+    early: number;
+    /** Sum of scan-derived daily absences (active students with zero scans on gate-used days). */
+    absent: number;
+    /** Distinct students with at least one scan in the range. */
+    present: number;
+    sms: number;
+    smsSent: number;
+    /** Calendar days in the selected range. */
+    days: number;
+    /** Gate-used days (≥1 scan) in the range. */
+    schoolDays: number;
+    /** Active (enrolled) students — the attendance-% denominator. */
+    activeStudents: number;
+    /** Σ daily present / (activeStudents × schoolDays) × 100; null when undefined. */
+    attendanceRate: number | null;
+    /** Average daily attendance: Σ daily present / schoolDays. */
+    ada: number | null;
+    /** IN scans at/before the late cutoff. */
+    onTime: number;
+    onTimePct: number | null;
+    latePct: number | null;
+    /** Active students with attendance < 80% (DepEd at-risk threshold). */
+    atRiskCount: number;
+  };
+  daily: ReportDailyRow[];
+  /** Populated for type 'per-student'. */
+  perStudent: PerStudentRow[];
+  /** Populated for type 'per-section'. */
+  perSection: PerSectionRow[];
+  /** Populated for type 'register' (SF2-style matrix, ≤35 days). */
+  register: ReportRegister;
+  /** Populated for type 'absentee'. */
+  absentee: AbsenteeRow[];
+  /** Populated for type 'absentee' — days absent per student. */
+  absenteeTotals: AbsenteeTotalsRow[];
+  /** Populated for type 'tardiness'. */
+  tardiness: TardinessRow[];
+  /** Populated for type 'tardiness' — late count per student. */
+  tardinessFrequency: TardinessFrequencyRow[];
+  /** Populated for type 'sms-audit'. */
+  smsAudit: { daily: SmsAuditDay[]; failures: SmsFailureRow[] };
+  /** Populated for type 'trends'. */
+  trends: ReportTrends;
+}
+
+export interface ExportResult {
+  ok: boolean;
+  filePath?: string;
+  error?: string;
+}
+
+export interface EmailResult {
+  ok: boolean;
+  /** Success detail (e.g. recipient list). */
+  message?: string;
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// The full API surface exposed on window.tapin by the preload script.
+// The renderer mock (used when running in a plain browser) implements this too.
+// ---------------------------------------------------------------------------
+export interface TapinApi {
+  getStatus(): Promise<SystemStatus>;
+  processScan(payload: string, source: ScanSource): Promise<ScanResult>;
+  getRecentActivity(limit?: number): Promise<ActivityItem[]>;
+  setKioskMode(active: boolean): Promise<void>;
+  toggleFullscreen(): Promise<void>;
+
+  /** Frameless-window controls (Electron only; no-ops in browser mock mode). */
+  windowMinimize(): Promise<void>;
+  windowMaximizeToggle(): Promise<void>;
+  windowClose(): Promise<void>;
+
+  /** Validates admin credentials. The renderer holds the auth session. */
+  login(username: string, password: string): Promise<LoginResult>;
+  logout(): Promise<void>;
+
+  getOverview(): Promise<OverviewStats>;
+  listStudents(search?: string): Promise<Student[]>;
+  createStudent(input: StudentInput): Promise<Student>;
+  updateStudent(id: number, input: Partial<StudentInput>): Promise<Student>;
+  deleteStudent(id: number): Promise<void>;
+  generateQrPayload(studentNo: string): Promise<string>;
+  importStudentsCsv(csv: string): Promise<ImportResult>;
+  seedDemoData(): Promise<ImportResult>;
+
+  listLogs(filter?: LogFilter): Promise<Paged<AttendanceLogRow>>;
+  exportLogsCsv(filter?: LogFilter): Promise<string>;
+
+  listSms(filter?: SmsFilter): Promise<Paged<SmsLogRow>>;
+  retrySms(id: number): Promise<SmsLog>;
+  testSms(phone: string): Promise<{ ok: boolean; message: string }>;
+
+  getSettings(): Promise<Settings>;
+  updateSettings(patch: Partial<Settings>): Promise<Settings>;
+
+  getReport(query: ReportQuery): Promise<ReportData>;
+  /** Generates a PDF of the given report (main-process hidden-window print). */
+  exportReportPdf(report: ReportData): Promise<ExportResult>;
+  /** Exports a styled .xlsx of the given report data. */
+  exportReportXlsx(report: ReportData): Promise<ExportResult>;
+  /** Emails the report (PDF attachment) via the configured SMTP server. */
+  sendReportEmail(report: ReportData): Promise<EmailResult>;
+  /** Sends a plain test message to verify the SMTP settings. */
+  testEmail(to: string): Promise<EmailResult>;
+
+  // ---- Push events (return unsubscribe functions) -------------------------
+  onScanResult(cb: (result: ScanResult) => void): () => void;
+  onActivity(cb: (items: ActivityItem[]) => void): () => void;
+  onStatus(cb: (status: SystemStatus) => void): () => void;
+  /** Fired when the user presses Ctrl+Shift+A (global shortcut in main). */
+  onToggleAdmin(cb: () => void): () => void;
+}

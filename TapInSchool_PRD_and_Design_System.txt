@@ -1,0 +1,151 @@
+# TapIn School - Product Requirement Document (PRD) & App Design Specification
+
+Product Name: TapIn School (Automated School Entry & SMS Notification System)
+Version: 2.0
+Target Platform: Desktop Kiosk (Electron wrapping Next.js) + MySQL Database + USB/Camera QR Scanner + Serial GSM Hardware
+Date: August 2026
+
+===============================================================================
+PART 1: PRODUCT REQUIREMENT DOCUMENT (PRD)
+===============================================================================
+
+1. EXECUTIVE OVERVIEW
+-------------------------------------------------------------------------------
+TapIn School is an on-premises automated attendance logging system designed for school campus gates. It reads student QR Code credentials (via USB hardware QR gun/scanner or video camera feed) at a terminal kiosk, logs entry/exit events to a local MySQL database, provides real-time audio-visual feedback, and asynchronously dispatches instant SMS alerts to parents via an attached GSM hardware module.
+
+
+2. HIGH-LEVEL ARCHITECTURE DIAGRAM
+-------------------------------------------------------------------------------
++-----------------------------------------------------------------------+
+|                          LOCAL KIOSK TERMINAL                         |
+|                                                                       |
+|   [ Hardware Input ]         [ Next.js / Electron GUI ]               |
+|   - USB QR Code Scanner   --> - Virtual Keyboard Input Listener        |
+|   - Web Camera (Fallback)     - Toggle Logic (IN/OUT)                  |
+|                              - Real-time Audio/Visual UI              |
++-----------------------------------------------------------------------+
+                                   |
+                                   v
++-----------------------------------------------------------------------+
+|                     BACKEND & DATA PROCESSING SERVICE                 |
+|                                                                       |
+|   [ MySQL Database ]         [ Asynchronous Task Queue ]             |
+|   - Students Table       <-- - Attendance Logger                      |
+|   - Attendance Logs          - SMS Queue Worker                       |
+|   - SMS Audit Logs               |                                    |
++----------------------------------|------------------------------------+
+                                   |
+                                   v
++-----------------------------------------------------------------------+
+|                        HARDWARE SMS GATEWAY                           |
+|                                                                       |
+|   - Serial Connection (COM / ttyUSB)                                  |
+|   - GSM Module (SIM800L / SIM900A) --> [ Cellular Network ]           |
+|   - Cloud API Fallback (Optional)  --> [ Parent's Mobile Phone ]      |
++-----------------------------------------------------------------------+
+
+
+3. CORE SYSTEM COMPONENTS & ARCHITECTURE
+-------------------------------------------------------------------------------
+3.1 Presentation Layer & QR Processing
+  - Framework: Next.js (React) running inside an Electron desktop wrapper.
+  - Primary Input: USB Barcode/QR Scanner operating in HID Keyboard Emulation Mode. The scanner reads the QR payload and appends a Carriage Return (\n).
+  - Secondary Input: Web camera parser using html5-qrcode or @zxing/library for direct video frame scanning.
+  - Data Security: QR codes contain an encrypted or obfuscated payload string (e.g., CP-2026-9812A) to prevent forgery or manual URL manipulation.
+
+3.2 Application & Business Logic Layer
+  - Runtime: Node.js backend integrated into the local kiosk runtime.
+  - Scan Event Processor Sequence:
+    1. Decodes QR string payload and extracts student_no.
+    2. Queries local MySQL database for active student match.
+    3. Debounce Engine: Ignores identical QR scans from the same student within 120 seconds to eliminate duplicate triggers.
+    4. Toggle Engine: Evaluates student's latest scan today. If status was IN, logs OUT; otherwise logs IN.
+    5. Inserts log into attendance_logs and instantly queues an item into sms_queue.
+
+3.3 Data Persistence Layer (MySQL)
+  - DBMS: Local MySQL 8.0 instance.
+  - Core Schemas:
+    * students: student_no, qr_hash_payload, full_name, grade_section, parent_phone, photo_url, is_active.
+    * attendance_logs: student_id, entry_type (IN/OUT), scanned_at.
+    * sms_logs: attendance_id, parent_phone, message, status (PENDING/SENT/FAILED), created_at.
+
+3.4 Hardware Communication Layer (SMS Engine)
+  - Interface: Serial Communication (Node-SerialPort over COMx or /dev/ttyUSB0).
+  - GSM Hardware: SIM800L / SIM900A module running AT commands (AT+CMGF=1, AT+CMGS="...").
+  - Worker Queue: Asynchronous polling loop picking up PENDING items every 1,000 ms, keeping the Kiosk UI non-blocking.
+
+
+4. FUNCTIONAL REQUIREMENTS
+-------------------------------------------------------------------------------
+[FR-1] Rapid QR Processing: Read and process QR payload within < 300 ms.
+[FR-2] Encrypted QR Codes: System decodes signed/hashed QR codes to prevent fake ID replication.
+[FR-3] Non-blocking SMS: UI executes scan feedback immediately while SMS dispatches in background.
+[FR-4] Auto IN/OUT Toggle: Auto-determines IN or OUT based on previous scan status.
+[FR-5] Anti-Passback / Debounce: Rejects duplicate scans from the same QR within 2 minutes.
+[FR-6] Offline First: All logs and queued SMS messages save locally; no active internet connection required.
+[FR-7] Photo Privacy Control: System respects a global show_photos toggle to render fallback avatars when disabled.
+
+
+5. SEQUENCE FLOW (QR SCAN TO SMS DISPATCH)
+-------------------------------------------------------------------------------
+[Student]       [QR Scanner]       [Kiosk GUI]        [MySQL Database]      [SMS Queue Worker]     [GSM Module]
+    |                |                  |                     |                     |                   |
+    |-- Present QR ->|                  |                     |                     |                   |
+    |                |-- Send String -->|                     |                     |                   |
+    |                |   (HID Keyboard) |-- Query Student --->|                     |                   |
+    |                |                  |<-- Student Record --|                     |                   |
+    |                |                  |-- Commit Log ------->|                     |                   |
+    |<-- Sound & Visual Feedback -------|-- Enqueue SMS ------>|                     |                   |
+    |                |                  |                     |                     |                   |
+    |                |                  |                     |<-- Fetch PENDING ---|                   |
+    |                |                  |                     |-- Return Payload -->|                   |
+    |                |                  |                     |                     |--- AT+CMGS ------>|
+    |                |                  |                     |                     |<-- OK Response ---|
+    |                |                  |                     |<-- Mark SENT -------|                   |
+
+
+===============================================================================
+PART 2: APP DESIGN SPECIFICATION & UI SYSTEM GUIDE
+===============================================================================
+
+1. VISUAL HIERARCHY & COLOR PALETTE
+-------------------------------------------------------------------------------
+- Canvas Background: Deep Slate / Obsidian (#020617 / slate-950) to reduce glare on high-brightness kiosk monitors.
+- Surface Containers: Dark Slate (#0F172A / slate-900) with subtle borders (#1E293B / slate-800).
+- Accent Colors:
+  * Success / IN State: Emerald Green (#10B981 / emerald-500)
+  * Exit / OUT State: Indigo Blue (#6366F1 / indigo-500)
+  * Blocked / Restricted: Rose Red (#F43F5E / rose-500)
+  * Unrecognized QR: Amber Yellow (#F59E0B / amber-500)
+
+
+2. SCREEN LAYOUTS
+-------------------------------------------------------------------------------
+2.1 Screen A: Fullscreen Kiosk Terminal
+  - Top Header:
+    * School logo & name (left)
+    * Real-time digital clock & current date (right)
+    * Live hardware connection status indicators (Serial GSM Status, Database Ping)
+  - Central Display Area (Dynamic States):
+    * State 1: Idle (Awaiting Scan) -> Animated QR pulse illustration; Prompt text: "Please present your Student QR Code to the scanner."
+    * State 2: Scan Success (IN or OUT) -> Full-width status badge (CHECKED IN or CHECKED OUT); Large student photo display (or neutral placeholder); Student Full Name (Large bold header, 36px+); Grade, Section, & Student ID number; Live toast notification: "Parent SMS queued to +63917*****67".
+    * State 3: Restricted / Blocked -> High-visibility warning alert styling (bg-rose-950/40); Text: "Access Restricted. Please report to the Principal / Admin Office."
+  - Right Panel:
+    * Live Activity Feed: Scrollable list showing the last 5 scanned students with timestamps and real-time SMS delivery status tags (QUEUED -> SENT).
+
+2.2 Screen B: Admin & Management Dashboard
+  - Navigation Sidebar:
+    * Overview (Daily Attendance Graphs, In/Out Ratios)
+    * Students (CRUD management, QR Code Generator, CSV Import)
+    * Attendance Logs (Historical Search, Export to Excel/PDF)
+    * SMS Outbox (Delivery Audit Log, Failed Retries, SIM Balance)
+    * Settings (Global Toggles: Show Photos, Debounce Timeout, COM Port selection)
+
+
+3. UI COMPONENT LIBRARY RULES & MICRO-INTERACTIONS
+-------------------------------------------------------------------------------
+- Audio Feedback:
+  * success_chime.mp3 on valid QR scan.
+  * alert_tone.mp3 on blocked or unrecognized QR code.
+- Auto-Reset Timer: Kiosk screen resets back to IDLE state automatically after 4 seconds of displaying scan result.
+- Responsive Kiosk Scaling: Designed for 1080p / 4K landscape kiosk displays with high-contrast text elements for daylight visibility.

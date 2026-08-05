@@ -1,0 +1,19 @@
+# Optional: the easiest way to stand up the local MySQL 8.0 instance required by TapIn School.
+#   docker compose up -d
+# Then copy .env.example to .env and set DB_PASSWORD to match MYSQL_ROOT_PASSWORD below.
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: tapin-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: tapin_root_pw
+      MYSQL_DATABASE: tapin_school
+    ports:
+      - "3306:3306"
+    volumes:
+      - tapin_mysql_data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+volumes:
+  tapin_mysql_data:

@@ -1,0 +1,32 @@
+appId: com.tapin.school
+productName: TapIn School
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+# Native serialport bindings must stay unpacked to be loadable from the packaged app.
+asarUnpack:
+  - "**/*.node"
+  - node_modules/serialport/**
+  - node_modules/@serialport/**
+win:
+  # App (taskbar/desktop/installer) icon — 1024x1024 PNG, converted to .ico
+  # during packaging. Separate from the school logo in Settings.
+  icon: JE_logo.png
+  target:
+    - nsis
+# Auto-update endpoint (P0-3.8). electron-updater checks this URL for new
+# builds and installs them on quit. Replace with your real update server or
+# GitHub releases URL before shipping; until then the check just fails silently.
+publish:
+  provider: generic
+  url: https://updates.example.com/tapin-school
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+npmRebuild: true
