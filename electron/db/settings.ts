@@ -30,7 +30,10 @@ function buildDefaults(): Settings {
     absence_detect: true,
     absence_sms: true,
     absence_last_run: '',
-    smtp_host: '',
+    // Pre-configured for Gmail (SMTP + STARTTLS on 587). The admin only needs
+    // to enter their Gmail address in smtp_user and an App Password in
+    // smtp_password — everything else is already correct for Gmail/Workspace.
+    smtp_host: 'smtp.gmail.com',
     smtp_port: 587,
     smtp_secure: false,
     smtp_user: '',

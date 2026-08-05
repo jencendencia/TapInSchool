@@ -428,7 +428,7 @@ export function SettingsPage({ onSettingsSaved }: { onSettingsSaved?: () => void
                 <div className="field">
                   <label>Endpoint URL</label>
                   <input value={settings.cloud_endpoint} onChange={(e) => set('cloud_endpoint', e.target.value)} placeholder="https://api.example.com/sms" />
-                </div>
+</div>
               )}
             </>
           )}
@@ -439,6 +439,9 @@ export function SettingsPage({ onSettingsSaved }: { onSettingsSaved?: () => void
           <div className="field">
             <label>SMTP server</label>
             <input value={settings.smtp_host} onChange={(e) => set('smtp_host', e.target.value)} placeholder="smtp.gmail.com" />
+            <p className="field-hint">
+              Pre-configured for <b>Gmail</b> — just enter your Gmail address and App Password below.
+            </p>
           </div>
           <div className="field-row">
             <div className="field">
