@@ -44,18 +44,63 @@ function fileToResizedDataUrl(file: File, maxSize = 320, quality = 0.78): Promis
 
 export function SettingsPage({ onSettingsSaved }: { onSettingsSaved?: () => void }) {
   const { refresh: refreshYears } = useSchoolYear();
-  const [settings, setSettings] = useState<Settings | null>(null);
+const [settings, setSettings] = useState<Settings | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [logoError, setLogoError] = useState<string | null>(null);
   const [testingEmail, setTestingEmail] = useState(false);
   const [schoolYears, setSchoolYears] = useState<SchoolYear[]>([]);
   const [newYear, setNewYear] = useState('');
   const [yearBusy, setYearBusy] = useState(false);
+  /** Snapshot of the last saved/loaded settings, diffed against current to show an unsaved notice. */
+  const savedRef = useRef<Settings | null>(null);
+  const [dirty, setDirty] = useState(false);
   const logoRef = useRef<HTMLInputElement>(null);
+  /** Latest settings each render, so the leave-page auto-save sees fresh values. */
+  const settingsRef = useRef<Settings | null>(null);
+  settingsRef.current = settings;
+  const savingRef = useRef(false);
 
   useEffect(() => {
-    void api.getSettings().then(setSettings);
+    void api.getSettings().then((s) => {
+      savedRef.current = s;
+      setSettings(s);
+    });
     void api.listSchoolYears().then(setSchoolYears);
+  }, []);
+
+  // Recompute the unsaved flag by diffing against the last saved snapshot, so
+  // reverting a field back to its saved value clears the notice (no stale flag).
+  useEffect(() => {
+    const base = savedRef.current;
+    setDirty(!!base && !!settings && JSON.stringify(settings) !== JSON.stringify(base));
+  }, [settings]);
+
+  // Persist any pending changes when leaving the page — sidebar tab switch,
+  // log out, back to kiosk, or window close — so edits are never silently lost.
+  // savingRef guards against racing a manual Save that is still in flight.
+  const saveIfDirty = () => {
+    const current = settingsRef.current;
+    const base = savedRef.current;
+    if (!current || !base || JSON.stringify(current) === JSON.stringify(base) || savingRef.current) return;
+    savingRef.current = true;
+    void api
+      .updateSettings(current)
+      .then((saved) => {
+        savedRef.current = saved;
+      })
+      .finally(() => {
+        savingRef.current = false;
+      });
+  };
+
+  useEffect(() => {
+    // beforeunload covers closing the Electron window / browser tab, where
+    // React unmount cleanup is not guaranteed to run.
+    window.addEventListener('beforeunload', saveIfDirty);
+    return () => {
+      window.removeEventListener('beforeunload', saveIfDirty);
+      saveIfDirty();
+    };
   }, []);
 
   const addSchoolYear = async () => {
@@ -112,8 +157,11 @@ export function SettingsPage({ onSettingsSaved }: { onSettingsSaved?: () => void
     }
   };
 
-  const set = <K extends keyof Settings>(key: K, value: Settings[K]) =>
-    setSettings((s) => (s ? { ...s, [key]: value } : s));
+const set = <K extends keyof Settings>(key: K, value: Settings[K]) =>
+    setSettings((s) => {
+      if (!s) return s;
+      return { ...s, [key]: value };
+    });
 
   const pickLogo = (file?: File | null) => {
     if (!file) return;
@@ -127,14 +175,23 @@ export function SettingsPage({ onSettingsSaved }: { onSettingsSaved?: () => void
 
   if (!settings) return <Spinner label="Loading settings…" />;
 
-  const save = async () => {
-    // Use the returned settings: in Electron the logo data URI is persisted to
-    // a file on disk and logo_url comes back as the tapin-logo:// URL.
-    const saved = await api.updateSettings(settings);
-    setSettings(saved);
-    setToast('Settings saved');
-    onSettingsSaved?.();
-    setTimeout(() => setToast(null), 3000);
+const save = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    try {
+      const current = settingsRef.current;
+      if (!current) return;
+      // Use the returned settings: in Electron the logo data URI is persisted to
+      // a file on disk and logo_url comes back as the tapin-logo:// URL.
+      const saved = await api.updateSettings(current);
+      savedRef.current = saved;
+      setSettings(saved);
+      setToast('Settings saved');
+      onSettingsSaved?.();
+      setTimeout(() => setToast(null), 3000);
+    } finally {
+      savingRef.current = false;
+    }
   };
 
   const testEmail = async () => {
@@ -171,10 +228,19 @@ setTestingEmail(true);
           <h2>Settings</h2>
           <p className="text-dim">Global kiosk configuration</p>
         </div>
-        <div className="page-actions">
-          <button className="btn-primary" onClick={() => void save()}>💾 Save Settings</button>
+<div className="page-actions">
+          <button className="btn-primary" disabled={!dirty} onClick={() => void save()}>💾 Save Settings</button>
         </div>
       </div>
+
+      {dirty && (
+        <div className="settings-unsaved">
+          <span className="settings-unsaved-dot" />
+          <span>
+            You have <b>unsaved changes</b> — they will be saved automatically when you leave this page, or click <b>💾 Save Settings</b> now.
+          </span>
+        </div>
+      )}
 
       <div className="settings-grid">
         <div className="settings-card">
