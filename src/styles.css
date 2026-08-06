@@ -172,6 +172,7 @@ button { font-family: inherit; }
 .kiosk-brand { display: flex; align-items: center; gap: 13px; -webkit-app-region: drag; }
 .kiosk-logo {
   width: 44px; height: 44px;
+  flex: none; /* never let the logo shrink to fit neighboring text */
   border-radius: 12px;
   background: linear-gradient(135deg, #10b981, #6366f1);
   display: flex; align-items: center; justify-content: center;
@@ -481,6 +482,108 @@ button { font-family: inherit; }
 }
 .cam-error-icon { font-size: 34px; opacity: 0.8; margin-bottom: 6px; }
 
+/* ---- Idle actions (camera + forgot-QR manual check-in) ---- */
+.idle-actions { display: flex; gap: 12px; margin-top: 24px; }
+.idle-actions .cam-btn { margin-top: 0; flex: 1; width: auto; white-space: nowrap; }
+
+/* ---- Manual check-in overlay (staff PIN + student search) ---- */
+.manual-card { width: 540px; max-width: calc(100vw - 40px); }
+.manual-pin { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.manual-pin .cam-hint { margin-top: 0; }
+.pin-dots { display: flex; gap: 12px; margin-top: 6px; }
+.pin-dot {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  background: transparent;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+.pin-dot-fill { background: var(--emerald); border-color: var(--emerald); transform: scale(1.15); box-shadow: 0 0 10px rgba(16, 185, 129, 0.5); }
+.pin-input {
+  position: absolute;
+  width: 1px; height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.pin-error { color: #fb7185; font-size: 13px; font-weight: 600; }
+.pin-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 64px);
+  gap: 10px;
+  margin-top: 4px;
+}
+.pin-key {
+  height: 52px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: all 0.13s ease;
+}
+.pin-key:hover { background: #1b2a4a; border-color: #475569; transform: translateY(-1px); }
+.pin-key:active { transform: translateY(0) scale(0.96); }
+.pin-key:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+.pin-key-spacer { height: 52px; }
+.manual-unlock { width: 100%; max-width: 212px; margin-top: 2px; }
+
+.manual-search { display: flex; flex-direction: column; gap: 4px; }
+.manual-search .field { gap: 0; }
+.manual-search .search-input { width: 100%; font-size: 15px; padding: 12px 14px; }
+.manual-results {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.manual-result {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.13s ease;
+}
+.manual-result:hover {
+  background: var(--surface-2);
+  border-color: rgba(16, 185, 129, 0.55);
+  transform: translateX(3px);
+}
+.manual-result-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.manual-result-name { font-weight: 650; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.manual-result-meta { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.manual-result-arrow { color: var(--text-faint); font-size: 20px; transition: transform 0.13s ease; }
+.manual-result:hover .manual-result-arrow { transform: translateX(3px); color: #34d399; }
+.manual-empty { color: var(--text-faint); text-align: center; padding: 26px 0; font-size: 13.5px; }
+
+.manual-confirm {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+  background: var(--bg);
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  border-radius: 14px;
+  padding: 14px;
+  animation: centerEnter 0.2s ease;
+}
+.manual-confirm-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.manual-confirm-info strong { font-size: 15px; }
+.manual-confirm-actions { display: flex; gap: 8px; }
+
 /* ===========================================================================
    ADMIN
    =========================================================================== */
@@ -587,6 +690,16 @@ button { font-family: inherit; }
   padding: 20px 14px;
 }
 .admin-brand { display: flex; align-items: center; gap: 12px; padding: 4px 8px 18px; border-bottom: 1px solid var(--border); }
+/* In the sidebar the school name must yield to the logo, not the other way
+   around: keep the fixed 44px tile intact and let a long name shrink its text
+   size and wrap onto two lines instead. */
+.admin-brand .kiosk-logo { width: 44px; height: 44px; flex: none; }
+.admin-brand .kiosk-name {
+  font-size: 15px;
+  line-height: 1.2;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
 .admin-nav { flex: 1; display: flex; flex-direction: column; gap: 4px; padding-top: 14px; }
 .admin-nav-item {
   display: flex; align-items: center; gap: 12px;
@@ -1332,4 +1445,89 @@ input[type='checkbox'] {
   border-radius: 999px;
   background: linear-gradient(90deg, #10b981, #6366f1);
   transition: width 0.2s ease;
+}
+
+/* ===========================================================================
+   Announcements (kiosk idle slideshow)
+   =========================================================================== */
+.pill-info {
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+}
+.ann-title { font-weight: 650; }
+.ann-msg {
+  color: var(--text-dim);
+  font-size: 13px;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ann-media-upload { display: flex; align-items: center; gap: 12px; }
+.ann-preview { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.ann-preview-media {
+  max-width: 260px;
+  max-height: 160px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  object-fit: contain;
+  background: var(--bg);
+}
+.inline-field { display: inline-flex; align-items: center; gap: 8px; }
+
+/* ---- Kiosk idle carousel ---- */
+.announcement-carousel {
+  width: 100%;
+  max-width: 720px;
+  gap: 18px;
+}
+.announcement-slide {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 22px;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.announcement-media {
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  background: var(--bg);
+  display: block;
+}
+.announcement-video { max-height: 440px; }
+.announcement-copy {
+  padding: 26px 34px 30px;
+  text-align: center;
+  width: 100%;
+}
+.announcement-title {
+  font-size: 30px;
+  font-weight: 780;
+  letter-spacing: 0.01em;
+  margin-bottom: 8px;
+}
+.announcement-text {
+  color: var(--text-dim);
+  font-size: 17px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.announcement-dots { display: flex; gap: 8px; }
+.announcement-dots .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+.announcement-dots .dot-on {
+  background: var(--emerald);
+  transform: scale(1.2);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
 }

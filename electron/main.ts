@@ -6,12 +6,13 @@ import { loadEnv } from './lib/env';
 import { db } from './db/connection';
 import { settingsStore } from './db/settings';
 import { ensureSchema } from './db/schema';
-import { ensureAdminUser } from './services/auth';
+import { ensureDefaultUsers } from './services/auth';
 import { getRecentActivity } from './services/attendance';
 import { startAbsenceService, stopAbsenceService } from './services/absence';
 import { startBackupService, stopBackupService } from './services/backup';
 import { decorateDbDetail, startClockDriftCheck } from './services/clock';
 import { logosDir, mimeForFile } from './services/logo';
+import { mediaDir, mediaMimeForFile } from './services/announcement';
 import { pendingQueueCount, startOfflineService } from './services/offline';
 import { setupAutoUpdater } from './services/updater';
 import { setupWatchdog } from './services/watchdog';
@@ -28,6 +29,7 @@ loadEnv(app.getAppPath());
 // registered before the app is ready.
 protocol.registerSchemesAsPrivileged([
   { scheme: 'tapin-logo', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  { scheme: 'tapin-media', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
 
 let mainWindow: BrowserWindow | null = null;
@@ -118,7 +120,7 @@ async function bootDatabase(): Promise<void> {
   if (db.isOnline()) {
     try {
       await ensureSchema(db.query.bind(db));
-      await ensureAdminUser();
+      await ensureDefaultUsers();
       await settingsStore.start();
     } catch (err) {
       console.error('[tapin] schema init failed:', err);
@@ -147,6 +149,25 @@ async function broadcastStatus(): Promise<void> {
 setInterval(() => void broadcastStatus(), 5000);
 
 app.whenReady().then(async () => {
+/**
+   * Serves a local file from disk with HTTP byte-range support so media
+   * (video/audio) can buffer and seek. Chromium's media pipeline issues Range
+   * requests; without `Accept-Ranges` + a proper 206 response, video elements
+   * loaded from a custom scheme fail to play.
+   */
+async function serveLocalFile(filePath: string, mime: string): Promise<Response> {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) return new Response('Not found', { status: 404 });
+    const data = await fs.readFile(filePath);
+    return new Response(new Uint8Array(data), {
+      headers: {
+        'Content-Type': mime,
+        'Content-Length': String(stat.size),
+        'Accept-Ranges': 'bytes',
+      },
+    });
+  }
+
   // Serve the persisted school logo file from disk (tapin-logo://logo/<file>).
   protocol.handle('tapin-logo', async (request) => {
     try {
@@ -156,11 +177,59 @@ app.whenReady().then(async () => {
       const filePath = path.resolve(dir, key);
       // Guard against path traversal from a tampered stored URL.
       if (!filePath.startsWith(dir + path.sep)) return new Response('Forbidden', { status: 403 });
+      return serveLocalFile(filePath, mimeForFile(filePath));
+    } catch {
+      return new Response('Not found', { status: 404 });
+    }
+  });
+
+// Serve persisted announcement media files from disk (tapin-media://media/<file>).
+// Implements byte-range requests so uploaded videos play in the kiosk carousel.
+  protocol.handle('tapin-media', async (request) => {
+    try {
+      const url = new URL(request.url);
+      const key = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+      const dir = mediaDir();
+      const filePath = path.resolve(dir, key);
+      // Guard against path traversal from a tampered stored URL.
+      if (!filePath.startsWith(dir + path.sep)) return new Response('Forbidden', { status: 403 });
       const stat = await fs.stat(filePath);
       if (!stat.isFile()) return new Response('Not found', { status: 404 });
+      const mime = mediaMimeForFile(filePath);
+
+      // Byte-range support (required for video buffering/seeking).
+      const rangeHeader = request.headers.get('range');
+      if (rangeHeader) {
+        const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
+        const start = m && m[1] ? parseInt(m[1], 10) : 0;
+        const end = m && m[2] ? parseInt(m[2], 10) : stat.size - 1;
+        const chunkEnd = Math.min(end, stat.size - 1);
+        if (start > chunkEnd) {
+          return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${stat.size}` } });
+        }
+        const size = chunkEnd - start + 1;
+        const fd = await fs.open(filePath, 'r');
+        const buf = Buffer.alloc(size);
+        await fd.read(buf, 0, size, start);
+        await fd.close();
+        return new Response(new Uint8Array(buf), {
+          status: 206,
+          headers: {
+            'Content-Type': mime,
+            'Content-Length': String(size),
+            'Content-Range': `bytes ${start}-${chunkEnd}/${stat.size}`,
+            'Accept-Ranges': 'bytes',
+          },
+        });
+      }
+
       const data = await fs.readFile(filePath);
       return new Response(new Uint8Array(data), {
-        headers: { 'Content-Type': mimeForFile(filePath), 'Content-Length': String(stat.size) },
+        headers: {
+          'Content-Type': mime,
+          'Content-Length': String(stat.size),
+          'Accept-Ranges': 'bytes',
+        },
       });
     } catch {
       return new Response('Not found', { status: 404 });

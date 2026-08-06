@@ -11,26 +11,28 @@ export default function App() {
   const [adminAuthed, setAdminAuthed] = useState(false);
   const [activated, setActivated] = useState<boolean | null>(null);
 
+  const handleLogout = useCallback(() => {
+    void api.logout();
+    setAdminAuthed(false);
+    setMode('kiosk');
+  }, []);
+
   // Toggling to admin requires a successful sign-in (kiosk stays public).
   const handleToggleAdmin = useCallback(() => {
     if (mode === 'kiosk') {
       if (adminAuthed) setMode('admin');
       else setLoginOpen(true);
     } else {
-      setMode('kiosk');
+      // Leaving admin from anywhere (sidebar button or Ctrl+Shift+A) ends the
+      // session so the dashboard can't be reopened without signing in again.
+      handleLogout();
     }
-  }, [mode, adminAuthed]);
+  }, [mode, adminAuthed, handleLogout]);
 
   const handleLoginSuccess = useCallback(() => {
     setAdminAuthed(true);
     setLoginOpen(false);
     setMode('admin');
-  }, []);
-
-  const handleLogout = useCallback(() => {
-    void api.logout();
-    setAdminAuthed(false);
-    setMode('kiosk');
   }, []);
 
 // Ctrl+Shift+A is a global shortcut in Electron (main process) and a
@@ -56,7 +58,7 @@ export default function App() {
       {mode === 'kiosk' ? (
         <KioskScreen onOpenAdmin={handleToggleAdmin} />
       ) : (
-        <AdminDashboard onBackToKiosk={handleToggleAdmin} onLogout={handleLogout} />
+        <AdminDashboard onLogout={handleLogout} />
       )}
       {loginOpen && <LoginModal onSuccess={handleLoginSuccess} onCancel={() => setLoginOpen(false)} />}
     </>

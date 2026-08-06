@@ -101,6 +101,32 @@ export interface ScanResult {
 export interface LoginResult {
   ok: boolean;
   error?: string;
+  /** Role of the signed-in user (admin can open the dashboard; staff is kiosk-only). */
+  role?: UserRole;
+}
+
+// ---- Users & roles ---------------------------------------------------------
+
+/** Who the account is: admin (dashboard access) or staff (kiosk manual check-in PIN). */
+export type UserRole = 'admin' | 'staff';
+
+/** A dashboard/kiosk account. The PIN hash is never exposed to the renderer. */
+export interface User {
+  id: number;
+  username: string;
+  role: UserRole;
+  /** True when the account has a kiosk PIN set (staff use it for manual check-in). */
+  has_pin: boolean;
+  created_at: string;
+}
+
+export interface UserInput {
+  username: string;
+  role: UserRole;
+  /** Required when creating/updating an admin (hashed server-side). */
+  password?: string;
+  /** 4–8 digit kiosk PIN. Required for staff; pass '' to clear an existing PIN. */
+  pin?: string;
 }
 
 export type SmsProviderId = 'simulator' | 'gsm' | 'cloud';
@@ -109,6 +135,10 @@ export type CloudProviderId = 'semaphore' | 'messagebird' | 'philsms' | 'generic
 
 export interface Settings {
   school_name: string;
+  /** Minutes of kiosk inactivity before idle announcements start (default 1). */
+  announcements_idle_minutes: number;
+  /** Seconds each non-video announcement shows before advancing (default 8). */
+  announcement_slide_seconds: number;
   /** URL or inline data URI of the uploaded school logo (resized thumbnail). */
   logo_url: string | null;
   show_photos: boolean;
@@ -631,6 +661,37 @@ export interface AdviserSendResult {
   details: AdviserSendDetail[];
 }
 
+// ---- Announcements (kiosk idle slideshow) -----------------------------------
+
+/** What kind of media an announcement carries ('none' = text only). */
+export type AnnouncementMediaType = 'none' | 'image' | 'video';
+
+/** A kiosk announcement displayed on the idle screen. */
+export interface Announcement {
+  id: number;
+  title: string;
+  content_text: string;
+  /** tapin-media:// URL for an uploaded image/video, or null for text-only. */
+  media_url: string | null;
+  media_type: AnnouncementMediaType;
+  is_active: boolean;
+  /** Display order in the kiosk carousel (lowest first). */
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AnnouncementInput {
+  title: string;
+  content_text: string;
+  /** Inline data URI (data:image/... or data:video/...) sent on upload; the
+   * backend persists it and returns a tapin-media:// URL. */
+  media?: string | null;
+  media_type: AnnouncementMediaType;
+  is_active?: boolean;
+  sort_order?: number;
+}
+
 // ---- Auto-update (electron-updater → GitHub Releases) ----------------------
 
 export type UpdateStatusKind =
@@ -703,6 +764,15 @@ export interface TapinApi {
   login(username: string, password: string): Promise<LoginResult>;
   logout(): Promise<void>;
 
+  /** All accounts (username, role, PIN set) — never the password/PIN hashes. */
+  listUsers(): Promise<User[]>;
+  /** Creates an account. Admin needs a password; staff needs a 4–8 digit PIN. */
+  createUser(input: UserInput): Promise<User>;
+  /** Updates an account (username/role/password/PIN). Pass pin: '' to clear it. */
+  updateUser(id: number, patch: Partial<UserInput>): Promise<User>;
+  /** Deletes an account; refuses to remove the last admin. */
+  deleteUser(id: number): Promise<void>;
+
   getOverview(): Promise<OverviewStats>;
   listStudents(search?: string): Promise<Student[]>;
   createStudent(input: StudentInput): Promise<Student>;
@@ -721,6 +791,8 @@ export interface TapinApi {
 
   getSettings(): Promise<Settings>;
   updateSettings(patch: Partial<Settings>): Promise<Settings>;
+  /** True when the given PIN matches the configured kiosk staff PIN (manual check-in). */
+  verifyStaffPin(pin: string): Promise<boolean>;
 
   /** Registered sections (one row per grade_section, with adviser + email). */
   listSections(): Promise<Section[]>;
@@ -740,8 +812,19 @@ export interface TapinApi {
   saveSchoolYear(name: string): Promise<SchoolYear>;
   /** Sets the current school year; students' current sections rebuild from it. */
   setCurrentSchoolYear(name: string): Promise<void>;
-  /** Removes a non-current school year and its enrollments. */
+/** Removes a non-current school year and its enrollments. */
   deleteSchoolYear(name: string): Promise<void>;
+
+  /** All announcements, newest first (both active and inactive). */
+  listAnnouncements(): Promise<Announcement[]>;
+  /** Creates an announcement (persists uploaded media to disk). */
+  createAnnouncement(input: AnnouncementInput): Promise<Announcement>;
+  /** Updates an announcement (replaces media when a new one is supplied). */
+  updateAnnouncement(id: number, input: Partial<AnnouncementInput>): Promise<Announcement>;
+  /** Deletes an announcement and its persisted media file. */
+  deleteAnnouncement(id: number): Promise<void>;
+  /** Active announcements ordered for the kiosk carousel (sort_order asc). */
+  listActiveAnnouncements(): Promise<Announcement[]>;
 
   getReport(query: ReportQuery): Promise<ReportData>;
   /** Generates a PDF of the given report (main-process hidden-window print). */

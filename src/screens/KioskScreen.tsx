@@ -2,12 +2,13 @@
 // display (idle / success / blocked / unrecognized), live activity feed,
 // webcam fallback scanner, and 4-second auto-reset.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ActivityItem, KioskPhotoStyle, ScanResult, Settings, SystemStatus } from '../../shared/types';
+import type { ActivityItem, Announcement, KioskPhotoStyle, ScanResult, Settings, Student, SystemStatus } from '../../shared/types';
 import { api, isElectron, mockPayload } from '../lib/api';
 import { playAlert, playSuccess, playUnrecognized } from '../lib/audio';
 import { useClock } from '../hooks/useClock';
 import { ActivityFeed } from '../components/ActivityFeed';
 import { CameraScanner } from '../components/CameraScanner';
+import { ManualCheckIn } from '../components/ManualCheckIn';
 import { WindowControls } from '../components/WindowControls';
 import { Avatar, QrCodeImage, SchoolLogo, fmtTimeSec } from '../components/shared';
 
@@ -141,7 +142,15 @@ function DuplicateView({ result }: { result: ScanResult }) {
   );
 }
 
-function IdleView({ onCamera, schoolName }: { onCamera: () => void; schoolName?: string | null }) {
+function IdleView({
+  onCamera,
+  onManual,
+  schoolName,
+}: {
+  onCamera: () => void;
+  onManual: () => void;
+  schoolName?: string | null;
+}) {
   return (
     <div className="idle-view">
       <div className="qr-pulse-wrap">
@@ -155,9 +164,56 @@ function IdleView({ onCamera, schoolName }: { onCamera: () => void; schoolName?:
           Browser demo mode — press <b>Simulate scan</b> below or use the Camera Scanner.
         </p>
       )}
-      <button className="btn-ghost cam-btn" onClick={onCamera}>
-        📷 Camera Scanner
-      </button>
+      <div className="idle-actions">
+        <button className="btn-ghost cam-btn" onClick={onCamera}>
+          📷 Camera Scanner
+        </button>
+        <button className="btn-ghost cam-btn" onClick={onManual}>
+          📇 Forgot your QR?
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AnnouncementsView({
+  announcement,
+  onVideoEnded,
+}: {
+  announcement: Announcement;
+  onVideoEnded: () => void;
+}) {
+  const isVideo = announcement.media_type === 'video' && !!announcement.media_url;
+  const videoRef = useRef<HTMLVideoElement>(null);
+  // Explicitly start playback once the video element mounts (autoplay can be
+  // blocked or skipped in some Electron/Chromium versions, so calling play()
+  // after the element is ready is the reliable path). Reloads on each slide
+  // change because the element is keyed by the carousel index.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const p = v.play();
+    if (p && typeof p.catch === 'function') p.catch(() => undefined);
+  }, [announcement.media_url]);
+  return (
+    <div className="announcement-slide">
+      {announcement.media_url && isVideo ? (
+        <video
+          ref={videoRef}
+          className="announcement-media announcement-video"
+          src={announcement.media_url}
+          autoPlay
+          muted
+          playsInline
+          onEnded={onVideoEnded}
+        />
+      ) : announcement.media_url ? (
+        <img className="announcement-media announcement-image" src={announcement.media_url} alt={announcement.title} />
+      ) : null}
+      <div className="announcement-copy">
+        {announcement.title && <h2 className="announcement-title">{announcement.title}</h2>}
+        {announcement.content_text && <p className="announcement-text">{announcement.content_text}</p>}
+      </div>
     </div>
   );
 }
@@ -169,16 +225,54 @@ export function KioskScreen({ onOpenAdmin }: { onOpenAdmin: () => void }) {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [camOpen, setCamOpen] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [announceIndex, setAnnounceIndex] = useState(0);
+  const announceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const announceIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const centerKey = useRef(0);
+  // Holds the latest showResult so the mount effect (which must run exactly
+  // once) can call it without being re-created on every settings change.
+  const showResultRef = useRef<(r: ScanResult) => void>(() => undefined);
+
+  // When idle (no announcements showing), start the countdown to show the
+  // carousel after the configured number of minutes.
+const armAnnounceIdle = useCallback(() => {
+    if (announceIdleTimer.current) clearTimeout(announceIdleTimer.current);
+    const minutes = Math.max(1, settings?.announcements_idle_minutes || 1);
+    announceIdleTimer.current = setTimeout(() => {
+      void api.listActiveAnnouncements().then((active) => {
+        if (active.length) {
+          setAnnouncements(active);
+          setAnnounceIndex(0);
+        }
+      });
+    }, minutes * 60 * 1000);
+  }, [settings]);
+
+  // Stop the carousel (clear slide timer + idle countdown) when a result shows.
+  const stopAnnouncements = useCallback(() => {
+    if (announceTimer.current) clearTimeout(announceTimer.current);
+    if (announceIdleTimer.current) clearTimeout(announceIdleTimer.current);
+    setAnnouncements([]);
+  }, []);
 
   const showResult = useCallback((result: ScanResult) => {
     centerKey.current += 1;
+    stopAnnouncements();
     setCenter({ kind: 'result', result });
     // PRD: auto-reset to idle after 4s.
     if (resetTimer.current) clearTimeout(resetTimer.current);
-    resetTimer.current = setTimeout(() => setCenter({ kind: 'idle' }), AUTO_RESET_MS);
-  }, []);
+    resetTimer.current = setTimeout(() => {
+      setCenter({ kind: 'idle' });
+      armAnnounceIdle();
+    }, AUTO_RESET_MS);
+  }, [armAnnounceIdle, stopAnnouncements]);
+
+  // Keep the latest showResult in a ref so the mount effect (below) can call
+  // it without the effect being re-created each time settings change.
+  showResultRef.current = showResult;
 
   useEffect(() => {
     void api.getRecentActivity(5).then(setActivity);
@@ -190,7 +284,7 @@ export function KioskScreen({ onOpenAdmin }: { onOpenAdmin: () => void }) {
       else if (r.kind === 'BLOCKED') playAlert();
       else if (r.kind === 'UNRECOGNIZED') playUnrecognized();
       else if (r.kind === 'DUPLICATE') playUnrecognized();
-      showResult(r);
+      showResultRef.current(r);
     });
     const offActivity = api.onActivity(setActivity);
     const offStatus = api.onStatus(setStatus);
@@ -200,12 +294,53 @@ export function KioskScreen({ onOpenAdmin }: { onOpenAdmin: () => void }) {
       offStatus();
       void api.setKioskMode(false);
       if (resetTimer.current) clearTimeout(resetTimer.current);
+      if (announceTimer.current) clearTimeout(announceTimer.current);
+      if (announceIdleTimer.current) clearTimeout(announceIdleTimer.current);
     };
-  }, [showResult]);
+    // Run exactly once on mount. Subscribers use showResultRef so they always
+    // call the latest showResult without this effect re-running.
+  }, []);
+
+// Rotate the carousel while announcements are active. Non-media / image
+  // slides advance on a fixed dwell time; VIDEO slides advance only when the
+  // video finishes playing (onVideoEnded) so playback isn't cut off.
+  const advanceAnnouncement = useCallback(() => {
+    setAnnounceIndex((i) => (i + 1) % announcements.length);
+  }, [announcements.length]);
+
+  useEffect(() => {
+    if (!announcements.length) return;
+    const current = announcements[announceIndex % announcements.length];
+    const isVideo = current.media_type === 'video' && !!current.media_url;
+    // Video slides rely on onVideoEnded to advance — don't run the fixed timer.
+    if (isVideo) {
+      if (announceTimer.current) clearTimeout(announceTimer.current);
+      return;
+    }
+if (announceTimer.current) clearTimeout(announceTimer.current);
+    const secs = Math.max(1, settings?.announcement_slide_seconds || 8);
+    announceTimer.current = setTimeout(advanceAnnouncement, secs * 1000);
+    return () => {
+      if (announceTimer.current) clearTimeout(announceTimer.current);
+    };
+  }, [announcements, announceIndex, advanceAnnouncement, settings]);
+
+  // Arm the idle countdown once settings are loaded and on any idle reset.
+  useEffect(() => {
+    if (center.kind === 'idle' && !announcements.length) armAnnounceIdle();
+  }, [center.kind, announcements.length, armAnnounceIdle]);
 
   const handleCameraDecoded = (payload: string) => {
     setCamOpen(false);
     void api.processScan(payload, 'WEBCAM');
+  };
+
+  // Manual check-in (forgot-QR): record through the exact same scan pipeline
+  // (debounce, IN/OUT toggle, SMS, offline queue) with source = 'MANUAL' so
+  // reports/logs can distinguish it from a real QR scan.
+  const handleManualCheckIn = (student: Student) => {
+    setManualOpen(false);
+    void api.processScan(student.qr_hash_payload, 'MANUAL');
   };
 
   const simulateScan = () => {
@@ -239,6 +374,13 @@ export function KioskScreen({ onOpenAdmin }: { onOpenAdmin: () => void }) {
               label={`Sync · ${status?.queue.pending ?? 0}`}
               title="Offline scans waiting to sync with the database"
             />
+            <button
+              className="btn-icon admin-btn"
+              onClick={() => setManualOpen(true)}
+              title="Manual check-in for students who forgot their QR code"
+            >
+              📇
+            </button>
             <button className="btn-icon admin-btn" onClick={onOpenAdmin} title="Open Admin Dashboard (Ctrl+Shift+A)">
               ⚙
             </button>
@@ -248,9 +390,30 @@ export function KioskScreen({ onOpenAdmin }: { onOpenAdmin: () => void }) {
       </header>
 
       {/* ---- Main area ---- */}
-      <main className="kiosk-main">
+<main className="kiosk-main">
         <section className="kiosk-center">
-          {center.kind === 'idle' && <IdleView onCamera={() => setCamOpen(true)} schoolName={settings?.school_name} />}
+          {center.kind === 'idle' && announcements.length > 0 && (
+            <div key={announceIndex} className="center-enter announcement-carousel">
+<AnnouncementsView
+                announcement={announcements[announceIndex % announcements.length]}
+                onVideoEnded={advanceAnnouncement}
+              />
+              {announcements.length > 1 && (
+                <div className="announcement-dots">
+                  {announcements.map((a, i) => (
+                    <span key={a.id} className={`dot ${i === announceIndex % announcements.length ? 'dot-on' : ''}`} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {center.kind === 'idle' && announcements.length === 0 && (
+            <IdleView
+              onCamera={() => setCamOpen(true)}
+              onManual={() => setManualOpen(true)}
+              schoolName={settings?.school_name}
+            />
+          )}
           {center.kind === 'result' && center.result.kind === 'SUCCESS' && (
             <div key={centerKey.current} className="center-enter">
               <SuccessView
@@ -340,6 +503,12 @@ export function KioskScreen({ onOpenAdmin }: { onOpenAdmin: () => void }) {
           onClose={() => setCamOpen(false)}
         />
       )}
+
+      <ManualCheckIn
+        open={manualOpen}
+        onClose={() => setManualOpen(false)}
+        onCheckIn={handleManualCheckIn}
+      />
     </div>
   );
 }

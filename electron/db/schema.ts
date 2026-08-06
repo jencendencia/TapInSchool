@@ -80,7 +80,9 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS users (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   username VARCHAR(64) NOT NULL,
-  password_hash VARCHAR(255) NOT NULL,
+  password_hash VARCHAR(255) DEFAULT NULL,
+  role ENUM('admin','staff') NOT NULL DEFAULT 'admin',
+  pin_hash VARCHAR(255) DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uq_users_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -124,6 +126,19 @@ INSERT IGNORE INTO sections (grade_section, adviser_name, email) SELECT grade_se
 DROP TABLE IF EXISTS advisers;
 
 INSERT IGNORE INTO sections (grade_section) SELECT DISTINCT grade_section FROM students WHERE grade_section <> '';
+
+CREATE TABLE IF NOT EXISTS announcements (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(160) NOT NULL DEFAULT '',
+  content_text TEXT NOT NULL,
+  media_url VARCHAR(255) DEFAULT NULL,
+  media_type ENUM('none','image','video') NOT NULL DEFAULT 'none',
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_ann_active (is_active, sort_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS school_years (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -183,4 +198,23 @@ export async function ensureSchema(query: (sql: string, params?: unknown[]) => P
          section = CASE WHEN grade_section LIKE '% - %' THEN SUBSTRING_INDEX(grade_section, ' - ', -1) ELSE '' END
      WHERE grade = '' AND grade_section <> ''`,
   );
+
+  // ---- Idempotent migration: users role + kiosk PIN (users page) -----------
+  // Older installs created `users` without role/pin_hash. The CREATE TABLE
+  // above covers fresh installs; here we add the columns for existing ones.
+  // Checking information_schema keeps the ALTER from failing on re-runs.
+  const userCols = (await query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'`,
+  )) as { COLUMN_NAME: string }[];
+  const names = new Set(userCols.map((c) => c.COLUMN_NAME));
+  if (!names.has('role')) {
+    await query("ALTER TABLE users ADD COLUMN role ENUM('admin','staff') NOT NULL DEFAULT 'admin' AFTER username");
+  }
+  if (!names.has('pin_hash')) {
+    await query('ALTER TABLE users ADD COLUMN pin_hash VARCHAR(255) DEFAULT NULL AFTER role');
+  }
+  // Staff accounts have no password (admin-only dashboard); relax the old
+  // NOT NULL constraint on existing installs so they can be created.
+  await query('ALTER TABLE users MODIFY password_hash VARCHAR(255) DEFAULT NULL');
 }

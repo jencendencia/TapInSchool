@@ -10,6 +10,9 @@ import type {
   ActivityItem,
   AdviserSendDetail,
   AdviserSendResult,
+  Announcement,
+  AnnouncementInput,
+  AnnouncementMediaType,
   AttendanceFlag,
   AttendanceLogRow,
   EmailResult,
@@ -46,6 +49,9 @@ ImportResult,
   TapinApi,
   TardinessFrequencyRow,
   TardinessRow,
+  User,
+  UserInput,
+  UserRole,
 } from '../../shared/types';
 import { buildReportHtml } from '../../shared/report-html';
 import { compareGrades } from './sort';
@@ -89,7 +95,9 @@ function splitSection(name: string): { grade: string; section: string } {
 }
 
 const DEFAULT_MOCK_SETTINGS: Settings = {
-  school_name: 'TapIn School',
+school_name: 'TapIn School',
+  announcements_idle_minutes: 1,
+  announcement_slide_seconds: 8,
   logo_url: null,
   show_photos: true,
   debounce_seconds: 120,
@@ -124,10 +132,14 @@ const DEFAULT_MOCK_SETTINGS: Settings = {
 // Mock implementation
 // ---------------------------------------------------------------------------
 class MockApi implements TapinApi {
+  private users: { id: number; username: string; password: string; role: UserRole; pin: string | null; created_at: string }[];
+  private userSeq = 1;
   private students: Student[];
   private logs: AttendanceLogRow[] = [];
   private sms: SmsLogRow[] = [];
-  private sections: Section[] = [];
+private sections: Section[] = [];
+  private announcements: Announcement[] = [];
+  private announcementIdSeq = 1;
   private schoolYears: SchoolYear[] = [];
   private enrollments: { studentId: number; schoolYear: string; gradeSection: string }[] = [];
   private settings: Settings = { ...DEFAULT_MOCK_SETTINGS };
@@ -149,6 +161,26 @@ class MockApi implements TapinApi {
       ['2024-0421', 'Miguel Torres', 'Grade 10 - Section D', '09195678901'],
       ['2024-0524', 'Liza Fernandez', 'Grade 11 - STEM', '09196789012'],
     ];
+    // Demo accounts: admin (dashboard) + staff (kiosk manual check-in PIN).
+    this.users = [
+      {
+        id: this.userSeq++,
+        username: 'admin',
+        password: 'admin',
+        role: 'admin',
+        pin: null,
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: this.userSeq++,
+        username: 'staff',
+        password: '',
+        role: 'staff',
+        pin: '1234',
+        created_at: new Date().toISOString(),
+      },
+    ];
+
     this.students = demo.map(([student_no, full_name, grade_section, parent_phone]) => ({
       id: this.idSeq++,
       student_no,
@@ -380,12 +412,107 @@ class MockApi implements TapinApi {
 
   async login(username: string, password: string): Promise<LoginResult> {
     await new Promise((r) => setTimeout(r, 400));
-    if (username === 'admin' && password === 'admin') return { ok: true };
+    const user = this.users.find((u) => u.username === username.trim());
+    // Only admin accounts open the dashboard; staff use the kiosk PIN.
+    if (user?.role === 'admin' && user.password === password) return { ok: true, role: 'admin' };
     return { ok: false, error: 'Invalid username or password.' };
   }
 
   async logout(): Promise<void> {
     // No-op in mock mode — the renderer owns the session.
+  }
+
+  async listUsers(): Promise<User[]> {
+    return this.users.map((u) => ({
+      id: u.id,
+      username: u.username,
+      role: u.role,
+      has_pin: !!u.pin,
+      created_at: u.created_at,
+    }));
+  }
+
+  async createUser(input: UserInput): Promise<User> {
+    const username = String(input?.username ?? '').trim();
+    if (!username) throw new Error('Username is required.');
+    if (this.users.some((u) => u.username === username)) throw new Error(`Username "${username}" is already taken.`);
+    const role: UserRole = input?.role === 'staff' ? 'staff' : 'admin';
+    let password = '';
+    let pin: string | null = null;
+    if (role === 'admin') {
+      password = String(input?.password ?? '');
+      if (password.length < 4) throw new Error('Admin users need a password (min 4 characters).');
+      const digits = String(input?.pin ?? '').replace(/\D/g, '');
+      if (digits && (digits.length < 4 || digits.length > 8)) throw new Error('Kiosk PIN must be 4-8 digits.');
+      if (digits) pin = digits;
+    } else {
+      pin = String(input?.pin ?? '').replace(/\D/g, '');
+      if (!pin || pin.length < 4 || pin.length > 8) throw new Error('Kiosk PIN must be 4-8 digits.');
+    }
+    const user = {
+      id: this.userSeq++,
+      username,
+      password,
+      role,
+      pin,
+      created_at: new Date().toISOString(),
+    };
+    this.users.push(user);
+    return { id: user.id, username: user.username, role: user.role, has_pin: !!user.pin, created_at: user.created_at };
+  }
+
+  async updateUser(id: number, patch: Partial<UserInput>): Promise<User> {
+    const user = this.users.find((u) => u.id === id);
+    if (!user) throw new Error('User not found.');
+
+    // Validate everything BEFORE mutating so a rejected update never leaves the
+    // in-memory user half-changed (mirrors the backend's pre-commit checks).
+    const nextUsername = 'username' in patch ? String(patch.username ?? '').trim() : user.username;
+    if (!nextUsername) throw new Error('Username is required.');
+    if (this.users.some((u) => u.username === nextUsername && u.id !== id)) {
+      throw new Error(`Username "${nextUsername}" is already taken.`);
+    }
+    const nextRole: UserRole = 'role' in patch ? (patch.role === 'staff' ? 'staff' : 'admin') : user.role;
+    if (nextRole === 'admin') {
+      const nextPassword = 'password' in patch ? String(patch.password ?? '') : '';
+      const keepCurrent = !nextPassword && !!user.password;
+      if (!keepCurrent && nextPassword.length < 4) throw new Error('Admin users need a password (min 4 characters).');
+    }
+    if ('password' in patch && !('role' in patch)) {
+      const password = String(patch.password ?? '');
+      if (password && password.length < 4) throw new Error('Password must be at least 4 characters.');
+    }
+    const pinCleared = 'pin' in patch && !String(patch.pin ?? '').replace(/\D/g, '');
+    const nextPin =
+      'pin' in patch && !pinCleared ? String(patch.pin ?? '').replace(/\D/g, '') : pinCleared ? null : user.pin;
+    if (nextPin && (nextPin.length < 4 || nextPin.length > 8)) throw new Error('Kiosk PIN must be 4-8 digits.');
+    if (nextRole === 'staff' && !nextPin) throw new Error('Staff users need a 4-8 digit kiosk PIN.');
+
+    // All valid — apply.
+    user.username = nextUsername;
+    if ('role' in patch) {
+      if (nextRole === 'admin') {
+        const pw = 'password' in patch ? String(patch.password ?? '') : '';
+        if (pw) user.password = pw;
+      }
+      user.role = nextRole;
+    }
+    if ('password' in patch && !('role' in patch)) {
+      const pw = String(patch.password ?? '');
+      if (pw) user.password = pw;
+    }
+    if ('pin' in patch) user.pin = nextPin;
+
+    return { id: user.id, username: user.username, role: user.role, has_pin: !!user.pin, created_at: user.created_at };
+  }
+
+  async deleteUser(id: number): Promise<void> {
+    const user = this.users.find((u) => u.id === id);
+    if (!user) throw new Error('User not found.');
+    if (user.role === 'admin' && this.users.filter((u) => u.role === 'admin').length <= 1) {
+      throw new Error('Cannot delete the last admin account.');
+    }
+    this.users = this.users.filter((u) => u.id !== id);
   }
 
   async getOverview(): Promise<OverviewStats> {
@@ -443,15 +570,30 @@ class MockApi implements TapinApi {
     return list.sort((a, b) => a.full_name.localeCompare(b.full_name));
   }
 
+  /** Mirrors the real backend's generateStudentNo (electron/ipc.ts). */
+  private nextStudentNo(): string {
+    const year = new Date().getFullYear();
+    const prefix = `${year}-`;
+    const seqs = this.students
+      .map((s) => s.student_no)
+      .filter((n) => n.startsWith(prefix))
+      .map((n) => parseInt(n.slice(prefix.length), 10))
+      .filter((n) => Number.isInteger(n));
+    const max = seqs.length ? Math.max(...seqs) : 0;
+    return `${prefix}${String(max + 1).padStart(4, '0')}`;
+  }
+
   async createStudent(input: StudentInput): Promise<Student> {
+    // Auto-generate the student number when the Add form leaves it blank.
+    const studentNo = String(input.student_no ?? '').trim() || this.nextStudentNo();
     // students.grade_section is the CURRENT year's live section — a student
     // enrolled into a past year starts unassigned this year (mirrors ipc.ts).
     const year = (input.school_year || '').trim() || this.currentYearName();
     const isCurrent = year ? (this.schoolYears.find((y) => y.name === year)?.is_current ?? false) : false;
     const s: Student = {
       id: this.idSeq++,
-      student_no: input.student_no,
-      qr_hash_payload: mockPayload(input.student_no),
+      student_no: studentNo,
+      qr_hash_payload: mockPayload(studentNo),
       full_name: input.full_name,
       grade_section: isCurrent ? (input.grade_section || '') : '',
       parent_phone: input.parent_phone || '',
@@ -608,6 +750,11 @@ class MockApi implements TapinApi {
     return { ...this.settings };
   }
 
+  async verifyStaffPin(pin: string): Promise<boolean> {
+    const actual = String(pin ?? '').trim();
+    return this.users.some((u) => !!u.pin && u.pin === actual);
+  }
+
   async listSections(): Promise<Section[]> {
     return [...this.sections].sort((a, b) => a.grade_section.localeCompare(b.grade_section));
   }
@@ -726,12 +873,77 @@ class MockApi implements TapinApi {
     }
   }
 
-  async deleteSchoolYear(name: string): Promise<void> {
+async deleteSchoolYear(name: string): Promise<void> {
     const year = (name || '').trim();
     const row = this.schoolYears.find((y) => y.name === year);
     if (row?.is_current) throw new Error('Cannot delete the current school year.');
     this.schoolYears = this.schoolYears.filter((y) => y.name !== year);
     this.enrollments = this.enrollments.filter((e) => e.schoolYear !== year);
+  }
+
+  // ---- Announcements (kiosk idle slideshow) --------------------------------
+  private toAnnouncement(input: AnnouncementInput): Announcement {
+    const media = input.media ?? null;
+    const mediaType: AnnouncementMediaType = media
+      ? media.startsWith('data:video/')
+        ? 'video'
+        : media.startsWith('data:image/')
+          ? 'image'
+          : 'none'
+      : input.media_type ?? 'none';
+    return {
+      id: this.announcementIdSeq++,
+      title: input.title || '',
+      content_text: input.content_text || '',
+      media_url: media,
+      media_type: mediaType,
+      is_active: input.is_active ?? true,
+      sort_order: input.sort_order ?? 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  async listAnnouncements(): Promise<Announcement[]> {
+    return [...this.announcements].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+  }
+
+  async listActiveAnnouncements(): Promise<Announcement[]> {
+    return this.announcements
+      .filter((a) => a.is_active)
+      .sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+  }
+
+  async createAnnouncement(input: AnnouncementInput): Promise<Announcement> {
+    const ann = this.toAnnouncement(input);
+    this.announcements.push(ann);
+    return { ...ann };
+  }
+
+  async updateAnnouncement(id: number, input: Partial<AnnouncementInput>): Promise<Announcement> {
+    const ann = this.announcements.find((a) => a.id === id);
+    if (!ann) throw new Error('Announcement not found');
+    if ('title' in input) ann.title = input.title ?? '';
+    if ('content_text' in input) ann.content_text = input.content_text ?? '';
+    if ('is_active' in input) ann.is_active = input.is_active ?? true;
+    if ('sort_order' in input) ann.sort_order = input.sort_order ?? 0;
+    if ('media' in input) {
+      const media = input.media ?? null;
+      ann.media_url = media;
+      ann.media_type = media
+        ? media.startsWith('data:video/')
+          ? 'video'
+          : media.startsWith('data:image/')
+            ? 'image'
+            : 'none'
+        : 'none';
+    }
+    ann.updated_at = new Date().toISOString();
+    return { ...ann };
+  }
+
+  async deleteAnnouncement(id: number): Promise<void> {
+    this.announcements = this.announcements.filter((a) => a.id !== id);
   }
 
   async getReport(query: ReportQuery): Promise<ReportData> {

@@ -5,6 +5,8 @@ import type {
   ActivityItem,
   AdviserSendResult,
   ActivationResult,
+  Announcement,
+  AnnouncementInput,
   EmailResult,
   EnrollmentRow,
   ExportResult,
@@ -29,6 +31,8 @@ import type {
   SystemStatus,
   TapinApi,
   UpdateStatus,
+  User,
+  UserInput,
 } from '../shared/types';
 
 function on<T>(channel: string, cb: (data: T) => void): () => void {
@@ -53,6 +57,12 @@ const api: TapinApi = {
     ipcRenderer.invoke('tapin:login', username, password) as Promise<LoginResult>,
   logout: () => ipcRenderer.invoke('tapin:logout'),
 
+  listUsers: () => ipcRenderer.invoke('tapin:listUsers') as Promise<User[]>,
+  createUser: (input: UserInput) => ipcRenderer.invoke('tapin:createUser', input) as Promise<User>,
+  updateUser: (id: number, patch: Partial<UserInput>) =>
+    ipcRenderer.invoke('tapin:updateUser', id, patch) as Promise<User>,
+  deleteUser: (id: number) => ipcRenderer.invoke('tapin:deleteUser', id) as Promise<void>,
+
   getOverview: () => ipcRenderer.invoke('tapin:getOverview') as Promise<OverviewStats>,
   listStudents: (search?: string) => ipcRenderer.invoke('tapin:listStudents', search) as Promise<Student[]>,
   createStudent: (input: StudentInput) => ipcRenderer.invoke('tapin:createStudent', input) as Promise<Student>,
@@ -74,6 +84,8 @@ const api: TapinApi = {
   getSettings: () => ipcRenderer.invoke('tapin:getSettings') as Promise<Settings>,
   updateSettings: (patch: Partial<Settings>) =>
     ipcRenderer.invoke('tapin:updateSettings', patch) as Promise<Settings>,
+  verifyStaffPin: (pin: string) =>
+    ipcRenderer.invoke('tapin:verifyStaffPin', pin) as Promise<boolean>,
 
   listSections: () => ipcRenderer.invoke('tapin:listSections') as Promise<Section[]>,
   saveSection: (input: SectionInput) => ipcRenderer.invoke('tapin:saveSection', input) as Promise<Section>,
@@ -87,8 +99,18 @@ const api: TapinApi = {
     ipcRenderer.invoke('tapin:listEnrollments', schoolYear) as Promise<EnrollmentRow[]>,
   listSchoolYears: () => ipcRenderer.invoke('tapin:listSchoolYears') as Promise<SchoolYear[]>,
   saveSchoolYear: (name: string) => ipcRenderer.invoke('tapin:saveSchoolYear', name) as Promise<SchoolYear>,
-  setCurrentSchoolYear: (name: string) => ipcRenderer.invoke('tapin:setCurrentSchoolYear', name) as Promise<void>,
+setCurrentSchoolYear: (name: string) => ipcRenderer.invoke('tapin:setCurrentSchoolYear', name) as Promise<void>,
   deleteSchoolYear: (name: string) => ipcRenderer.invoke('tapin:deleteSchoolYear', name) as Promise<void>,
+
+  listAnnouncements: () => ipcRenderer.invoke('tapin:listAnnouncements') as Promise<Announcement[]>,
+  createAnnouncement: (input: AnnouncementInput) =>
+    ipcRenderer.invoke('tapin:createAnnouncement', input) as Promise<Announcement>,
+  updateAnnouncement: (id: number, input: Partial<AnnouncementInput>) =>
+    ipcRenderer.invoke('tapin:updateAnnouncement', id, input) as Promise<Announcement>,
+  deleteAnnouncement: (id: number) =>
+    ipcRenderer.invoke('tapin:deleteAnnouncement', id) as Promise<void>,
+  listActiveAnnouncements: () =>
+    ipcRenderer.invoke('tapin:listActiveAnnouncements') as Promise<Announcement[]>,
 
   getReport: (query: ReportQuery) => ipcRenderer.invoke('tapin:getReport', query) as Promise<ReportData>,
   exportReportPdf: (report: ReportData) =>

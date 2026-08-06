@@ -6,3 +6,4 @@ release/
 *.local
 *.log
 .DS_Store
+typecheck_output.txt

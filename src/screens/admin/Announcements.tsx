@@ -1,0 +1,381 @@
+// Announcements: manage the kiosk idle slideshow. Each announcement is a
+// title + optional text and/or an uploaded image/video. When the kiosk is
+// idle for the configured number of minutes, the active announcements are
+// shown one by one in the central display. The idle delay is editable here.
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { Announcement, AnnouncementInput, AnnouncementMediaType } from '../../../shared/types';
+import { api } from '../../lib/api';
+import { Modal, Spinner, Toast } from '../../components/shared';
+
+type ModalState =
+  | { type: 'add' }
+  | { type: 'edit'; announcement: Announcement }
+  | null;
+
+const EMPTY_FORM: AnnouncementInput = {
+  title: '',
+  content_text: '',
+  media: null,
+  media_type: 'none',
+  is_active: true,
+  sort_order: 0,
+};
+
+function AnnouncementForm({
+  initial,
+  isEdit,
+  onSave,
+  onCancel,
+}: {
+  initial: AnnouncementInput;
+  isEdit: boolean;
+  onSave: (input: AnnouncementInput) => void;
+  onCancel: () => void;
+}) {
+  const [form, setForm] = useState<AnnouncementInput>(initial);
+  const [preview, setPreview] = useState<string | null>(initial.media ?? null);
+  const [previewType, setPreviewType] = useState<AnnouncementMediaType>(initial.media_type);
+  const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const pickFile = (file?: File | null) => {
+    if (!file) return;
+    const isVideo = file.type.startsWith('video/');
+    const isImage = file.type.startsWith('image/');
+    if (!isVideo && !isImage) {
+      setError('Please choose an image (PNG/JPEG/GIF/WEBP) or a video (MP4/WEBM).');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => setError('Could not read the file.');
+    reader.onload = () => {
+      const dataUrl = String(reader.result);
+      setForm((f) => ({ ...f, media: dataUrl, media_type: isVideo ? 'video' : 'image' }));
+      setPreview(dataUrl);
+      setPreviewType(isVideo ? 'video' : 'image');
+      setError(null);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const removeMedia = () => {
+    setForm((f) => ({ ...f, media: null, media_type: 'none' }));
+    setPreview(null);
+    setPreviewType('none');
+  };
+
+  const isVideo = previewType === 'video';
+
+  const submit = () => {
+    if (!form.title.trim() && !form.content_text.trim() && !form.media) {
+      setError('Add a title, message text, or an image/video.');
+      return;
+    }
+    onSave({ ...form, title: form.title.trim(), content_text: form.content_text.trim() });
+  };
+
+  return (
+    <form
+      className="form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+    >
+      <div className="field">
+        <label>Title</label>
+        <input
+          value={form.title}
+          onChange={(e) => setForm({ ...form, title: e.target.value })}
+          placeholder="e.g. School Fair on Friday"
+        />
+      </div>
+      <div className="field">
+        <label>Message</label>
+        <textarea
+          rows={4}
+          value={form.content_text}
+          onChange={(e) => setForm({ ...form, content_text: e.target.value })}
+          placeholder="Optional announcement text shown on the kiosk…"
+        />
+      </div>
+      <div className="field">
+        <label>Media (image or video)</label>
+        <div className="ann-media-upload">
+          {preview ? (
+            <div className="ann-preview">
+              {isVideo ? (
+                <video src={preview} controls muted playsInline className="ann-preview-media" />
+              ) : (
+                <img src={preview} alt="Announcement preview" className="ann-preview-media" />
+              )}
+              <button type="button" className="btn-ghost" onClick={removeMedia}>✕ Remove media</button>
+            </div>
+          ) : (
+            <>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/*,video/*"
+                hidden
+                onChange={(e) => {
+                  pickFile(e.target.files?.[0]);
+                  e.target.value = '';
+                }}
+              />
+              <button type="button" className="btn-ghost" onClick={() => fileRef.current?.click()}>
+                📁 Upload image / video
+              </button>
+            </>
+          )}
+        </div>
+        <p className="field-hint">
+          Images and videos are saved to this computer and shown on the kiosk when it is idle.
+        </p>
+      </div>
+      <label className="switch-row">
+        <span>Active (shown on kiosk idle screen)</span>
+        <span className={`switch ${form.is_active ? 'on' : ''}`} onClick={() => setForm((f) => ({ ...f, is_active: !f.is_active }))}>
+          <span className="switch-knob" />
+        </span>
+      </label>
+      {error && <p className="field-hint sms-error">{error}</p>}
+      <div className="form-actions">
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <button type="submit" className="btn-primary">{isEdit ? 'Save Changes' : 'Add Announcement'}</button>
+      </div>
+    </form>
+  );
+}
+
+export function AnnouncementsPage() {
+const [list, setList] = useState<Announcement[] | null>(null);
+  const [modal, setModal] = useState<ModalState>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [toastTone, setToastTone] = useState<'success' | 'error'>('success');
+const [idleMin, setIdleMin] = useState<number>(1);
+  const [idleSaved, setIdleSaved] = useState(false);
+const [slideSec, setSlideSec] = useState<string>('8');
+  const [slideSaved, setSlideSaved] = useState(false);
+
+  const load = useCallback(() => {
+    void Promise.allSettled([api.listAnnouncements(), api.getSettings()]).then(([aRes, sRes]) => {
+      setList(aRes.status === 'fulfilled' ? aRes.value : []);
+      if (sRes.status === 'fulfilled') {
+setIdleMin(sRes.value.announcements_idle_minutes || 1);
+        setSlideSec(String(sRes.value.announcement_slide_seconds || 8));
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const notify = (msg: string, tone: 'success' | 'error' = 'success') => {
+    setToast(msg);
+    setToastTone(tone);
+    setTimeout(() => {
+      setToast(null);
+      setToastTone('success');
+    }, 4000);
+  };
+
+  const saveAnnouncement = async (input: AnnouncementInput) => {
+    try {
+      if (modal?.type === 'edit') {
+        await api.updateAnnouncement(modal.announcement.id, input);
+        notify('Announcement updated');
+      } else {
+        await api.createAnnouncement(input);
+        notify('Announcement added');
+      }
+      setModal(null);
+      load();
+    } catch (err) {
+      notify(`Error: ${(err as Error).message}`, 'error');
+    }
+  };
+
+  const removeAnnouncement = async (a: Announcement) => {
+    if (!window.confirm(`Delete announcement "${a.title || '(untitled)'}"?`)) return;
+    try {
+      await api.deleteAnnouncement(a.id);
+      notify('Announcement deleted');
+      load();
+    } catch (err) {
+      notify(`Error: ${(err as Error).message}`, 'error');
+    }
+  };
+
+  const toggleActive = async (a: Announcement) => {
+    try {
+      await api.updateAnnouncement(a.id, { is_active: !a.is_active });
+      load();
+    } catch (err) {
+      notify(`Error: ${(err as Error).message}`, 'error');
+    }
+  };
+
+const saveIdleMinutes = async () => {
+    const val = Math.max(1, Math.round(idleMin) || 1);
+    setIdleMin(val);
+    try {
+      await api.updateSettings({ announcements_idle_minutes: val });
+      setIdleSaved(true);
+      setTimeout(() => setIdleSaved(false), 2500);
+    } catch (err) {
+      notify(`Error: ${(err as Error).message}`, 'error');
+    }
+  };
+
+const saveSlideSeconds = async () => {
+    const parsed = Number(slideSec);
+    const val = Math.max(1, Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 1);
+    setSlideSec(String(val));
+    try {
+      await api.updateSettings({ announcement_slide_seconds: val });
+      setSlideSaved(true);
+      setTimeout(() => setSlideSaved(false), 2500);
+    } catch (err) {
+      notify(`Error: ${(err as Error).message}`, 'error');
+    }
+  };
+
+  if (!list) return <Spinner label="Loading announcements…" />;
+
+  const activeCount = list.filter((a) => a.is_active).length;
+
+  return (
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h2>Announcements</h2>
+          <p className="text-dim">
+            {activeCount} active · shown on the kiosk after it is idle
+          </p>
+        </div>
+        <div className="page-actions">
+          <button className="btn-primary" onClick={() => setModal({ type: 'add' })}>+ New Announcement</button>
+        </div>
+      </div>
+
+      <div className="toolbar">
+        <label className="report-range-label text-dim">
+          Kiosk idle delay
+          <span className="inline-field">
+            <input
+              type="number"
+              min={1}
+              value={idleMin}
+              onChange={(e) => setIdleMin(Number(e.target.value))}
+              style={{ width: 70 }}
+            />
+            <span className="text-dim">min</span>
+            <button className="btn-ghost" onClick={saveIdleMinutes}>
+              {idleSaved ? '✓ Saved' : 'Save'}
+            </button>
+          </span>
+        </label>
+<span className="toolbar-divider" />
+        <label className="report-range-label text-dim">
+          Display duration
+          <span className="inline-field">
+<input
+              type="number"
+              min={1}
+              value={slideSec}
+              onChange={(e) => setSlideSec(e.target.value)}
+              style={{ width: 70 }}
+            />
+            <span className="text-dim">sec</span>
+            <button className="btn-ghost" onClick={saveSlideSeconds}>
+              {slideSaved ? '✓ Saved' : 'Save'}
+            </button>
+          </span>
+        </label>
+        <span className="toolbar-divider" />
+        <span className="text-dim">
+          The kiosk shows active announcements after {idleMin} minute{idleMin === 1 ? '' : 's'} of no activity.
+        </span>
+      </div>
+
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Message</th>
+              <th>Media</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((a) => (
+              <tr key={a.id}>
+                <td className="ann-title">{a.title || '(untitled)'}</td>
+                <td className="ann-msg">{a.content_text || '—'}</td>
+                <td>
+                  {a.media_type === 'none' ? (
+                    <span className="text-dim">—</span>
+                  ) : (
+                    <span className={`pill ${a.media_type === 'video' ? 'pill-warn' : 'pill-info'}`}>
+                      {a.media_type.toUpperCase()}
+                    </span>
+                  )}
+                </td>
+                <td>
+                  <span className={`pill ${a.is_active ? 'pill-success' : 'pill-dim'}`}>
+                    {a.is_active ? 'ACTIVE' : 'HIDDEN'}
+                  </span>
+                </td>
+                <td>
+                  <div className="row-actions">
+                    <button className="btn-icon" title={a.is_active ? 'Hide' : 'Show'} onClick={() => void toggleActive(a)}>
+                      {a.is_active ? '🙈' : '👁'}
+                    </button>
+                    <button className="btn-icon" title="Edit" onClick={() => setModal({ type: 'edit', announcement: a })}>✎</button>
+                    <button className="btn-icon danger" title="Delete" onClick={() => void removeAnnouncement(a)}>🗑</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {list.length === 0 && (
+              <tr>
+                <td colSpan={5} className="empty-cell">
+                  No announcements yet. Add one to display it on the kiosk idle screen.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {modal?.type === 'add' && (
+        <Modal title="New Announcement" closeOnOverlay={false} onClose={() => setModal(null)} wide>
+          <AnnouncementForm initial={EMPTY_FORM} isEdit={false} onSave={(i) => void saveAnnouncement(i)} onCancel={() => setModal(null)} />
+        </Modal>
+      )}
+      {modal?.type === 'edit' && (
+        <Modal title={`Edit — ${modal.announcement.title || 'Announcement'}`} closeOnOverlay={false} onClose={() => setModal(null)} wide>
+          <AnnouncementForm
+            initial={{
+              title: modal.announcement.title,
+              content_text: modal.announcement.content_text,
+              media: modal.announcement.media_url,
+              media_type: modal.announcement.media_type,
+              is_active: modal.announcement.is_active,
+              sort_order: modal.announcement.sort_order,
+            }}
+            isEdit
+            onSave={(i) => void saveAnnouncement(i)}
+            onCancel={() => setModal(null)}
+          />
+        </Modal>
+      )}
+
+      {toast && <Toast message={toast} tone={toastTone} />}
+    </div>
+  );
+}

@@ -13,9 +13,11 @@ import { LogsPage } from './Logs';
 import { SmsOutboxPage } from './SmsOutbox';
 import { SettingsPage } from './Settings';
 import { ReportsPage } from './Reports';
-import { SchoolLogo } from '../../components/shared';
+import { AnnouncementsPage } from './Announcements';
+import { UsersPage } from './Users';
+import { Modal, SchoolLogo } from '../../components/shared';
 
-type Tab = 'overview' | 'students' | 'sections' | 'logs' | 'reports' | 'sms' | 'settings';
+type Tab = 'overview' | 'students' | 'sections' | 'logs' | 'reports' | 'sms' | 'announcements' | 'users' | 'settings';
 
 const NAV: { id: Tab; label: string; icon: string }[] = [
   { id: 'overview', label: 'Overview', icon: '📊' },
@@ -24,12 +26,15 @@ const NAV: { id: Tab; label: string; icon: string }[] = [
   { id: 'logs', label: 'Attendance Logs', icon: '🕐' },
   { id: 'reports', label: 'Reports', icon: '📄' },
   { id: 'sms', label: 'SMS Outbox', icon: '✉' },
+  { id: 'announcements', label: 'Announcements', icon: '📢' },
+  { id: 'users', label: 'Users & Roles', icon: '🧑‍💼' },
   { id: 'settings', label: 'Settings', icon: '⚙' },
 ];
 
-export function AdminDashboard({ onBackToKiosk, onLogout }: { onBackToKiosk: () => void; onLogout: () => void }) {
+export function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   const [tab, setTab] = useState<Tab>('overview');
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [confirmLogout, setConfirmLogout] = useState(false);
 
   // Refetch on tab switch so a freshly saved logo / school name in Settings
   // shows up in the sidebar right away.
@@ -70,11 +75,11 @@ export function AdminDashboard({ onBackToKiosk, onLogout }: { onBackToKiosk: () 
               </button>
             ))}
           </nav>
-          <div className="admin-sidebar-foot">
-            <button className="btn-ghost" onClick={onLogout}>
+<div className="admin-sidebar-foot">
+            <button className="btn-ghost" onClick={() => setConfirmLogout(true)}>
               🔒 Log out
             </button>
-            <button className="btn-primary" onClick={onBackToKiosk}>
+<button className="btn-primary" onClick={onLogout}>
               ← Back to Kiosk
             </button>
           </div>
@@ -85,7 +90,9 @@ export function AdminDashboard({ onBackToKiosk, onLogout }: { onBackToKiosk: () 
           {tab === 'sections' && <SectionsPage />}
           {tab === 'logs' && <LogsPage />}
           {tab === 'reports' && <ReportsPage />}
-          {tab === 'sms' && <SmsOutboxPage />}
+{tab === 'sms' && <SmsOutboxPage />}
+          {tab === 'announcements' && <AnnouncementsPage />}
+          {tab === 'users' && <UsersPage />}
           {tab === 'settings' && (
             <SettingsPage
               onSettingsSaved={() => {
@@ -96,6 +103,28 @@ export function AdminDashboard({ onBackToKiosk, onLogout }: { onBackToKiosk: () 
         </main>
         </div>
       </div>
+
+      {confirmLogout && (
+        <Modal title="Log out" closeOnOverlay={false} onClose={() => setConfirmLogout(false)}>
+          <p className="text-dim" style={{ marginBottom: 18 }}>
+            Are you sure you want to log out of the admin dashboard? You will need to sign in again to manage students, attendance, and reports.
+          </p>
+          <div className="form-actions">
+            <button className="btn-ghost" onClick={() => setConfirmLogout(false)}>
+              Cancel
+            </button>
+            <button
+              className="btn-primary"
+              onClick={() => {
+                setConfirmLogout(false);
+                onLogout();
+              }}
+            >
+              Log out
+            </button>
+          </div>
+        </Modal>
+      )}
     </SchoolYearProvider>
   );
 }

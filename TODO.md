@@ -1,26 +1,11 @@
-# TapIn School — Auto-Update & App Activation TODOs
+# Task: Configurable seconds-per-announcement on the Announcements page
 
-## Part A — Auto-Update (GitHub Releases)
-- [ ] shared/types.ts: add UpdateStatus/UpdateInfo types + TapinApi methods + onUpdateStatus
-- [ ] electron/services/updater.ts: refactor to manual flow + status events + exports
-- [ ] electron/ipc.ts: add checkForUpdates / downloadUpdate / installUpdate / getAppVersion handlers
-- [ ] electron/preload.ts: expose update API + onUpdateStatus
-- [ ] src/lib/api.ts: add mock update methods (browser dev)
-- [ ] src/components/UpdatePanel.tsx: update UI (check / download / install / progress)
-- [ ] src/screens/admin/Settings.tsx: add UpdatePanel
+## Steps
+- [x] 1. `shared/types.ts`: add `announcement_slide_seconds: number` to `Settings`.
+- [x] 2. `electron/db/settings.ts`: add default + KEYS whitelist entry.
+- [x] 3. `src/lib/api.ts`: add default in `DEFAULT_MOCK_SETTINGS`.
+- [x] 4. `src/screens/admin/Announcements.tsx`: add "Display duration (seconds)" field + save.
+- [x] 5. `src/screens/KioskScreen.tsx`: use configured seconds for non-video slides.
+- [x] 6. Run `npm run typecheck` to verify.
 
-## Part B — App Activation (License)
-- [ ] license-server/src/index.js: Cloudflare Worker (validate / add-key / list / revoke)
-- [ ] license-server/wrangler.toml: config + KV binding
-- [ ] license-server/seed.js: key seeding script
-- [ ] electron/services/license.ts: machine ID + license client + IPC handlers
-- [ ] electron/ipc.ts: register license handlers
-- [ ] electron/preload.ts: expose license API
-- [ ] shared/types.ts: LicenseStatus types + TapinApi methods
-- [ ] src/lib/api.ts: mock license methods (browser bypass)
-- [ ] src/components/ActivationScreen.tsx: activation UI
-- [ ] src/App.tsx: gate app behind activation
-
-## Validation
-- [ ] npm run typecheck
-- [ ] npm run dist + publish new release
+All steps complete. Typecheck passes cleanly.

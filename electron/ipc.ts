@@ -5,8 +5,16 @@ import { promises as fs } from 'fs';
 import { db } from './db/connection';
 import { settingsStore } from './db/settings';
 import { enqueueScan, getRecentActivity } from './services/attendance';
-import { login as authLogin } from './services/auth';
+import {
+  createUser as authCreateUser,
+  deleteUser as authDeleteUser,
+  listUsers as authListUsers,
+  login as authLogin,
+  updateUser as authUpdateUser,
+  verifyStaffPin as authVerifyStaffPin,
+} from './services/auth';
 import { deleteAllLogos, saveLogo } from './services/logo';
+import { deleteMediaUrl, saveMedia } from './services/announcement';
 import { decorateDbDetail } from './services/clock';
 import { flagCutoffs, flagSelectParams, flagSelectSql } from './services/bell-times';
 import { pendingQueueCount, refreshOfflineCache } from './services/offline';
@@ -21,6 +29,8 @@ import { getProvider } from './sms/providers';
 import type {
   ActivityItem,
   AdviserSendResult,
+  Announcement,
+  AnnouncementInput,
   AttendanceLogRow,
   EmailResult,
   EnrollmentRow,
@@ -43,6 +53,8 @@ import type {
   Student,
   StudentInput,
   SystemStatus,
+  User,
+  UserInput,
 } from '../shared/types';
 
 interface ScannerHook {
@@ -256,8 +268,28 @@ export function registerIpc(scanner: ScannerHook): void {
     }
   }
 
+  /**
+   * Computes the next auto-generated student number for the current year,
+   * e.g. "2025-0001" → "2025-0002". Only row numbers matching the
+   * "{year}-{4-digit seq}" pattern under this year are counted; anything else
+   * (legacy / free-form) is left untouched.
+   */
+  async function generateStudentNo(): Promise<string> {
+    const year = new Date().getFullYear();
+    const prefix = `${year}-`;
+    const [row] = await db.query<{ max_seq: number | null }[]>(
+      `SELECT MAX(CAST(SUBSTRING(student_no, ?) AS UNSIGNED)) max_seq
+       FROM students WHERE student_no LIKE ?`,
+      [prefix.length + 1, `${prefix}%`],
+    );
+    const next = (row?.max_seq ?? 0) + 1;
+    return `${prefix}${String(next).padStart(4, '0')}`;
+  }
+
   ipcMain.handle('tapin:createStudent', async (_e, input: StudentInput): Promise<Student> => {
-    const payload = generatePayload(input.student_no);
+    // Auto-generate the student number when the Add form leaves it blank.
+    const studentNo = String(input.student_no ?? '').trim() || (await generateStudentNo());
+    const payload = generatePayload(studentNo);
     // students.grade_section is the CURRENT year's live section — a student
     // enrolled into a past year starts unassigned this year.
     const [cur] = await db.query<{ name: string }[]>(
@@ -272,7 +304,7 @@ export function registerIpc(scanner: ScannerHook): void {
       `INSERT INTO students (student_no, qr_hash_payload, full_name, grade_section, parent_phone, photo_url, is_active)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
-        input.student_no,
+        studentNo,
         payload,
         input.full_name,
         liveSection,
@@ -484,6 +516,130 @@ export function registerIpc(scanner: ScannerHook): void {
       return ids.length;
     },
   );
+
+// ---- Announcements (kiosk idle slideshow) --------------------------------
+  type AnnouncementRow = {
+    id: number;
+    title: string;
+    content_text: string;
+    media_url: string | null;
+    media_type: 'none' | 'image' | 'video';
+    is_active: number;
+    sort_order: number;
+    created_at: string;
+    updated_at: string;
+  };
+  const toAnnouncement = (r: AnnouncementRow): Announcement => ({
+    id: r.id,
+    title: r.title,
+    content_text: r.content_text,
+    media_url: r.media_url,
+    media_type: r.media_type,
+    is_active: !!r.is_active,
+    sort_order: r.sort_order,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  });
+
+  ipcMain.handle('tapin:listAnnouncements', async (): Promise<Announcement[]> => {
+    const rows = await db.query<AnnouncementRow[]>(
+      'SELECT * FROM announcements ORDER BY sort_order ASC, id ASC',
+    );
+    return rows.map(toAnnouncement);
+  });
+
+  ipcMain.handle('tapin:listActiveAnnouncements', async (): Promise<Announcement[]> => {
+    const rows = await db.query<AnnouncementRow[]>(
+      `SELECT * FROM announcements WHERE is_active = 1 ORDER BY sort_order ASC, id ASC`,
+    );
+    return rows.map(toAnnouncement);
+  });
+
+  ipcMain.handle('tapin:createAnnouncement', async (_e, input: AnnouncementInput): Promise<Announcement> => {
+    const title = String(input?.title ?? '').trim();
+    const content = String(input?.content_text ?? '').trim();
+    if (!title && !content) throw new Error('Announcement needs a title or message.');
+// Persist an uploaded media data URI to disk; text-only announcements get null.
+    // The media_type is inferred from the data URI prefix when provided.
+    let mediaUrl: string | null = null;
+    let mediaType = input?.media_type ?? 'none';
+    if (input?.media) {
+      const dataUrl = String(input.media);
+      mediaType = dataUrl.startsWith('data:video/') ? 'video' : dataUrl.startsWith('data:image/') ? 'image' : 'none';
+      if (mediaType !== 'none') mediaUrl = await saveMedia(dataUrl);
+    }
+    const res = await db.execute(
+      `INSERT INTO announcements (title, content_text, media_url, media_type, is_active, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [title, content, mediaUrl, mediaType, input?.is_active ?? true, input?.sort_order ?? 0],
+    );
+    const [row] = await db.query<AnnouncementRow[]>('SELECT * FROM announcements WHERE id = ?', [res.insertId]);
+    return toAnnouncement(row);
+  });
+
+  ipcMain.handle(
+    'tapin:updateAnnouncement',
+    async (_e, id: number, input: Partial<AnnouncementInput>): Promise<Announcement> => {
+      const sets: string[] = [];
+      const params: unknown[] = [];
+      if ('title' in input) {
+        sets.push('title = ?');
+        params.push(String(input.title ?? '').trim());
+      }
+      if ('content_text' in input) {
+        sets.push('content_text = ?');
+        params.push(String(input.content_text ?? '').trim());
+      }
+      if ('media_type' in input) {
+        sets.push('media_type = ?');
+        params.push(input.media_type ?? 'none');
+      }
+      if ('is_active' in input) {
+        sets.push('is_active = ?');
+        params.push(input.is_active ? 1 : 0);
+      }
+      if ('sort_order' in input) {
+        sets.push('sort_order = ?');
+        params.push(input.sort_order ?? 0);
+      }
+// Media replacement: persist the new file, drop the old one, update the URL.
+      if (input?.media) {
+        const dataUrl = String(input.media);
+        const [old] = await db.query<AnnouncementRow[]>(
+          'SELECT media_url FROM announcements WHERE id = ?',
+          [id],
+        );
+        const mediaUrl = await saveMedia(dataUrl, old?.media_url);
+        const mediaType = dataUrl.startsWith('data:video/') ? 'video' : 'image';
+        sets.push('media_url = ?');
+        sets.push('media_type = ?');
+        params.push(mediaUrl, mediaType);
+      } else if ('media' in input && input?.media === null) {
+        // Explicitly clearing media.
+        const [old] = await db.query<AnnouncementRow[]>(
+          'SELECT media_url FROM announcements WHERE id = ?',
+          [id],
+        );
+        await deleteMediaUrl(old?.media_url);
+        sets.push('media_url = NULL');
+        sets.push("media_type = 'none'");
+      }
+      if (!sets.length) throw new Error('Nothing to update.');
+      params.push(id);
+      await db.execute(`UPDATE announcements SET ${sets.join(', ')} WHERE id = ?`, params);
+      const [row] = await db.query<AnnouncementRow[]>('SELECT * FROM announcements WHERE id = ?', [id]);
+      return toAnnouncement(row);
+    },
+  );
+
+  ipcMain.handle('tapin:deleteAnnouncement', async (_e, id: number): Promise<void> => {
+    const [old] = await db.query<AnnouncementRow[]>(
+      'SELECT media_url FROM announcements WHERE id = ?',
+      [id],
+    );
+    await deleteMediaUrl(old?.media_url);
+    await db.execute('DELETE FROM announcements WHERE id = ?', [id]);
+  });
 
   ipcMain.handle('tapin:importStudentsCsv', async (_e, csv: string): Promise<ImportResult> => {
     return importCsv(csv);
@@ -805,8 +961,30 @@ ipcMain.handle('tapin:testEmail', async (_e, to: string, settings: Settings): Pr
     // symmetric. (Nothing server-side to tear down for a local kiosk.)
   });
 
+  // ---- Users & roles (dashboard accounts + kiosk staff PINs) ----------------
+  ipcMain.handle('tapin:listUsers', async (): Promise<User[]> => {
+    return authListUsers();
+  });
+
+  ipcMain.handle('tapin:createUser', async (_e, input: UserInput): Promise<User> => {
+    return authCreateUser(input);
+  });
+
+  ipcMain.handle('tapin:updateUser', async (_e, id: number, patch: Partial<UserInput>): Promise<User> => {
+    return authUpdateUser(id, patch);
+  });
+
+  ipcMain.handle('tapin:deleteUser', async (_e, id: number): Promise<void> => {
+    return authDeleteUser(id);
+  });
+
   // ---- Settings ------------------------------------------------------------
   ipcMain.handle('tapin:getSettings', async (): Promise<Settings> => settingsStore.get());
+
+  ipcMain.handle('tapin:verifyStaffPin', async (_e, pin: string): Promise<boolean> => {
+    // Matches any account's stored PIN hash (constant-time via pbkdf2).
+    return authVerifyStaffPin(pin);
+  });
 
   ipcMain.handle('tapin:updateSettings', async (_e, patch: Partial<Settings>): Promise<Settings> => {
     // absence_last_run is owned by the absence service; never let a stale

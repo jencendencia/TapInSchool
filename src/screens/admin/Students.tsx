@@ -11,7 +11,7 @@ import { Avatar, Modal, QrCodeImage, Spinner, Toast } from '../../components/sha
 import { useSchoolYear } from './schoolYear';
 
 type ModalState =
-  | { type: 'add' }
+  | { type: 'add'; nextNo: string }
   | { type: 'edit'; student: Student }
   | { type: 'qr'; student: Student }
   | { type: 'import' }
@@ -74,12 +74,15 @@ function StudentForm({
   sections,
   onSave,
   onCancel,
+  autoStudentNo,
 }: {
   initial: StudentInput;
   /** Registered sections (Sections tab) — the only sections that can be chosen. */
   sections: Section[];
   onSave: (input: StudentInput) => void;
   onCancel: () => void;
+  /** When true, the Student No. field is auto-generated (read-only). */
+  autoStudentNo?: boolean;
 }) {
   const [form, setForm] = useState<StudentInput>(initial);
   const [photoError, setPhotoError] = useState<string | null>(null);
@@ -132,9 +135,17 @@ function StudentForm({
         submit();
       }}
     >
-      <div className="field">
+<div className="field">
         <label>Student No.</label>
-        <input required value={form.student_no} onChange={(e) => set('student_no', e.target.value)} placeholder="2024-0112" />
+        <input
+          required
+          value={form.student_no}
+          onChange={(e) => set('student_no', e.target.value)}
+          placeholder="2024-0112"
+          readOnly={autoStudentNo}
+          title={autoStudentNo ? 'Auto-generated — assigned automatically' : undefined}
+        />
+        {autoStudentNo && <p className="field-hint">Auto-generated — assigned automatically.</p>}
       </div>
       <div className="field">
         <label>Full Name</label>
@@ -319,9 +330,25 @@ export function StudentsPage() {
     return undefined;
   }, [search, load]);
 
-  const notify = (msg: string) => {
+const notify = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 3500);
+  };
+
+  // Opens the Add modal with the next auto-generated student number for the
+  // current calendar year (e.g. "2025-0001"). The number is computed from the
+  // full (unfiltered) roster so a search filter can't cause collisions.
+  const openAdd = async () => {
+    const all = await api.listStudents();
+    const year = new Date().getFullYear();
+    const prefix = `${year}-`;
+    const seqs = all
+      .map((s) => s.student_no)
+      .filter((n) => n.startsWith(prefix))
+      .map((n) => parseInt(n.slice(prefix.length), 10))
+      .filter((n) => Number.isInteger(n));
+    const max = seqs.length ? Math.max(...seqs) : 0;
+    setModal({ type: 'add', nextNo: `${prefix}${String(max + 1).padStart(4, '0')}` });
   };
 
   // The section a student belongs to in the SELECTED school year.
@@ -384,7 +411,7 @@ export function StudentsPage() {
         <div className="page-actions">
           <button className="btn-ghost" onClick={() => setModal({ type: 'import' })}>⬆ CSV Import</button>
           <button className="btn-ghost" onClick={seed}>🎲 Demo data</button>
-          <button className="btn-primary" onClick={() => setModal({ type: 'add' })}>+ Add Student</button>
+<button className="btn-primary" onClick={() => void openAdd()}>+ Add Student</button>
         </div>
       </div>
 
@@ -460,9 +487,15 @@ export function StudentsPage() {
         </table>
       </div>
 
-      {modal?.type === 'add' && (
+{modal?.type === 'add' && (
         <Modal title="Add Student" closeOnOverlay={false} onClose={() => setModal(null)}>
-          <StudentForm initial={EMPTY_FORM} sections={sections} onSave={(i) => void saveStudent(i)} onCancel={() => setModal(null)} />
+          <StudentForm
+            initial={{ ...EMPTY_FORM, student_no: modal.nextNo }}
+            sections={sections}
+            onSave={(i) => void saveStudent(i)}
+            onCancel={() => setModal(null)}
+            autoStudentNo
+          />
         </Modal>
       )}
       {modal?.type === 'edit' && (

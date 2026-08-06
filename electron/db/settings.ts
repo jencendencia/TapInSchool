@@ -8,8 +8,10 @@ import { db } from './connection';
 import type { Settings } from '../../shared/types';
 
 function buildDefaults(): Settings {
-  return {
-    school_name: process.env.SCHOOL_NAME || 'TapIn School',
+return {
+school_name: process.env.SCHOOL_NAME || 'TapIn School',
+    announcements_idle_minutes: 1,
+    announcement_slide_seconds: 8,
     logo_url: null,
     show_photos: true,
     debounce_seconds: 120,
@@ -46,6 +48,8 @@ function buildDefaults(): Settings {
 
 const KEYS = [
   'school_name',
+  'announcements_idle_minutes',
+  'announcement_slide_seconds',
   'logo_url',
   'show_photos',
   'debounce_seconds',
