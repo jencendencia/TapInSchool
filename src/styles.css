@@ -1573,21 +1573,17 @@ input[type='checkbox'] {
   background: var(--bg);
   display: block;
 }
-/* Video: some Electron/Chromium builds ignore object-fit on <video> (rendering
-   "contain" and letterboxing any video whose aspect ratio differs from the
-   panel). The min-width/min-height centering trick below achieves the same
-   cover crop in every renderer, so the video always fills the panel
-   edge-to-edge regardless of its aspect ratio. */
+/* Video: show the FULL video within the announcement panel. We use
+   object-fit: contain so the entire video frame is always visible (letterboxed
+   when the video aspect ratio differs from the panel), never cropped. To guard
+   against Electron/Chromium builds that ignore object-fit on <video>, we also
+   set explicit width/height 100% so the element always respects the panel box. */
 .announcement-slide .announcement-video {
-  inset: auto;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: auto;
-  height: auto;
-  min-width: 100%;
-  min-height: 100%;
-  object-fit: cover;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--bg);
 }
 .announcement-copy {
   position: absolute;
