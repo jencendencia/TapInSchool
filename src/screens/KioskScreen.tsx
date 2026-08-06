@@ -2,8 +2,19 @@
 // display (idle / success / blocked / unrecognized), live activity feed,
 // webcam fallback scanner, and 4-second auto-reset.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ActivityItem, Announcement, KioskPhotoStyle, ScanResult, Settings, Student, SystemStatus } from '../../shared/types';
-import { api, isElectron, mockPayload } from '../lib/api';
+import { BADGE_INFO } from '../../shared/types';
+import type {
+  ActivityItem,
+  Announcement,
+  KioskPhotoStyle,
+  ScanMode,
+  ScanResult,
+  Settings,
+  Student,
+  StudentBadgeSummary,
+  SystemStatus,
+} from '../../shared/types';
+import { api, isElectron, mockGuardianPayload, mockPayload } from '../lib/api';
 import { playAlert, playSuccess, playUnrecognized } from '../lib/audio';
 import { useClock } from '../hooks/useClock';
 import { ActivityFeed } from '../components/ActivityFeed';
@@ -13,9 +24,24 @@ import { WindowControls } from '../components/WindowControls';
 import { Avatar, QrCodeImage, SchoolLogo, fmtTimeSec } from '../components/shared';
 
 const AUTO_RESET_MS = 4000;
+// Guardians get extra time to read the day report before the kiosk resets.
+const GUARDIAN_RESET_MS = 12000;
 const DEMO_STUDENT_NOS = ['2024-0112', '2024-0113', '2024-0215', '2024-0318', '2024-0421', '2024-0524'];
+// [guardian name, address] — Maria covers TWO children (Juan + Carlos);
+// Luzviminda covers one (Ana). Mirrors the mock's demo roster.
+const DEMO_GUARDIANS: Array<[string, string]> = [
+  ['Maria Dela Cruz', '123 Mabini St., Barangay San Roque, Manila'],
+  ['Luzviminda Reyes', '789 Bonifacio Rd., Pasig City'],
+];
 
 type CenterState = { kind: 'idle' } | { kind: 'result'; result: ScanResult };
+
+// Gate-direction selector states shown on the kiosk side panel.
+const SCAN_MODES: { value: ScanMode; label: string; title: string }[] = [
+  { value: 'auto', label: '↔ Auto', title: 'Smart IN/OUT — the last scan of the day decides' },
+  { value: 'in', label: '✓ IN', title: 'Force every scan to CHECK-IN' },
+  { value: 'out', label: '⟲ OUT', title: 'Force every scan to CHECK-OUT' },
+];
 
 function StatusDot({ ok, label, title }: { ok: boolean; label: string; title: string }) {
   return (
@@ -30,10 +56,12 @@ function SuccessView({
   result,
   photoStyle,
   showPhoto,
+  badges,
 }: {
   result: ScanResult;
   photoStyle: KioskPhotoStyle;
   showPhoto: boolean;
+  badges?: StudentBadgeSummary | null;
 }) {
   const student = result.student!;
   const isIn = result.entryType === 'IN';
@@ -88,6 +116,44 @@ function SuccessView({
         {result.log?.flag === 'EARLY' && (
           <div className="result-flag flag-early">⏱ Early departure</div>
         )}
+        {badges?.currentWeek && (badges.currentWeek.requiredDays > 0 || badges.currentWeek.excusedDays > 0) && (
+          <div className="kiosk-badges">
+            {badges.currentWeek.requiredDays === 0 ? (
+              <span className="kiosk-badge kiosk-badge-dim">
+                {BADGE_INFO.ATT_W.icon} No class days recorded yet this week
+              </span>
+            ) : badges.currentWeek.attendanceComplete ? (
+              <span className="kiosk-badge kiosk-badge-earned">
+                {BADGE_INFO.ATT_W.icon} {BADGE_INFO.ATT_W.label}
+              </span>
+            ) : (
+              <span className={`kiosk-badge${badges.currentWeek.attendanceMissed ? ' kiosk-badge-missed' : ''}`}>
+                {badges.currentWeek.attendanceMissed
+                  ? `${BADGE_INFO.ATT_W.icon} Week missed — see you next week!`
+                  : `${BADGE_INFO.ATT_W.icon} ${badges.currentWeek.presentDays}/${badges.currentWeek.requiredDays} days this week`}
+              </span>
+            )}
+            {badges.currentWeek.punctualityComplete && (
+              <span className="kiosk-badge kiosk-badge-earned">
+                {BADGE_INFO.PUNCT_W.icon} {BADGE_INFO.PUNCT_W.label}
+              </span>
+            )}
+            {badges.currentWeek.excusedDays > 0 && (
+              <span className="kiosk-badge kiosk-badge-dim">✓ {badges.currentWeek.excusedDays} excused</span>
+            )}
+          </div>
+        )}
+        {badges?.newlyEarned && (
+          <div className="new-badge-pop">
+            <span className="new-badge-icon">🏆</span>
+            <div>
+              <strong>NEW BADGE!</strong>
+              <span>
+                {BADGE_INFO[badges.newlyEarned.badgeCode].label} — this week 🎉
+              </span>
+            </div>
+          </div>
+        )}
         {result.queuedOffline ? (
           result.smsQueued ? (
             <div className="sms-toast">
@@ -106,6 +172,59 @@ function SuccessView({
           <div className="sms-toast sms-toast-none">No parent number on file — SMS skipped</div>
         )}
         </div>
+    </div>
+  );
+}
+
+function GuardianView({ result }: { result: ScanResult }) {
+  const report = result.guardianReport!;
+  return (
+    <div className="result-card guardian-card">
+      <div className="guardian-head">
+        <div className="guardian-avatar">👤</div>
+        <div>
+          <h1 className="result-name">{report.guardianName || 'Guardian'}</h1>
+          <p className="guardian-meta">
+            Today's Attendance Report · {report.date} · {report.children.length} child{report.children.length === 1 ? '' : 'ren'}
+          </p>
+        </div>
+      </div>
+      <div className="guardian-report">
+        {report.children.map((child) => (
+          <div key={child.studentId} className="guardian-child">
+            <div className="guardian-child-head">
+              <div>
+                <h3>{child.fullName}</h3>
+                <p className="guardian-child-meta text-dim">
+                  {child.gradeSection && <>{child.gradeSection} · </>}Student No. {child.studentNo}
+                </p>
+              </div>
+              <span className={`pill ${child.present ? 'pill-success' : 'pill-warn'}`}>
+                {child.present ? 'PRESENT' : 'NO SCANS YET'}
+              </span>
+            </div>
+            {child.scans.length ? (
+              <ul className="guardian-scans">
+                {child.scans.map((sc, i) => (
+                  <li key={i} className="guardian-scan-row">
+                    <span className="guardian-scan-time">{sc.time}</span>
+                    <span className={`pill ${sc.entryType === 'IN' ? 'pill-success' : 'pill-info'}`}>
+                      {sc.entryType === 'IN' ? '✓ IN' : '⟲ OUT'}
+                    </span>
+                    {sc.flag === 'LATE' && <span className="guardian-flag flag-late">⚠ Late</span>}
+                    {sc.flag === 'EARLY' && <span className="guardian-flag flag-early">⏱ Early out</span>}
+                    <span className="text-dim guardian-source">
+                      {sc.source === 'MANUAL' ? 'manual' : sc.source === 'WEBCAM' ? 'camera' : 'gate'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-dim guardian-empty">No scans recorded for this child yet today.</p>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -196,7 +315,7 @@ function AnnouncementsView({
     if (p && typeof p.catch === 'function') p.catch(() => undefined);
   }, [announcement.media_url]);
   return (
-    <div className="announcement-slide">
+    <div className={`announcement-slide${announcement.media_url ? '' : ' announcement-text-only'}`}>
       {announcement.media_url && isVideo ? (
         <video
           ref={videoRef}
@@ -228,10 +347,15 @@ export function KioskScreen({ onOpenAdmin }: { onOpenAdmin: () => void }) {
   const [manualOpen, setManualOpen] = useState(false);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [announceIndex, setAnnounceIndex] = useState(0);
+  const [badgeSummary, setBadgeSummary] = useState<StudentBadgeSummary | null>(null);
+  const [scanMode, setScanMode] = useState<ScanMode>('auto');
   const announceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const announceIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const centerKey = useRef(0);
+  // Set once the staff flips the gate mode — the mount-time getScanMode()
+  // fetch must not clobber a quick interaction with a stale value.
+  const scanModeDirty = useRef(false);
   // Holds the latest showResult so the mount effect (which must run exactly
   // once) can call it without being re-created on every settings change.
   const showResultRef = useRef<(r: ScanResult) => void>(() => undefined);
@@ -262,28 +386,58 @@ const armAnnounceIdle = useCallback(() => {
     centerKey.current += 1;
     stopAnnouncements();
     setCenter({ kind: 'result', result });
-    // PRD: auto-reset to idle after 4s.
+    // Fetch the student's weekly badge status for the success card. Only the
+    // latest result wins — a faster subsequent scan supersedes this one.
+    if (result.kind === 'SUCCESS' && result.student) {
+      const key = centerKey.current;
+      void api
+        .getStudentBadges(result.student.id)
+        .then((summary) => {
+          if (key === centerKey.current) setBadgeSummary(summary);
+        })
+        .catch(() => undefined);
+    } else {
+      setBadgeSummary(null);
+    }
+    // PRD: auto-reset to idle after 4s (guardians get longer to read the report).
+    const duration = result.kind === 'GUARDIAN' ? GUARDIAN_RESET_MS : AUTO_RESET_MS;
     if (resetTimer.current) clearTimeout(resetTimer.current);
     resetTimer.current = setTimeout(() => {
+      // Bump the key so any in-flight badge fetch for the finished result is
+      // discarded (it must not re-set state after we've returned to idle).
+      centerKey.current += 1;
       setCenter({ kind: 'idle' });
+      setBadgeSummary(null);
       armAnnounceIdle();
-    }, AUTO_RESET_MS);
+    }, duration);
   }, [armAnnounceIdle, stopAnnouncements]);
 
   // Keep the latest showResult in a ref so the mount effect (below) can call
   // it without the effect being re-created each time settings change.
   showResultRef.current = showResult;
 
+  // Gate-direction mode: sync from the main process (it resets to 'auto' on
+  // app restart, so the renderer always asks first).
+  const handleScanModeChange = useCallback((mode: ScanMode) => {
+    scanModeDirty.current = true;
+    setScanMode(mode);
+    void api.setScanMode(mode);
+  }, []);
+
   useEffect(() => {
     void api.getRecentActivity(5).then(setActivity);
     void api.getStatus().then(setStatus);
     void api.getSettings().then(setSettings);
+    void api.getScanMode().then((m) => {
+      if (!scanModeDirty.current) setScanMode(m);
+    });
     void api.setKioskMode(true);
     const offScan = api.onScanResult((r) => {
       if (r.kind === 'SUCCESS') playSuccess();
       else if (r.kind === 'BLOCKED') playAlert();
       else if (r.kind === 'UNRECOGNIZED') playUnrecognized();
       else if (r.kind === 'DUPLICATE') playUnrecognized();
+      else if (r.kind === 'GUARDIAN') playSuccess();
       showResultRef.current(r);
     });
     const offActivity = api.onActivity(setActivity);
@@ -348,6 +502,11 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
     void api.processScan(mockPayload(no), 'SCANNER');
   };
 
+  const simulateGuardianScan = () => {
+    const [name, address] = DEMO_GUARDIANS[Math.floor(Math.random() * DEMO_GUARDIANS.length)];
+    void api.processScan(mockGuardianPayload(name, address), 'SCANNER');
+  };
+
   return (
     <div className="kiosk">
       {/* ---- Header (PRD: logo + name / clock / status) ---- */}
@@ -374,6 +533,14 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
               label={`Sync · ${status?.queue.pending ?? 0}`}
               title="Offline scans waiting to sync with the database"
             />
+            {scanMode !== 'auto' && (
+              <span
+                className={`kiosk-gate-pill ${scanMode === 'in' ? 'gate-pill-in' : 'gate-pill-out'}`}
+                title={scanMode === 'in' ? 'Gate set to CHECK-IN — every scan records IN' : 'Gate set to CHECK-OUT — every scan records OUT'}
+              >
+                {scanMode === 'in' ? '✓ GATE: CHECK-IN' : '⟲ GATE: CHECK-OUT'}
+              </span>
+            )}
             <button
               className="btn-icon admin-btn"
               onClick={() => setManualOpen(true)}
@@ -420,6 +587,7 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
                 result={center.result}
                 photoStyle={settings?.kiosk_photo_style ?? 'avatar'}
                 showPhoto={settings?.show_photos ?? true}
+                badges={badgeSummary}
               />
               <div className="countdown" aria-hidden>
                 <svg width="46" height="46" viewBox="0 0 46 46">
@@ -430,6 +598,23 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
                     cy="23"
                     r="20"
                     style={{ animationDuration: `${AUTO_RESET_MS}ms` }}
+                  />
+                </svg>
+              </div>
+            </div>
+          )}
+          {center.kind === 'result' && center.result.kind === 'GUARDIAN' && (
+            <div key={centerKey.current} className="center-enter">
+              <GuardianView result={center.result} />
+              <div className="countdown" aria-hidden>
+                <svg width="46" height="46" viewBox="0 0 46 46">
+                  <circle className="countdown-track" cx="23" cy="23" r="20" />
+                  <circle
+                    className="countdown-bar"
+                    cx="23"
+                    cy="23"
+                    r="20"
+                    style={{ animationDuration: `${GUARDIAN_RESET_MS}ms` }}
                   />
                 </svg>
               </div>
@@ -466,6 +651,38 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
 
         {/* ---- Right panel: live activity feed ---- */}
         <aside className="kiosk-side">
+          <div className="side-card gate-mode-card">
+            <div className="side-card-head">
+              <h3>Gate Mode</h3>
+              {scanMode !== 'auto' && (
+                <span className={`gate-mode-chip ${scanMode === 'in' ? 'chip-in' : 'chip-out'}`}>
+                  {scanMode === 'in' ? 'FORCE IN' : 'FORCE OUT'}
+                </span>
+              )}
+            </div>
+            <div className="gate-mode-seg" role="radiogroup" aria-label="Gate scan direction">
+              {SCAN_MODES.map((m) => (
+                <button
+                  key={m.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={scanMode === m.value}
+                  title={m.title}
+                  className={`gate-mode-btn ${scanMode === m.value ? `gate-mode-on-${m.value}` : ''}`}
+                  onClick={() => handleScanModeChange(m.value)}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <p className="gate-mode-hint">
+              {scanMode === 'in'
+                ? 'Every scan is recorded as CHECK-IN. Switch back to Auto after the morning rush.'
+                : scanMode === 'out'
+                  ? 'Every scan is recorded as CHECK-OUT — ideal when a student forgot their morning swipe.'
+                  : 'Auto: the last scan of the day decides IN/OUT. Use IN/OUT to override for students who forgot to swipe.'}
+            </p>
+          </div>
           <div className="side-card">
             <div className="side-card-head">
               <h3>Live Activity</h3>
@@ -489,9 +706,14 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
             </div>
           </div>
           {!isElectron && (
-            <button className="btn-ghost simulate-btn" onClick={simulateScan}>
-              🎲 Simulate scan (demo)
-            </button>
+            <div className="simulate-row">
+              <button className="btn-ghost simulate-btn" onClick={simulateScan}>
+                🎲 Simulate scan (demo)
+              </button>
+              <button className="btn-ghost simulate-btn" onClick={simulateGuardianScan}>
+                🧑‍👧 Simulate guardian (demo)
+              </button>
+            </div>
           )}
         </aside>
       </main>

@@ -5,6 +5,7 @@ import { promises as fs } from 'fs';
 import { db } from './db/connection';
 import { settingsStore } from './db/settings';
 import { enqueueScan, getRecentActivity } from './services/attendance';
+import { getScanMode, setScanMode } from './services/scan-mode';
 import {
   createUser as authCreateUser,
   deleteUser as authDeleteUser,
@@ -18,7 +19,16 @@ import { deleteMediaUrl, saveMedia } from './services/announcement';
 import { decorateDbDetail } from './services/clock';
 import { flagCutoffs, flagSelectParams, flagSelectSql } from './services/bell-times';
 import { pendingQueueCount, refreshOfflineCache } from './services/offline';
-import { generatePayload } from './services/qr';
+import {
+  addExcuse,
+  badgeLeaderboard,
+  evaluateStudentToday,
+  listBadges,
+  listExcuses,
+  recomputeStudent,
+  removeExcuse,
+} from './services/badges';
+import { generateGuardianPayload, generatePayload } from './services/qr';
 import { getReportData } from './services/report';
 import { exportReportToPdf } from './services/report-pdf';
 import { buildReportWorkbook } from './services/report-export';
@@ -32,8 +42,12 @@ import type {
   Announcement,
   AnnouncementInput,
   AttendanceLogRow,
+  Badge,
+  BadgeLeaderboardRow,
   EmailResult,
   EnrollmentRow,
+  Excuse,
+  ExcuseCategory,
   ExportResult,
   ImportResult,
   LogFilter,
@@ -41,6 +55,7 @@ import type {
   OverviewStats,
   ReportData,
   ReportQuery,
+  ScanMode,
   ScanResult,
   ScanSource,
   SchoolYear,
@@ -51,6 +66,7 @@ import type {
   SmsLog,
   SmsLogRow,
   Student,
+  StudentBadgeSummary,
   StudentInput,
   SystemStatus,
   User,
@@ -82,10 +98,21 @@ export function registerIpc(scanner: ScannerHook): void {
 
   ipcMain.handle('tapin:processScan', async (_e, payload: string, source: ScanSource): Promise<ScanResult> => {
     // enqueueScan serializes scanner/webcam/manual so scans can't interleave.
+    // The kiosk gate-direction mode is applied inside enqueueScan, so every
+    // path (scanner/webcam/manual) honours the same Auto/IN/OUT setting.
     return enqueueScan(payload, source, {
       onScanResult: (r) => broadcast('tapin:scan-result', r),
       onActivity: (items) => broadcast('tapin:activity', items),
     });
+  });
+
+  // Kiosk gate-direction mode (Auto / force IN / force OUT). Held in the main
+  // process so the USB scanner path shares the renderer's setting; resets to
+  // 'auto' on every app start.
+  ipcMain.handle('tapin:getScanMode', async (): Promise<ScanMode> => getScanMode());
+
+  ipcMain.handle('tapin:setScanMode', async (_e, mode: ScanMode): Promise<ScanMode> => {
+    return setScanMode(mode);
   });
 
   ipcMain.handle('tapin:getRecentActivity', async (_e, limit = 5): Promise<ActivityItem[]> => {
@@ -290,6 +317,13 @@ export function registerIpc(scanner: ScannerHook): void {
     // Auto-generate the student number when the Add form leaves it blank.
     const studentNo = String(input.student_no ?? '').trim() || (await generateStudentNo());
     const payload = generatePayload(studentNo);
+    // A guardian QR is only issued once a guardian is named — it resolves to
+    // the day report(s) at the kiosk (never an attendance toggle). The payload
+    // hashes the guardian identity, so children sharing the same name +
+    // address share ONE guardian QR.
+    const guardianName = String(input.guardian_name ?? '').trim();
+    const guardianAddress = String(input.guardian_address ?? '').trim();
+    const guardianPayload = guardianName ? generateGuardianPayload(guardianName, guardianAddress) : null;
     // students.grade_section is the CURRENT year's live section — a student
     // enrolled into a past year starts unassigned this year.
     const [cur] = await db.query<{ name: string }[]>(
@@ -301,14 +335,20 @@ export function registerIpc(scanner: ScannerHook): void {
       : [];
     const liveSection = yearRow?.is_current ? String(input.grade_section ?? '').trim() : '';
     const res = await db.execute(
-      `INSERT INTO students (student_no, qr_hash_payload, full_name, grade_section, parent_phone, photo_url, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO students (student_no, qr_hash_payload, full_name, grade_section, parent_phone,
+                             lrn, guardian_name, guardian_address, guardian_qr_hash_payload,
+                             photo_url, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         studentNo,
         payload,
         input.full_name,
         liveSection,
         input.parent_phone || '',
+        String(input.lrn ?? '').trim(),
+        guardianName,
+        String(input.guardian_address ?? '').trim(),
+        guardianPayload,
         input.photo_url || null,
         input.is_active ?? true,
       ],
@@ -337,8 +377,28 @@ export function registerIpc(scanner: ScannerHook): void {
     add('student_no', 'student_no', '');
     add('full_name', 'full_name', '');
     add('parent_phone', 'parent_phone', '');
+    add('lrn', 'lrn', '');
+    add('guardian_name', 'guardian_name', '');
+    add('guardian_address', 'guardian_address', '');
     add('photo_url', 'photo_url', null);
     add('is_active', 'is_active', true);
+    // Guardian QR lifecycle: the payload is a hash of the guardian identity
+    // (name + address), so changing either field re-issues the QR; clearing the
+    // name removes it. Children sharing the identity share the same QR.
+    if ('guardian_name' in input || 'guardian_address' in input) {
+      const [existing] = await db.query<{ guardian_name: string; guardian_address: string }[]>(
+        'SELECT guardian_name, guardian_address FROM students WHERE id = ?',
+        [id],
+      );
+      const name = String(input.guardian_name ?? existing?.guardian_name ?? '').trim();
+      const address = String(input.guardian_address ?? existing?.guardian_address ?? '').trim();
+      if (name) {
+        sets.push('guardian_qr_hash_payload = ?');
+        params.push(generateGuardianPayload(name, address));
+      } else {
+        sets.push('guardian_qr_hash_payload = NULL');
+      }
+    }
     // students.grade_section (the live, current-year section) only changes when
     // the requested school year IS the current year — editing a past year must
     // not rewrite the live section.
@@ -676,7 +736,8 @@ export function registerIpc(scanner: ScannerHook): void {
     const header = lines[0].toLowerCase();
     const start = header.includes('student_no') ? 1 : 0;
     for (let i = start; i < lines.length; i++) {
-      const [studentNo, fullName, gradeSection, parentPhone] = splitCsvLine(lines[i]);
+      const [studentNo, fullName, gradeSection, parentPhone, lrn, guardianName, guardianAddress] =
+        splitCsvLine(lines[i]);
       if (!studentNo || !fullName) {
         result.errors.push(`Row ${i + 1}: missing student_no or full_name`);
         result.skipped++;
@@ -684,9 +745,26 @@ export function registerIpc(scanner: ScannerHook): void {
       }
       try {
         const payload = generatePayload(studentNo);
+        // Guardian QR is issued only when a guardian name is present (same rule
+        // as the Add/Edit form); it hashes the guardian identity so shared
+        // guardians reuse one QR.
+        const gName = String(guardianName ?? '').trim();
+        const gAddress = String(guardianAddress ?? '').trim();
         const res = await db.execute(
-          'INSERT INTO students (student_no, qr_hash_payload, full_name, grade_section, parent_phone) VALUES (?, ?, ?, ?, ?)',
-          [studentNo, payload, fullName, gradeSection || '', parentPhone || ''],
+          `INSERT INTO students (student_no, qr_hash_payload, full_name, grade_section, parent_phone,
+                                 lrn, guardian_name, guardian_address, guardian_qr_hash_payload)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            studentNo,
+            payload,
+            fullName,
+            gradeSection || '',
+            parentPhone || '',
+            String(lrn ?? '').trim(),
+            gName,
+            gAddress,
+            gName ? generateGuardianPayload(gName, gAddress) : null,
+          ],
         );
         if (gradeSection) await syncEnrollment(res.insertId, gradeSection);
         result.added++;
@@ -1015,6 +1093,44 @@ const next = await settingsStore.update(patch);
     const provider = getProvider(next.sms_provider);
     broadcast('tapin:status', { db: db.getStatus(), sms: await provider.verify(next) });
     return next;
+  });
+
+  // ---- Badges & excused days (weekly recognition) ---------------------------
+  ipcMain.handle('tapin:getStudentBadges', async (_e, studentId: number): Promise<StudentBadgeSummary> => {
+    return evaluateStudentToday(Number(studentId));
+  });
+
+  ipcMain.handle('tapin:listBadges', async (_e, schoolYear?: string): Promise<Badge[]> => {
+    return listBadges(schoolYear);
+  });
+
+  ipcMain.handle('tapin:badgeLeaderboard', async (_e, topN = 10): Promise<BadgeLeaderboardRow[]> => {
+    return badgeLeaderboard(topN);
+  });
+
+  ipcMain.handle('tapin:listExcuses', async (_e, studentId: number): Promise<Excuse[]> => {
+    return listExcuses(Number(studentId));
+  });
+
+  ipcMain.handle(
+    'tapin:addExcuse',
+    async (
+      _e,
+      studentId: number,
+      excuseDate: string,
+      category: ExcuseCategory,
+      note?: string,
+    ): Promise<Excuse> => {
+      const excuse = await addExcuse(studentId, excuseDate, category, note);
+      // Self-heal: an excuse can restore (or a typo can break) a badge.
+      await recomputeStudent(excuse.studentId);
+      return excuse;
+    },
+  );
+
+  ipcMain.handle('tapin:removeExcuse', async (_e, excuseId: number): Promise<void> => {
+    const studentId = await removeExcuse(Number(excuseId));
+    if (studentId) await recomputeStudent(studentId);
   });
 
   // ---- Auto-update (GitHub Releases) --------------------------------------

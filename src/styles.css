@@ -447,6 +447,71 @@ button { font-family: inherit; }
 .gw-ok { color: #34d399; font-weight: 700; }
 .gw-bad { color: #fb7185; font-weight: 700; }
 
+/* ---- Kiosk gate-direction mode (Auto / IN / OUT) ---- */
+.gate-mode-card { flex: none; }
+.gate-mode-seg {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 5px;
+}
+.gate-mode-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 8px 4px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+.gate-mode-btn:hover { color: var(--text); background: var(--surface-2); }
+.gate-mode-btn.gate-mode-on-auto {
+  background: rgba(148, 163, 184, 0.16);
+  color: var(--text);
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.45) inset;
+}
+.gate-mode-btn.gate-mode-on-in {
+  background: var(--emerald-soft);
+  color: #34d399;
+  box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.55) inset;
+}
+.gate-mode-btn.gate-mode-on-out {
+  background: var(--indigo-soft);
+  color: #a5b4fc;
+  box-shadow: 0 0 0 1px rgba(165, 180, 252, 0.55) inset;
+}
+.gate-mode-chip {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  padding: 3px 9px;
+  border-radius: 999px;
+}
+.gate-mode-chip.chip-in { background: var(--emerald-soft); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.45); }
+.gate-mode-chip.chip-out { background: var(--indigo-soft); color: #a5b4fc; border: 1px solid rgba(165, 180, 252, 0.45); }
+.gate-mode-hint { font-size: 12px; color: var(--text-faint); line-height: 1.45; margin-top: 10px; }
+
+/* Header pill shown while the gate direction is forced (staff awareness). */
+.kiosk-gate-pill {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  padding: 4px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  animation: pillPulse 1.6s ease-in-out infinite;
+}
+.kiosk-gate-pill.gate-pill-in { background: var(--emerald-soft); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.5); }
+.kiosk-gate-pill.gate-pill-out { background: var(--indigo-soft); color: #a5b4fc; border: 1px solid rgba(165, 180, 252, 0.5); }
+
 .simulate-btn { margin-top: auto; }
 .cam-btn, .simulate-btn { width: 100%; }
 
@@ -1476,47 +1541,89 @@ input[type='checkbox'] {
 }
 .inline-field { display: inline-flex; align-items: center; gap: 8px; }
 
-/* ---- Kiosk idle carousel ---- */
+/* ---- Kiosk idle carousel (full-bleed: fills the entire left panel) ---- */
 .announcement-carousel {
   width: 100%;
-  max-width: 720px;
-  gap: 18px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 .announcement-slide {
+  flex: 1;
+  min-height: 0;
   width: 100%;
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: 22px;
+  position: relative;
   overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  border-radius: 18px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
   display: flex;
   flex-direction: column;
   align-items: center;
 }
+/* Media fills the whole slide; the copy is overlaid on a bottom gradient. */
 .announcement-media {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  max-height: 420px;
-  object-fit: contain;
+  height: 100%;
+  object-fit: cover;
   background: var(--bg);
   display: block;
 }
-.announcement-video { max-height: 440px; }
+/* Video: some Electron/Chromium builds ignore object-fit on <video> (rendering
+   "contain" and letterboxing any video whose aspect ratio differs from the
+   panel). The min-width/min-height centering trick below achieves the same
+   cover crop in every renderer, so the video always fills the panel
+   edge-to-edge regardless of its aspect ratio. */
+.announcement-slide .announcement-video {
+  inset: auto;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: auto;
+  height: auto;
+  min-width: 100%;
+  min-height: 100%;
+  object-fit: cover;
+}
 .announcement-copy {
-  padding: 26px 34px 30px;
-  text-align: center;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   width: 100%;
+  padding: 50px 40px 34px;
+  text-align: center;
+  background: linear-gradient(to top, rgba(2, 6, 23, 0.9), rgba(2, 6, 23, 0.45) 55%, transparent);
+}
+/* Text-only announcements: no media to overlay, so center the copy. */
+.announcement-slide.announcement-text-only .announcement-copy {
+  position: static;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  padding: 40px;
 }
 .announcement-title {
-  font-size: 30px;
+  font-size: 34px;
   font-weight: 780;
   letter-spacing: 0.01em;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+  text-shadow: 0 2px 12px rgba(2, 6, 23, 0.55);
 }
 .announcement-text {
   color: var(--text-dim);
-  font-size: 17px;
-  line-height: 1.5;
+  font-size: 18px;
+  line-height: 1.55;
   white-space: pre-wrap;
+  max-width: 720px;
+  margin: 0 auto;
 }
 .announcement-dots { display: flex; gap: 8px; }
 .announcement-dots .dot {
@@ -1530,4 +1637,259 @@ input[type='checkbox'] {
   background: var(--emerald);
   transform: scale(1.2);
   box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+}
+
+/* ---- Guardian QR (students table + QR modal tabs) ---- */
+.guardian-qr-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--emerald);
+  vertical-align: middle;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+}
+.qr-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+}
+.qr-tab {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.qr-tab:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.qr-tab.active {
+  background: var(--emerald-soft);
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.4);
+}
+.qr-tab:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ---- Kiosk guardian day report ---- */
+.guardian-card { text-align: left; }
+.guardian-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.guardian-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  background: var(--emerald-soft);
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  flex-shrink: 0;
+}
+.guardian-meta { margin-top: 4px; font-size: 13px; color: var(--text-dim); }
+.guardian-report { padding: 16px 24px 22px; }
+.guardian-scans {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.guardian-scan-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.guardian-scan-time {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 17px;
+  font-weight: 700;
+  min-width: 58px;
+}
+.guardian-flag { font-size: 12px; font-weight: 600; }
+.guardian-source { margin-left: auto; font-size: 12px; }
+.guardian-child {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.guardian-child + .guardian-child { margin-top: 12px; }
+.guardian-child-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.guardian-child-head h3 { margin: 0; font-size: 15px; }
+.guardian-child-meta { margin: 2px 0 0; font-size: 12px; }
+.guardian-empty { padding: 14px 4px; text-align: center; }
+
+/* ---- Kiosk demo buttons ---- */
+.simulate-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: auto;
+}
+.simulate-row .simulate-btn { width: 100%; margin-top: 0; }
+
+/* ---- Weekly badges (kiosk + admin) ---- */
+.kiosk-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 10px;
+}
+.kiosk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
+}
+.kiosk-badge-earned {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fcd34d;
+  border-color: rgba(251, 191, 36, 0.4);
+  box-shadow: 0 0 14px rgba(251, 191, 36, 0.18);
+}
+.kiosk-badge-missed {
+  text-decoration: line-through;
+  text-decoration-color: rgba(251, 113, 133, 0.6);
+}
+.kiosk-badge-dim { color: var(--text-dim); }
+
+.new-badge-pop {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 12px;
+  padding: 12px 18px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.18), rgba(249, 115, 22, 0.16));
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  animation: badgePop 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.4) both;
+  color: #fde68a;
+}
+.new-badge-icon { font-size: 30px; animation: badgeBounce 0.9s ease infinite alternate; }
+.new-badge-pop strong { display: block; font-size: 14px; letter-spacing: 0.08em; }
+.new-badge-pop div > span { font-size: 15px; font-weight: 700; }
+@keyframes badgePop {
+  from { transform: scale(0.7); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+@keyframes badgeBounce {
+  from { transform: translateY(0); }
+  to { transform: translateY(-5px); }
+}
+
+/* Admin: leaderboard + badge chips */
+.stars-card {
+  margin: 14px 0;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+}
+.stars-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+.stars-head h3 { font-size: 16px; margin: 0; }
+.stars-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.star-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 200px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+}
+.star-rank { font-size: 20px; }
+.star-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.star-name { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.star-count { font-size: 13px; color: #fcd34d; white-space: nowrap; }
+
+.badge-cell { display: inline-flex; gap: 6px; align-items: center; }
+.badge-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.badge-att {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+}
+.badge-punct {
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+}
+
+/* Admin: excused days panel */
+.excuse-panel {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-strong);
+}
+.excuse-panel h4 { margin: 0 0 10px; font-size: 14px; }
+.excuse-add { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.excuse-add input, .excuse-add select { flex: 1 1 130px; }
+.excuse-add input[type='date'] { max-width: 150px; flex: 0 1 150px; }
+.excuse-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow: auto;
+}
+.excuse-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.excuse-note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

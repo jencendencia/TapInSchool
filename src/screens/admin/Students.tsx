@@ -4,7 +4,17 @@
 // (title bar) — the table shows each student's section for that year.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import type { ImportResult, Section, Student, StudentInput } from '../../../shared/types';
+import { BADGE_INFO, EXCUSE_CATEGORIES } from '../../../shared/types';
+import type {
+  Badge,
+  BadgeLeaderboardRow,
+  Excuse,
+  ExcuseCategory,
+  ImportResult,
+  Section,
+  Student,
+  StudentInput,
+} from '../../../shared/types';
 import { api } from '../../lib/api';
 import { sortGrades } from '../../lib/sort';
 import { Avatar, Modal, QrCodeImage, Spinner, Toast } from '../../components/shared';
@@ -22,6 +32,9 @@ const EMPTY_FORM: StudentInput = {
   full_name: '',
   grade_section: '',
   parent_phone: '',
+  lrn: '',
+  guardian_name: '',
+  guardian_address: '',
   photo_url: null,
   is_active: true,
 };
@@ -200,6 +213,24 @@ function StudentForm({
         <input value={form.parent_phone} onChange={(e) => set('parent_phone', e.target.value)} placeholder="09171234567" />
       </div>
       <div className="field">
+        <label>LRN (Learner Reference Number)</label>
+        <input
+          value={form.lrn}
+          onChange={(e) => set('lrn', e.target.value.replace(/\D/g, '').slice(0, 12))}
+          inputMode="numeric"
+          placeholder="136542110123 — optional"
+        />
+      </div>
+      <div className="field">
+        <label>Guardian's Name</label>
+        <input value={form.guardian_name} onChange={(e) => set('guardian_name', e.target.value)} placeholder="e.g. Maria Dela Cruz" />
+        <p className="field-hint">When set, the guardian gets their own QR — scanning it at the kiosk shows the child's attendance report for today.</p>
+      </div>
+      <div className="field">
+        <label>Guardian's Address</label>
+        <input value={form.guardian_address} onChange={(e) => set('guardian_address', e.target.value)} placeholder="e.g. 123 Mabini St., Manila" />
+      </div>
+      <div className="field">
         <label>Photo</label>
         <div className="photo-upload">
           <div className="photo-preview">
@@ -249,18 +280,22 @@ function StudentForm({
 }
 
 function QrModal({ student, section, onClose }: { student: Student; section: string; onClose: () => void }) {
-  const payload = student.qr_hash_payload;
+  const [tab, setTab] = useState<'student' | 'guardian'>('student');
+  const guardianPayload = student.guardian_qr_hash_payload;
+  const payload = tab === 'student' ? student.qr_hash_payload : guardianPayload;
   const print = async () => {
-    const url = await QRCode.toDataURL(payload, { width: 480, margin: 2 });
+    const url = await QRCode.toDataURL(payload!, { width: 480, margin: 2 });
     const w = window.open('', '_blank', 'width=420,height=560');
     if (!w) return;
-    w.document.write(`<!doctype html><html><head><title>QR — ${student.full_name}</title>
+    const isGuardian = tab === 'guardian';
+    w.document.write(`<!doctype html><html><head><title>${isGuardian ? 'Guardian' : 'Student'} QR — ${student.full_name}</title>
       <style>body{font-family:sans-serif;text-align:center;padding:24px}
       img{width:300px;border:1px solid #ccc;border-radius:8px;padding:12px}
       h2{margin:8px 0 2px}p{margin:2px 0;color:#555}
       code{font-size:12px;color:#888;word-break:break-all}</style></head><body>
-      <h2>${student.full_name}</h2>
-      <p>${section} · Student No. ${student.student_no}</p>
+      <h2>${isGuardian ? student.guardian_name || 'Guardian' : student.full_name}</h2>
+      <p>${isGuardian ? `${student.guardian_name} · Guardian of ${student.full_name}` : `${section} · Student No. ${student.student_no}`}</p>
+      ${isGuardian && student.guardian_address ? `<p>${student.guardian_address}</p>` : ''}
       <img src="${url}" alt="QR" />
       <p><code>${payload}</code></p>
       </body></html>`);
@@ -269,19 +304,120 @@ function QrModal({ student, section, onClose }: { student: Student; section: str
     setTimeout(() => w.print(), 300);
   };
   return (
-    <Modal title="Student QR Code" onClose={onClose}>
+    <Modal title={tab === 'student' ? 'Student QR Code' : 'Guardian QR Code'} onClose={onClose}>
+      <div className="qr-tabs">
+        <button className={`qr-tab ${tab === 'student' ? 'active' : ''}`} onClick={() => setTab('student')}>Student QR</button>
+        <button
+          className={`qr-tab ${tab === 'guardian' ? 'active' : ''}`}
+          disabled={!guardianPayload}
+          title={guardianPayload ? undefined : 'Add a Guardian’s Name to the student to generate this QR'}
+          onClick={() => setTab('guardian')}
+        >
+          Guardian QR
+        </button>
+      </div>
       <div className="qr-modal">
-        <QrCodeImage text={payload} size={220} />
-        <h3>{student.full_name}</h3>
-        <p className="text-dim">{section} · {student.student_no}</p>
-        <code className="qr-payload">{payload}</code>
-        <p className="qr-note text-dim">Scan this with the gate scanner to test. Payload matches students.qr_hash_payload.</p>
-        <div className="form-actions">
-          <button className="btn-ghost" onClick={() => void navigator.clipboard?.writeText(payload)}>Copy</button>
-          <button className="btn-primary" onClick={() => void print()}>🖨 Print</button>
-        </div>
+        {payload ? (
+          <>
+            <QrCodeImage text={payload} size={220} />
+            <h3>{tab === 'student' ? student.full_name : student.guardian_name || 'Guardian'}</h3>
+            <p className="text-dim">
+              {tab === 'student'
+                ? `${section} · ${student.student_no}`
+                : `Guardian of ${student.full_name}${student.guardian_address ? ` · ${student.guardian_address}` : ''}`}
+            </p>
+            <code className="qr-payload">{payload}</code>
+            <p className="qr-note text-dim">
+              {tab === 'student'
+                ? 'Scan this with the gate scanner to record attendance.'
+                : 'Scanning this at the kiosk shows today\u2019s attendance for this child — no check-in is recorded. Other children sharing the same Guardian\u2019s Name and Address share this one QR.'}
+            </p>
+            <div className="form-actions">
+              <button className="btn-ghost" onClick={() => void navigator.clipboard?.writeText(payload)}>Copy</button>
+              <button className="btn-primary" onClick={() => void print()}>🖨 Print</button>
+            </div>
+          </>
+        ) : (
+          <p className="qr-note text-dim" style={{ padding: '18px 0' }}>
+            No guardian QR yet. Edit the student and add a Guardian\u2019s Name — the guardian QR is generated automatically.
+          </p>
+        )}
       </div>
     </Modal>
+  );
+}
+
+const EXCUSE_PILL: Record<ExcuseCategory, string> = {
+  SICK: 'pill-warn',
+  RELIGIOUS: 'pill-info',
+  SCHOOL_ACTIVITY: 'pill-success',
+  OTHER: 'pill-dim',
+};
+
+/** Excused-days manager (weekly badges are lenient: excused days never break a
+ *  badge). Shown inside the Edit modal; adding/removing self-heals badges. */
+function ExcusePanel({ studentId }: { studentId: number }) {
+  const [list, setList] = useState<Excuse[] | null>(null);
+  const [date, setDate] = useState('');
+  const [cat, setCat] = useState<ExcuseCategory>('SICK');
+  const [note, setNote] = useState('');
+  const load = useCallback(() => {
+    void api.listExcuses(studentId).then(setList).catch(() => setList([]));
+  }, [studentId]);
+  useEffect(load, [load]);
+  const add = async () => {
+    if (!date) return;
+    try {
+      await api.addExcuse(studentId, date, cat, note || undefined);
+      setDate('');
+      setNote('');
+      load();
+    } catch (err) {
+      window.alert(`Could not add excuse: ${(err as Error).message}`);
+    }
+  };
+  const remove = async (id: number) => {
+    await api.removeExcuse(id);
+    load();
+  };
+  return (
+    <div className="excuse-panel">
+      <h4>
+        Excused days <span className="text-dim">(sick, religious, school activities — never break a badge)</span>
+      </h4>
+      <div className="excuse-add">
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Excuse date" />
+        <select value={cat} onChange={(e) => setCat(e.target.value as ExcuseCategory)} aria-label="Excuse category">
+          {EXCUSE_CATEGORIES.map((c) => (
+            <option key={c} value={c}>
+              {c.replace('_', ' ')}
+            </option>
+          ))}
+        </select>
+        <input
+          placeholder="Note (optional)"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          aria-label="Excuse note"
+        />
+        <button className="btn-primary" onClick={() => void add()} disabled={!date}>
+          Add excuse
+        </button>
+      </div>
+      <ul className="excuse-list">
+        {(list ?? []).map((e) => (
+          <li key={e.id}>
+            <span className="mono">{e.excuseDate}</span>
+            <span className={`pill ${EXCUSE_PILL[e.category]}`}>{e.category.replace('_', ' ')}</span>
+            {e.note && <span className="text-dim excuse-note">{e.note}</span>}
+            <button className="btn-icon danger" title="Remove excuse" onClick={() => void remove(e.id)}>
+              ✕
+            </button>
+          </li>
+        ))}
+        {list && list.length === 0 && <li className="text-dim">No excused days recorded.</li>}
+      </ul>
+    </div>
   );
 }
 
@@ -293,6 +429,8 @@ export function StudentsPage() {
   const [search, setSearch] = useState('');
   const [modal, setModal] = useState<ModalState>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [badgesByStudent, setBadgesByStudent] = useState<Map<number, Badge[]>>(new Map());
+  const [leaderboard, setLeaderboard] = useState<BadgeLeaderboardRow[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback((q = '') => {
@@ -307,6 +445,24 @@ export function StudentsPage() {
   useEffect(() => {
     void api.listSections().then(setSections);
   }, []);
+
+  // Badges + leaderboard (weekly recognition) — refresh whenever the roster
+  // changes so new/deleted students stay in sync.
+  useEffect(() => {
+    void api
+      .listBadges()
+      .then((list) => {
+        const map = new Map<number, Badge[]>();
+        for (const b of list) {
+          const arr = map.get(b.studentId) ?? [];
+          arr.push(b);
+          map.set(b.studentId, arr);
+        }
+        setBadgesByStudent(map);
+      })
+      .catch(() => undefined);
+    void api.badgeLeaderboard(5).then(setLeaderboard).catch(() => undefined);
+  }, [students]);
 
   // The SELECTED school year's enrollments drive what the table + edit form
   // show (a student can be in different sections in different years).
@@ -424,6 +580,27 @@ const notify = (msg: string) => {
         />
       </div>
 
+      {leaderboard.length > 0 && (
+        <div className="stars-card">
+          <div className="stars-head">
+            <h3>🏆 Attendance Stars</h3>
+            <span className="text-dim">Top {leaderboard.length} by badges earned this school year</span>
+          </div>
+          <div className="stars-row">
+            {leaderboard.map((r, i) => (
+              <div key={r.studentId} className="star-cell">
+                <span className="star-rank">{['🥇', '🥈', '🥉'][i] ?? `#${i + 1}`}</span>
+                <div className="star-body">
+                  <span className="star-name">{r.fullName}</span>
+                  <span className="text-dim">{r.gradeSection || '—'}</span>
+                </div>
+                <span className="star-count">🎖 {r.attendanceWeeks} · ⏱ {r.punctualityWeeks}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="table-wrap">
         <table className="table">
           <thead>
@@ -432,6 +609,8 @@ const notify = (msg: string) => {
               <th>Student No.</th>
               <th>Grade / Section</th>
               <th>Parent Mobile</th>
+              <th>Guardian</th>
+              <th>Badges</th>
               <th>QR Payload</th>
               <th>Status</th>
               <th></th>
@@ -459,6 +638,41 @@ const notify = (msg: string) => {
                   </td>
                   <td>{s.parent_phone || '—'}</td>
                   <td>
+                    {s.guardian_name ? (
+                      <span title={s.guardian_address || undefined}>
+                        {s.guardian_name}
+                        {s.guardian_qr_hash_payload ? <span className="guardian-qr-dot" title="Guardian QR available" /> : null}
+                      </span>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                  <td>
+                    {(() => {
+                      const list = badgesByStudent.get(s.id);
+                      if (!list?.length) return <span className="text-dim">—</span>;
+                      const att = list.filter((b) => b.badgeCode === 'ATT_W').length;
+                      const punct = list.filter((b) => b.badgeCode === 'PUNCT_W').length;
+                      const weeks = list.map((b) => `${b.badgeCode} · week of ${b.weekStart}`).join('\n');
+                      return (
+                        <span className="badge-cell" title={weeks}>
+                          {att > 0 && (
+                            <span className="badge-chip badge-att">
+                              {BADGE_INFO.ATT_W.icon}
+                              {att > 1 ? att : ''}
+                            </span>
+                          )}
+                          {punct > 0 && (
+                            <span className="badge-chip badge-punct">
+                              {BADGE_INFO.PUNCT_W.icon}
+                              {punct > 1 ? punct : ''}
+                            </span>
+                          )}
+                        </span>
+                      );
+                    })()}
+                  </td>
+                  <td>
                     <code className="qr-payload sm">{s.qr_hash_payload}</code>
                   </td>
                   <td>
@@ -478,7 +692,7 @@ const notify = (msg: string) => {
             })}
             {students.length === 0 && (
               <tr>
-                <td colSpan={7} className="empty-cell">
+                <td colSpan={9} className="empty-cell">
                   No students yet. Add one manually or use CSV import / demo data.
                 </td>
               </tr>
@@ -506,6 +720,9 @@ const notify = (msg: string) => {
               full_name: modal.student.full_name,
               grade_section: sectionOf(modal.student),
               parent_phone: modal.student.parent_phone,
+              lrn: modal.student.lrn,
+              guardian_name: modal.student.guardian_name,
+              guardian_address: modal.student.guardian_address,
               photo_url: modal.student.photo_url,
               is_active: modal.student.is_active,
             }}
@@ -513,13 +730,14 @@ const notify = (msg: string) => {
             onSave={(i) => void saveStudent(i)}
             onCancel={() => setModal(null)}
           />
+          <ExcusePanel studentId={modal.student.id} />
         </Modal>
       )}
       {modal?.type === 'qr' && <QrModal student={modal.student} section={sectionOf(modal.student) || '—'} onClose={() => setModal(null)} />}
       {modal?.type === 'import' && (
         <Modal title="Import Students from CSV" closeOnOverlay={false} onClose={() => setModal(null)}>
           <p className="text-dim">
-            Columns: <code>student_no,full_name,grade_section,parent_phone</code> (header row optional). QR payloads are generated automatically. Imported students are enrolled in the current school year.
+            Columns: <code>student_no,full_name,grade_section,parent_phone,lrn,guardian_name,guardian_address</code> (header row optional; LRN + guardian columns optional). QR payloads are generated automatically — a guardian QR is issued when a guardian name is present. Imported students are enrolled in the current school year.
           </p>
           <div className="form">
             <div className="field">
@@ -533,7 +751,7 @@ const notify = (msg: string) => {
               <label>…or paste CSV text</label>
               <textarea
                 rows={6}
-                placeholder={'2025-0101,Juan Dela Cruz,Grade 7 - Section A,09171234567\n2025-0102,Maria Santos,Grade 7 - Section A,09182345678'}
+                placeholder={'2025-0101,Juan Dela Cruz,Grade 7 - Section A,09171234567,136542110123,Maria Dela Cruz,123 Mabini St.\n2025-0102,Maria Santos,Grade 7 - Section A,09182345678'}
                 onBlur={(e) => {
                   if (e.target.value.trim()) {
                     void api.importStudentsCsv(e.target.value).then((res) => {

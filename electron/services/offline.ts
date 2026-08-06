@@ -25,6 +25,7 @@ export interface CachedStudent {
   full_name: string;
   grade_section: string;
   parent_phone: string | null;
+  guardian_qr_hash_payload: string | null;
   photo_url: string | null;
   is_active: boolean;
 }
@@ -105,7 +106,7 @@ export async function refreshOfflineCache(): Promise<void> {
   try {
     const students = await db.query<CachedStudent[]>(
       `SELECT id, student_no, qr_hash_payload, full_name, grade_section,
-              parent_phone, photo_url, is_active
+              parent_phone, guardian_qr_hash_payload, photo_url, is_active
        FROM students`,
     );
     // Latest scan per student. Row-constructor IN is used instead of a plain
@@ -137,11 +138,21 @@ export async function refreshOfflineCache(): Promise<void> {
 }
 
 function normalizeStudent(s: CachedStudent): CachedStudent {
-  return { ...s, parent_phone: s.parent_phone || null, photo_url: s.photo_url || null };
+  return {
+    ...s,
+    parent_phone: s.parent_phone || null,
+    guardian_qr_hash_payload: s.guardian_qr_hash_payload || null,
+    photo_url: s.photo_url || null,
+  };
 }
 
 export function getCachedStudentByPayload(payload: string): CachedStudent | undefined {
   return state.students.find((s) => s.qr_hash_payload === payload);
+}
+
+/** Matches a GUARDIAN payload (GP-…) against the cached snapshot. */
+export function getCachedStudentByGuardianPayload(payload: string): CachedStudent | undefined {
+  return state.students.find((s) => s.guardian_qr_hash_payload === payload);
 }
 
 /** Upserts a freshly seen student so the snapshot stays current for offline scans. */

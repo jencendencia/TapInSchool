@@ -7,8 +7,12 @@ import type {
   ActivationResult,
   Announcement,
   AnnouncementInput,
+  Badge,
+  BadgeLeaderboardRow,
   EmailResult,
   EnrollmentRow,
+  Excuse,
+  ExcuseCategory,
   ExportResult,
   ImportResult,
   LicenseStatus,
@@ -17,6 +21,7 @@ import type {
   OverviewStats,
   ReportData,
   ReportQuery,
+  ScanMode,
   ScanResult,
   ScanSource,
   SchoolYear,
@@ -27,6 +32,7 @@ import type {
   SmsLog,
   SmsLogRow,
   Student,
+  StudentBadgeSummary,
   StudentInput,
   SystemStatus,
   TapinApi,
@@ -45,6 +51,8 @@ const api: TapinApi = {
   getStatus: () => ipcRenderer.invoke('tapin:getStatus') as Promise<SystemStatus>,
   processScan: (payload: string, source: ScanSource) =>
     ipcRenderer.invoke('tapin:processScan', payload, source) as Promise<ScanResult>,
+  getScanMode: () => ipcRenderer.invoke('tapin:getScanMode') as Promise<ScanMode>,
+  setScanMode: (mode: ScanMode) => ipcRenderer.invoke('tapin:setScanMode', mode) as Promise<ScanMode>,
   getRecentActivity: (limit = 5) =>
     ipcRenderer.invoke('tapin:getRecentActivity', limit) as Promise<ActivityItem[]>,
   setKioskMode: (active: boolean) => ipcRenderer.invoke('tapin:setKioskMode', active),
@@ -101,6 +109,18 @@ const api: TapinApi = {
   saveSchoolYear: (name: string) => ipcRenderer.invoke('tapin:saveSchoolYear', name) as Promise<SchoolYear>,
 setCurrentSchoolYear: (name: string) => ipcRenderer.invoke('tapin:setCurrentSchoolYear', name) as Promise<void>,
   deleteSchoolYear: (name: string) => ipcRenderer.invoke('tapin:deleteSchoolYear', name) as Promise<void>,
+
+  getStudentBadges: (studentId: number) =>
+    ipcRenderer.invoke('tapin:getStudentBadges', studentId) as Promise<StudentBadgeSummary>,
+  listBadges: (schoolYear?: string) =>
+    ipcRenderer.invoke('tapin:listBadges', schoolYear) as Promise<Badge[]>,
+  badgeLeaderboard: (topN = 10) =>
+    ipcRenderer.invoke('tapin:badgeLeaderboard', topN) as Promise<BadgeLeaderboardRow[]>,
+  listExcuses: (studentId: number) =>
+    ipcRenderer.invoke('tapin:listExcuses', studentId) as Promise<Excuse[]>,
+  addExcuse: (studentId: number, excuseDate: string, category: ExcuseCategory, note?: string) =>
+    ipcRenderer.invoke('tapin:addExcuse', studentId, excuseDate, category, note) as Promise<Excuse>,
+  removeExcuse: (excuseId: number) => ipcRenderer.invoke('tapin:removeExcuse', excuseId) as Promise<void>,
 
   listAnnouncements: () => ipcRenderer.invoke('tapin:listAnnouncements') as Promise<Announcement[]>,
   createAnnouncement: (input: AnnouncementInput) =>

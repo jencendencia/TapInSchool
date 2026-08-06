@@ -10,6 +10,7 @@ import { ensureDefaultUsers } from './services/auth';
 import { getRecentActivity } from './services/attendance';
 import { startAbsenceService, stopAbsenceService } from './services/absence';
 import { startBackupService, stopBackupService } from './services/backup';
+import { startBadgeService, stopBadgeService } from './services/badges';
 import { decorateDbDetail, startClockDriftCheck } from './services/clock';
 import { logosDir, mimeForFile } from './services/logo';
 import { mediaDir, mediaMimeForFile } from './services/announcement';
@@ -104,11 +105,32 @@ function enqueueScanAndBroadcast(payload: string, source: 'SCANNER' | 'WEBCAM' |
   );
 }
 
+// Serializes schema applications (boot + reconnect). The statements are
+// idempotent (CREATE TABLE IF NOT EXISTS + information_schema-guarded ALTERs),
+// but two concurrent runs could both see "column missing" and both ALTER —
+// collapsing them into one in-flight promise avoids that.
+let schemaApplying: Promise<void> | null = null;
+function applySchema(): Promise<void> {
+  if (!schemaApplying) {
+    schemaApplying = ensureSchema(db.query.bind(db))
+      .catch((err) => console.error('[tapin] schema apply failed:', err))
+      .finally(() => {
+        schemaApplying = null;
+      });
+  }
+  return schemaApplying;
+}
+
 async function bootDatabase(): Promise<void> {
   db.on('status', (s: { online: boolean }) => {
     // Reload settings from the DB whenever the connection comes back up, so a
     // kiosk started offline picks up saved settings without a restart.
-    if (s.online) void settingsStore.reload();
+    if (s.online) {
+      void settingsStore.reload();
+      // Self-heal the schema on reconnect too: if the DB was offline during
+      // the boot window, new tables (e.g. badges/excuses) still get created.
+      void applySchema();
+    }
     void broadcastStatus();
   });
   db.start();
@@ -119,7 +141,7 @@ async function bootDatabase(): Promise<void> {
   }
   if (db.isOnline()) {
     try {
-      await ensureSchema(db.query.bind(db));
+      await applySchema();
       await ensureDefaultUsers();
       await settingsStore.start();
     } catch (err) {
@@ -283,6 +305,8 @@ async function serveLocalFile(filePath: string, mime: string): Promise<Response>
   // Automated absence detection (Phase 2, 4.2): nightly LATE/ABSENT flags +
   // optional parent SMS, with missed-day backfill.
   startAbsenceService();
+  // Weekly attendance badges (7.8): periodic authoritative recompute.
+  startBadgeService();
   // Offline write-behind queue: replays scans recorded during DB outages and
   // pushes the refreshed activity feed + status (incl. pending count) to the UI.
   startOfflineService({
@@ -317,5 +341,6 @@ app.on('will-quit', () => {
   queueWorker.stop();
   stopBackupService();
   stopAbsenceService();
+  stopBadgeService();
   globalShortcut.unregisterAll();
 });

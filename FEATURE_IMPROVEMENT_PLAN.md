@@ -105,7 +105,7 @@ Known gaps this plan addresses:
 | 7.5 | **Kiosk voice announcements** | TTS ("Good morning, Juan") — accessibility + delight. Cheap to prototype (`speechSynthesis`). | S | KioskScreen |
 | 7.6 | **Multilingual UI (EN / Filipino)** | Public-school friendly. | M | i18n pass over `src/` |
 | 7.7 | **Ambient idle modes** | Show school announcements / schedule on idle screen instead of a static QR prompt (carousel). | M | KioskScreen idle state + settings |
-| 7.8 | **Attendance streaks / gamification** | "3-week perfect attendance" badges for students. Nice for adoption. | S | Overview/kiosk |
+| 7.8 | **Attendance badges & ranking** — *planned (see `BADGE_RANKING_PLAN.md`)* | Perfect-attendance + perfect-punctuality badges with weekly→yearly tiers, per-section "Attendance Stars" leaderboard, kiosk celebration. Nice for adoption. | S–M | kiosk, admin Students, Overview |
 | 7.9 | **Remote health dashboard** | Heartbeat pings (CPU, disk, queue depth, version) from each kiosk to a lightweight admin page; crash reports (Sentry). | L | telemetry service |
 
 ---

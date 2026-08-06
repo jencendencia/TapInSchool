@@ -7,6 +7,14 @@ export type EntryType = 'IN' | 'OUT';
 export type SmsStatus = 'PENDING' | 'SENT' | 'FAILED';
 export type ScanSource = 'SCANNER' | 'WEBCAM' | 'MANUAL';
 
+/**
+ * Kiosk gate-direction mode. 'auto' keeps the IN/OUT toggle engine (the last
+ * scan of the day decides, so a student who forgot their morning swipe would
+ * still be recorded IN in the afternoon); 'in' / 'out' force every scan to
+ * that entry type regardless of history. Resets to 'auto' on app restart.
+ */
+export type ScanMode = 'auto' | 'in' | 'out';
+
 /** Attendance quality flag derived from bell times ('' when on time). */
 export type AttendanceFlag = '' | 'LATE' | 'EARLY';
 
@@ -19,7 +27,8 @@ export type ScanResultKind =
   | 'UNRECOGNIZED'
   | 'DUPLICATE'
   | 'OFFLINE'
-  | 'ERROR';
+  | 'ERROR'
+  | 'GUARDIAN';
 
 export interface Student {
   id: number;
@@ -28,6 +37,13 @@ export interface Student {
   full_name: string;
   grade_section: string;
   parent_phone: string;
+  /** Learner Reference Number (DepEd LRN), optional. */
+  lrn: string;
+  /** Guardian's full name — when set, a guardian QR is generated. */
+  guardian_name: string;
+  guardian_address: string;
+  /** Guardian's own QR payload (GP-… prefix). Null when no guardian is set. */
+  guardian_qr_hash_payload: string | null;
   /** URL or inline data URI of the uploaded student photo (resized thumbnail). */
   photo_url: string | null;
   is_active: boolean;
@@ -39,6 +55,11 @@ export interface StudentInput {
   full_name: string;
   grade_section: string;
   parent_phone: string;
+  /** Learner Reference Number (DepEd LRN), optional. */
+  lrn?: string;
+  /** Guardian's full name — when set, a guardian QR is generated. */
+  guardian_name?: string;
+  guardian_address?: string;
   /** URL or inline data URI of the uploaded student photo (resized thumbnail). */
   photo_url?: string | null;
   is_active?: boolean;
@@ -86,6 +107,39 @@ export interface SmsLogRow extends SmsLog {
   scanned_at: string | null;
 }
 
+/** One scan shown on the kiosk guardian day report. */
+export interface GuardianScanRow {
+  /** 'HH:MM' local time. */
+  time: string;
+  entryType: EntryType;
+  flag: AttendanceFlag;
+  source: ScanSource;
+}
+
+/** One child's attendance so far today, inside a guardian day report. */
+export interface GuardianChildReport {
+  studentId: number;
+  studentNo: string;
+  fullName: string;
+  gradeSection: string;
+  /** All scans today, oldest first. */
+  scans: GuardianScanRow[];
+  /** True when the child has at least one scan today. */
+  present: boolean;
+}
+
+/**
+ * Today's attendance report a guardian sees after scanning their QR.
+ * One guardian QR covers every child whose student record carries the same
+ * guardian name + address — each shows up as one entry in `children`.
+ */
+export interface GuardianDayReport {
+  guardianName: string;
+  /** YYYY-MM-DD of the report. */
+  date: string;
+  children: GuardianChildReport[];
+}
+
 export interface ScanResult {
   kind: ScanResultKind;
   message: string;
@@ -96,6 +150,8 @@ export interface ScanResult {
   parentPhoneMasked?: string;
   /** True when the scan was accepted while MySQL was offline and queued for sync. */
   queuedOffline?: boolean;
+  /** Populated for kind 'GUARDIAN' — the child's attendance so far today. */
+  guardianReport?: GuardianDayReport;
 }
 
 export interface LoginResult {
@@ -692,6 +748,81 @@ export interface AnnouncementInput {
   sort_order?: number;
 }
 
+// ---- Badges & attendance recognition (weekly, positive/lenient) -------------
+
+/** Weekly badge families. Tier 1 = the current week's window (Mon–Sun); future
+ *  tiers (monthly/quarterly/yearly) extend this list. */
+export type BadgeCode = 'ATT_W' | 'PUNCT_W';
+
+/** Why a school day was excused — excused days never break a badge. */
+export type ExcuseCategory = 'SICK' | 'RELIGIOUS' | 'SCHOOL_ACTIVITY' | 'OTHER';
+
+/** Display metadata for badge codes (shared by kiosk, admin, mock). */
+export const BADGE_INFO: Record<BadgeCode, { label: string; icon: string }> = {
+  ATT_W: { label: 'Attendance Champion', icon: '🎖' },
+  PUNCT_W: { label: 'Punctuality Champion', icon: '⏱' },
+};
+
+export const EXCUSE_CATEGORIES: ExcuseCategory[] = ['SICK', 'RELIGIOUS', 'SCHOOL_ACTIVITY', 'OTHER'];
+
+/** A stored badge row — a student earned this badge for one week. */
+export interface Badge {
+  id: number;
+  studentId: number;
+  schoolYear: string;
+  badgeCode: BadgeCode;
+  /** Monday (YYYY-MM-DD) of the week this badge covers. */
+  weekStart: string;
+  earnedAt: string;
+}
+
+/** An admin-recorded excused day (student, date, reason). */
+export interface Excuse {
+  id: number;
+  studentId: number;
+  /** YYYY-MM-DD */
+  excuseDate: string;
+  category: ExcuseCategory;
+  note: string;
+}
+
+/** Live progress for the current week — drives the kiosk + admin display. */
+export interface BadgeWeekProgress {
+  weekStart: string;
+  weekEnd: string;
+  /** Non-excused school days on/after the student's join day this week. */
+  requiredDays: number;
+  /** Distinct days the student scanned this week (on/after join day). */
+  presentDays: number;
+  /** Excused school days this week. */
+  excusedDays: number;
+  /** True once the attendance badge can no longer be earned this week. */
+  attendanceMissed: boolean;
+  /** True when a LATE/EARLY flag exists on a non-excused day this week. */
+  punctualityMissed: boolean;
+  attendanceComplete: boolean;
+  punctualityComplete: boolean;
+}
+
+export interface StudentBadgeSummary {
+  /** Earned badges (this school year), newest first. */
+  badges: Badge[];
+  currentWeek: BadgeWeekProgress | null;
+  /** Badge earned by the scan that produced this summary (kiosk celebration). */
+  newlyEarned: Badge | null;
+}
+
+export interface BadgeLeaderboardRow {
+  studentId: number;
+  fullName: string;
+  gradeSection: string;
+  studentNo: string;
+  /** Total earned badges this school year. */
+  badgeCount: number;
+  attendanceWeeks: number;
+  punctualityWeeks: number;
+}
+
 // ---- Auto-update (electron-updater → GitHub Releases) ----------------------
 
 export type UpdateStatusKind =
@@ -751,6 +882,10 @@ export interface LicenseApi {
 export interface TapinApi {
   getStatus(): Promise<SystemStatus>;
   processScan(payload: string, source: ScanSource): Promise<ScanResult>;
+  /** The kiosk gate-direction mode ('auto' | 'in' | 'out'). */
+  getScanMode(): Promise<ScanMode>;
+  /** Sets the kiosk gate-direction mode; applies to every scan path. */
+  setScanMode(mode: ScanMode): Promise<ScanMode>;
   getRecentActivity(limit?: number): Promise<ActivityItem[]>;
   setKioskMode(active: boolean): Promise<void>;
   toggleFullscreen(): Promise<void>;
@@ -814,6 +949,20 @@ export interface TapinApi {
   setCurrentSchoolYear(name: string): Promise<void>;
 /** Removes a non-current school year and its enrollments. */
   deleteSchoolYear(name: string): Promise<void>;
+
+  // ---- Badges & excused days (weekly recognition) -------------------------
+  /** Earned badges + current-week progress for one student (kiosk scan path). */
+  getStudentBadges(studentId: number): Promise<StudentBadgeSummary>;
+  /** All stored badges, optionally filtered to one school year. */
+  listBadges(schoolYear?: string): Promise<Badge[]>;
+  /** Top students by badge count for the current school year. */
+  badgeLeaderboard(topN?: number): Promise<BadgeLeaderboardRow[]>;
+  /** A student's recorded excused days. */
+  listExcuses(studentId: number): Promise<Excuse[]>;
+  /** Records an excused day (self-heals that student's badges). */
+  addExcuse(studentId: number, excuseDate: string, category: ExcuseCategory, note?: string): Promise<Excuse>;
+  /** Removes an excused day (self-heals that student's badges). */
+  removeExcuse(excuseId: number): Promise<void>;
 
   /** All announcements, newest first (both active and inactive). */
   listAnnouncements(): Promise<Announcement[]>;

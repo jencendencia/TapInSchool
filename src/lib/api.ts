@@ -14,11 +14,19 @@ import type {
   AnnouncementInput,
   AnnouncementMediaType,
   AttendanceFlag,
+  Badge,
+  BadgeCode,
+  BadgeLeaderboardRow,
+  BadgeWeekProgress,
   AttendanceLogRow,
   EmailResult,
   EnrollmentRow,
   EntryType,
+  Excuse,
+  ExcuseCategory,
   ExportResult,
+  GuardianChildReport,
+  GuardianDayReport,
 ImportResult,
   LicenseStatus,
   LogFilter,
@@ -31,6 +39,7 @@ ImportResult,
   ReportRegister,
   ReportTrends,
   ReportType,
+  ScanMode,
   ScanResult,
   ScanSource,
   SchoolYear,
@@ -45,6 +54,7 @@ ImportResult,
   StudentInput,
   StudentRecord,
   StudentScanRow,
+  StudentBadgeSummary,
   SystemStatus,
   TapinApi,
   TardinessFrequencyRow,
@@ -75,6 +85,26 @@ export function mockPayload(studentNo: string): string {
   const b = CHECK_ALPHABET[Math.floor(hash / CHECK_ALPHABET.length) % CHECK_ALPHABET.length];
   const c = CHECK_ALPHABET[Math.floor(hash / CHECK_ALPHABET.length / CHECK_ALPHABET.length) % CHECK_ALPHABET.length];
   return `CP-${new Date().getFullYear()}-${studentNo}${a}${b}${c}`;
+}
+
+/**
+ * Guardian QR payload (GP-…) — 6-char hash of the guardian identity
+ * (name + address), mirroring electron/services/qr.ts. Identical identity →
+ * identical QR, so children sharing a guardian share one code.
+ */
+export function mockGuardianPayload(guardianName: string, guardianAddress = ''): string {
+  let hash = 0;
+  const input = `${String(guardianName).trim()}::${String(guardianAddress).trim()}::${MOCK_SECRET}`;
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash * 31 + input.charCodeAt(i)) % 1000003;
+  }
+  let out = '';
+  for (let i = 0; i < 6; i++) {
+    let h = hash;
+    for (let k = 0; k < i; k++) h = Math.floor(h / CHECK_ALPHABET.length);
+    out += CHECK_ALPHABET[h % CHECK_ALPHABET.length];
+  }
+  return `GP-${new Date().getFullYear()}-${out}`;
 }
 
 export function mockMaskPhone(phone: string): string {
@@ -131,6 +161,19 @@ school_name: 'TapIn School',
 // ---------------------------------------------------------------------------
 // Mock implementation
 // ---------------------------------------------------------------------------
+// ---- Badge helpers (mirror electron/services/badges.ts week math) ---------
+const MIN_MOCK_WEEK_DAYS = 3;
+function dayKey(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function mondayOf(d: Date): Date {
+  const m = new Date(d);
+  m.setHours(0, 0, 0, 0);
+  m.setDate(m.getDate() - ((m.getDay() + 6) % 7));
+  return m;
+}
+
 class MockApi implements TapinApi {
   private users: { id: number; username: string; password: string; role: UserRole; pin: string | null; created_at: string }[];
   private userSeq = 1;
@@ -140,6 +183,10 @@ class MockApi implements TapinApi {
 private sections: Section[] = [];
   private announcements: Announcement[] = [];
   private announcementIdSeq = 1;
+  private badges: Badge[] = [];
+  private badgeSeq = 1;
+  private excuses: Excuse[] = [];
+  private excuseSeq = 1;
   private schoolYears: SchoolYear[] = [];
   private enrollments: { studentId: number; schoolYear: string; gradeSection: string }[] = [];
   private settings: Settings = { ...DEFAULT_MOCK_SETTINGS };
@@ -148,18 +195,21 @@ private sections: Section[] = [];
   private sectionIdSeq = 1;
   private schoolYearIdSeq = 1;
   private lastScanByStudent = new Map<number, { time: number; type: EntryType }>();
+  // Kiosk gate-direction mode (mirrors electron/services/scan-mode.ts).
+  private scanMode: ScanMode = 'auto';
   private scanCbs = new Set<(r: ScanResult) => void>();
   private activityCbs = new Set<(items: ActivityItem[]) => void>();
   private statusCbs = new Set<(s: SystemStatus) => void>();
 
   constructor() {
-    const demo: Array<[string, string, string, string]> = [
-      ['2024-0112', 'Juan Dela Cruz', 'Grade 7 - Section A', '09171234567'],
-      ['2024-0113', 'Maria Santos', 'Grade 7 - Section A', '09182345678'],
-      ['2024-0215', 'Carlos Garcia', 'Grade 8 - Section B', '09193456789'],
-      ['2024-0318', 'Ana Reyes', 'Grade 9 - Section C', '09184567890'],
-      ['2024-0421', 'Miguel Torres', 'Grade 10 - Section D', '09195678901'],
-      ['2024-0524', 'Liza Fernandez', 'Grade 11 - STEM', '09196789012'],
+    // [student_no, full_name, grade_section, parent_phone, lrn, guardian_name, guardian_address]
+    const demo: Array<[string, string, string, string, string, string, string]> = [
+      ['2024-0112', 'Juan Dela Cruz', 'Grade 7 - Section A', '09171234567', '136542110123', 'Maria Dela Cruz', '123 Mabini St., Barangay San Roque, Manila'],
+      ['2024-0113', 'Maria Santos', 'Grade 7 - Section A', '09182345678', '136542110124', 'Antonio Santos', '456 Rizal Ave., Quezon City'],
+      ['2024-0215', 'Carlos Garcia', 'Grade 8 - Section B', '09193456789', '136542110125', 'Maria Dela Cruz', '123 Mabini St., Barangay San Roque, Manila'],
+      ['2024-0318', 'Ana Reyes', 'Grade 9 - Section C', '09184567890', '136542110126', 'Luzviminda Reyes', '789 Bonifacio Rd., Pasig City'],
+      ['2024-0421', 'Miguel Torres', 'Grade 10 - Section D', '09195678901', '136542110127', '', ''],
+      ['2024-0524', 'Liza Fernandez', 'Grade 11 - STEM', '09196789012', '136542110128', '', ''],
     ];
     // Demo accounts: admin (dashboard) + staff (kiosk manual check-in PIN).
     this.users = [
@@ -181,13 +231,17 @@ private sections: Section[] = [];
       },
     ];
 
-    this.students = demo.map(([student_no, full_name, grade_section, parent_phone]) => ({
+    this.students = demo.map(([student_no, full_name, grade_section, parent_phone, lrn, guardian_name, guardian_address]) => ({
       id: this.idSeq++,
       student_no,
       qr_hash_payload: mockPayload(student_no),
       full_name,
       grade_section,
       parent_phone,
+      lrn,
+      guardian_name,
+      guardian_address,
+      guardian_qr_hash_payload: guardian_name ? mockGuardianPayload(guardian_name, guardian_address) : null,
       photo_url: null,
       is_active: true,
       created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
@@ -212,6 +266,60 @@ private sections: Section[] = [];
       created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
     }));
 
+    // Demo announcements for the kiosk idle carousel — one full-bleed image
+    // slide and one text-only slide (exercises both layout variants).
+    const svgBanner = (label: string, sub: string) =>
+      'data:image/svg+xml,' +
+      encodeURIComponent(
+        `<svg xmlns='http://www.w3.org/2000/svg' width='1280' height='720'>` +
+          `<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>` +
+          `<stop offset='0' stop-color='#0f766e'/><stop offset='1' stop-color='#4338ca'/>` +
+          `</linearGradient></defs>` +
+          `<rect width='1280' height='720' fill='url(#g)'/>` +
+          `<circle cx='1080' cy='150' r='220' fill='rgba(255,255,255,0.09)'/>` +
+          `<circle cx='180' cy='640' r='300' fill='rgba(255,255,255,0.06)'/>` +
+          `<text x='640' y='360' font-family='Segoe UI, Arial, sans-serif' font-size='76' font-weight='bold' fill='#ffffff' text-anchor='middle'>${label}</text>` +
+          `<text x='640' y='432' font-family='Segoe UI, Arial, sans-serif' font-size='32' fill='#d1fae5' text-anchor='middle'>${sub}</text>` +
+          `</svg>`,
+      );
+    const nowIso = new Date().toISOString();
+    this.announcements = [
+      {
+        id: this.announcementIdSeq++,
+        title: 'School Fair this Friday',
+        content_text: 'Games, food stalls and performances — see you at the quad!\nDoors open at 9:00 AM.',
+        media_url: svgBanner('School Fair this Friday', 'Games · Food · Performances'),
+        media_type: 'image',
+        is_active: true,
+        sort_order: 0,
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+      {
+        id: this.announcementIdSeq++,
+        title: 'Campus Tour Video',
+        content_text: 'A look around our campus — fullscreen video slide.',
+        media_url: '/demo-announcement.mp4',
+        media_type: 'video',
+        is_active: true,
+        sort_order: 1,
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+      {
+        id: this.announcementIdSeq++,
+        title: 'Welcome to TapIn School',
+        content_text:
+          'Present your QR code at the gate each morning. Students who forget their QR may use the manual check-in at the front desk.',
+        media_url: null,
+        media_type: 'none',
+        is_active: true,
+        sort_order: 2,
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+    ];
+
     // Demo school year + enrollments: one current year, seeded from the demo
     // students' sections so the roster matches the current roster.
     this.schoolYears = [
@@ -221,13 +329,17 @@ private sections: Section[] = [];
       .filter((s) => s.grade_section)
       .map((s) => ({ studentId: s.id, schoolYear: '2026 - 2027', gradeSection: s.grade_section }));
 
-    // Seed a week of history so the admin dashboard looks alive.
+    // Seed a week of history so the admin dashboard looks alive. Two demo
+    // stories exercise the badge rules: Ana (2024-0318) missed a day inside
+    // this week that is EXCUSED (badge preserved — lenient rule), Miguel
+    // (2024-0421) missed a day with no excuse (this week's badge is missed).
     for (let d = 6; d >= 0; d--) {
       const day = new Date();
       day.setDate(day.getDate() - d);
-      const count = d === 0 ? 3 : 8 + (d * 37) % 14;
+      const count = d === 0 ? 6 : 8 + (d * 37) % 14;
       for (let i = 0; i < count; i++) {
         const s = this.students[i % this.students.length];
+        if ((s.student_no === '2024-0318' && d === 2) || (s.student_no === '2024-0421' && d === 1)) continue;
         const inTime = new Date(day);
         inTime.setHours(6 + (i % 3), 20 + ((i * 13) % 35), (i * 7) % 60);
         this.addLog(s, 'IN', inTime, d === 0);
@@ -237,6 +349,20 @@ private sections: Section[] = [];
       }
     }
     this.sortLogs();
+
+    // Ana's missed day is excused (sick) — demonstrates the lenient rule.
+    const ana = this.students.find((s) => s.student_no === '2024-0318');
+    if (ana) {
+      const excDay = new Date();
+      excDay.setDate(excDay.getDate() - 2);
+      this.excuses.push({
+        id: this.excuseSeq++,
+        studentId: ana.id,
+        excuseDate: dayKey(excDay),
+        category: 'SICK',
+        note: 'Flu — adviser approved',
+      });
+    }
   }
 
   private flagFor(entryType: EntryType, at: Date): AttendanceFlag {
@@ -341,6 +467,48 @@ private sections: Section[] = [];
     };
   }
 
+  /**
+   * Builds the kiosk guardian day report for EVERY child sharing the guardian
+   * identity (mirrors the backend). Only active children are listed.
+   */
+  private guardianReport(guardians: Student[]): ScanResult {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const active = guardians.filter((s) => s.is_active);
+    const children: GuardianChildReport[] = active.map((s) => {
+      const today = this.logs
+        .filter((l) => l.student_id === s.id && new Date(l.scanned_at).toDateString() === now.toDateString())
+        .sort((a, b) => (a.scanned_at < b.scanned_at ? -1 : 1));
+      return {
+        studentId: s.id,
+        studentNo: s.student_no,
+        fullName: s.full_name,
+        gradeSection: s.grade_section,
+        scans: today.map((l) => {
+          const at = new Date(l.scanned_at);
+          return {
+            time: `${pad(at.getHours())}:${pad(at.getMinutes())}`,
+            entryType: l.entry_type,
+            flag: this.flagFor(l.entry_type, at),
+            source: l.source,
+          };
+        }),
+        present: today.length > 0,
+      };
+    });
+    const report: GuardianDayReport = {
+      guardianName: guardians[0]?.guardian_name ?? '',
+      date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+      children,
+    };
+    return {
+      kind: 'GUARDIAN',
+      message: 'Guardian verified \u2014 here is today\u2019s attendance report.',
+      student: active[0],
+      guardianReport: report,
+    };
+  }
+
   async processScan(payload: string, _source: ScanSource): Promise<ScanResult> {
     await new Promise((r) => setTimeout(r, 450));
     const trimmed = payload.trim();
@@ -348,6 +516,23 @@ private sections: Section[] = [];
       (s) => s.qr_hash_payload === trimmed || s.student_no === trimmed,
     );
     if (!student) {
+      // Guardian QR (GP-…)? No attendance recorded — show the day report for
+      // every child sharing this guardian identity.
+      const guardians = this.students.filter((s) => s.guardian_qr_hash_payload === trimmed);
+      if (guardians.length) {
+        if (!guardians.some((s) => s.is_active)) {
+          const r: ScanResult = {
+            kind: 'BLOCKED',
+            message: 'Access restricted. Please report to the Principal / Admin Office.',
+            student: guardians[0],
+          };
+          this.scanCbs.forEach((cb) => cb(r));
+          return r;
+        }
+        const r = this.guardianReport(guardians);
+        this.scanCbs.forEach((cb) => cb(r));
+        return r;
+      }
       const r: ScanResult = { kind: 'UNRECOGNIZED', message: 'Unrecognized QR code. Please report to the admin office.' };
       this.scanCbs.forEach((cb) => cb(r));
       return r;
@@ -365,7 +550,11 @@ private sections: Section[] = [];
       this.scanCbs.forEach((cb) => cb(r));
       return r;
     }
-    const entryType: EntryType = last?.type === 'IN' ? 'OUT' : 'IN';
+    // Kiosk gate-direction mode: 'auto' keeps the toggle (last scan today
+    // decides); 'in'/'out' force every scan to that entry type — mirrors the
+    // real backend (electron/services/attendance.ts).
+    const entryType: EntryType =
+      this.scanMode === 'in' ? 'IN' : this.scanMode === 'out' ? 'OUT' : last?.type === 'IN' ? 'OUT' : 'IN';
     this.lastScanByStudent.set(student.id, { time: now, type: entryType });
     const log = this.addLog(student, entryType, new Date(), true);
     this.sortLogs();
@@ -385,6 +574,15 @@ private sections: Section[] = [];
 
   async getRecentActivity(limit = 5): Promise<ActivityItem[]> {
     return this.recentActivity(limit);
+  }
+
+  async getScanMode(): Promise<ScanMode> {
+    return this.scanMode;
+  }
+
+  async setScanMode(mode: ScanMode): Promise<ScanMode> {
+    this.scanMode = mode === 'in' || mode === 'out' ? mode : 'auto';
+    return this.scanMode;
   }
 
   async setKioskMode(_active: boolean): Promise<void> {
@@ -597,6 +795,12 @@ private sections: Section[] = [];
       full_name: input.full_name,
       grade_section: isCurrent ? (input.grade_section || '') : '',
       parent_phone: input.parent_phone || '',
+      lrn: String(input.lrn ?? '').trim(),
+      guardian_name: String(input.guardian_name ?? '').trim(),
+      guardian_address: String(input.guardian_address ?? '').trim(),
+      guardian_qr_hash_payload: String(input.guardian_name ?? '').trim()
+        ? mockGuardianPayload(String(input.guardian_name ?? '').trim(), String(input.guardian_address ?? '').trim())
+        : null,
       photo_url: input.photo_url ?? null,
       is_active: input.is_active ?? true,
       created_at: new Date().toISOString(),
@@ -616,6 +820,14 @@ private sections: Section[] = [];
     const { school_year, ...studentFields } = input;
     const prevSection = s.grade_section;
     Object.assign(s, studentFields);
+    // Guardian QR lifecycle (mirrors ipc.ts): the payload hashes the guardian
+    // identity, so editing name/address re-issues it; clearing the name removes it.
+    if ('guardian_name' in input || 'guardian_address' in input) {
+      const name = String(input.guardian_name ?? s.guardian_name ?? '').trim();
+      const address = String(input.guardian_address ?? s.guardian_address ?? '').trim();
+      if (name) s.guardian_qr_hash_payload = mockGuardianPayload(name, address);
+      else s.guardian_qr_hash_payload = null;
+    }
     // Keep the requested (or current) school year's enrollment in sync when the
     // section changes. Only the current year's enrollment mirrors onto
     // students.grade_section (the live section).
@@ -645,7 +857,7 @@ private sections: Section[] = [];
     const lines = csv.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     const start = lines[0]?.toLowerCase().includes('student_no') ? 1 : 0;
     for (let i = start; i < lines.length; i++) {
-      const [studentNo, fullName, gradeSection, phone] = lines[i].split(',');
+      const [studentNo, fullName, gradeSection, phone, lrn, guardianName, guardianAddress] = lines[i].split(',');
       if (!studentNo || !fullName) {
         result.errors.push(`Row ${i + 1}: missing student_no or full_name`);
         result.skipped++;
@@ -660,6 +872,9 @@ private sections: Section[] = [];
         full_name: fullName,
         grade_section: gradeSection ?? '',
         parent_phone: phone ?? '',
+        lrn: lrn ?? '',
+        guardian_name: guardianName ?? '',
+        guardian_address: guardianAddress ?? '',
       });
       result.added++;
     }
@@ -944,6 +1159,153 @@ async deleteSchoolYear(name: string): Promise<void> {
 
   async deleteAnnouncement(id: number): Promise<void> {
     this.announcements = this.announcements.filter((a) => a.id !== id);
+  }
+
+  // ---- Badges & excused days (weekly recognition) ---------------------------
+  private mockWeekProgress(studentId: number): BadgeWeekProgress {
+    const now = new Date();
+    const weekStart = mondayOf(now);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 7);
+    const inWeek = (d: Date) => d.getTime() >= weekStart.getTime() && d.getTime() < weekEnd.getTime();
+    const schoolDays = new Set(
+      this.logs.filter((l) => inWeek(new Date(l.scanned_at))).map((l) => dayKey(new Date(l.scanned_at))),
+    );
+    const excused = new Set(this.excuses.filter((e) => e.studentId === studentId).map((e) => e.excuseDate));
+    const mine = this.logs.filter((l) => l.student_id === studentId);
+    const joinKey = mine.map((l) => dayKey(new Date(l.scanned_at))).sort()[0];
+    const required = [...schoolDays].filter((d) => !excused.has(d) && (!joinKey || d >= joinKey));
+    const scans = mine.filter((l) => inWeek(new Date(l.scanned_at)));
+    const present = new Set<string>();
+    let punctualityMissed = false;
+    for (const l of scans) {
+      const d = dayKey(new Date(l.scanned_at));
+      if (!joinKey || d >= joinKey) present.add(d);
+      if (!excused.has(d) && l.flag) punctualityMissed = true;
+    }
+    const requiredDays = required.length;
+    const active = requiredDays >= MIN_MOCK_WEEK_DAYS;
+    const attendanceComplete = active && present.size >= requiredDays;
+    return {
+      weekStart: dayKey(weekStart),
+      weekEnd: dayKey(new Date(weekEnd.getTime() - 86400000)),
+      requiredDays,
+      presentDays: present.size,
+      excusedDays: [...schoolDays].filter((d) => excused.has(d)).length,
+      attendanceMissed: active && !attendanceComplete,
+      punctualityMissed,
+      attendanceComplete,
+      punctualityComplete: attendanceComplete && !punctualityMissed,
+    };
+  }
+
+  private mockBadgeSummary(studentId: number): StudentBadgeSummary {
+    const year = this.currentYearName();
+    const week = this.mockWeekProgress(studentId);
+    const existing = this.badges.filter((b) => b.studentId === studentId && b.schoolYear === year);
+    const have = new Set(existing.map((b) => `${b.badgeCode}|${b.weekStart}`));
+    const wanted: BadgeCode[] = [];
+    if (week.attendanceComplete) wanted.push('ATT_W');
+    if (week.punctualityComplete) wanted.push('PUNCT_W');
+    let newlyEarned: Badge | null = null;
+    for (const code of wanted) {
+      const key = `${code}|${week.weekStart}`;
+      if (!have.has(key)) {
+        const b: Badge = {
+          id: this.badgeSeq++,
+          studentId,
+          schoolYear: year,
+          badgeCode: code,
+          weekStart: week.weekStart,
+          earnedAt: new Date().toISOString(),
+        };
+        this.badges.push(b);
+        if (!newlyEarned) newlyEarned = b;
+      }
+    }
+    // Authoritative: drop current-week rows no longer earned.
+    this.badges = this.badges.filter(
+      (b) =>
+        !(
+          b.studentId === studentId &&
+          b.schoolYear === year &&
+          b.weekStart === week.weekStart &&
+          !wanted.includes(b.badgeCode)
+        ),
+    );
+    return {
+      badges: this.badges
+        .filter((b) => b.studentId === studentId && b.schoolYear === year)
+        .sort((a, b) => b.weekStart.localeCompare(a.weekStart)),
+      currentWeek: week,
+      newlyEarned,
+    };
+  }
+
+  async getStudentBadges(studentId: number): Promise<StudentBadgeSummary> {
+    return this.mockBadgeSummary(Number(studentId));
+  }
+
+  async listBadges(schoolYear?: string): Promise<Badge[]> {
+    const year = schoolYear || this.currentYearName();
+    return [...this.badges].filter((b) => b.schoolYear === year);
+  }
+
+  async badgeLeaderboard(topN = 10): Promise<BadgeLeaderboardRow[]> {
+    const year = this.currentYearName();
+    const counts = new Map<number, { badgeCount: number; att: number; punct: number }>();
+    for (const b of this.badges) {
+      if (b.schoolYear !== year) continue;
+      const c = counts.get(b.studentId) ?? { badgeCount: 0, att: 0, punct: 0 };
+      c.badgeCount++;
+      if (b.badgeCode === 'ATT_W') c.att++;
+      else c.punct++;
+      counts.set(b.studentId, c);
+    }
+    return [...counts.entries()]
+      .map(([studentId, c]) => {
+        const s = this.students.find((x) => x.id === studentId);
+        if (!s) return null;
+        return {
+          studentId,
+          fullName: s.full_name,
+          gradeSection: s.grade_section,
+          studentNo: s.student_no,
+          badgeCount: c.badgeCount,
+          attendanceWeeks: c.att,
+          punctualityWeeks: c.punct,
+        };
+      })
+      .filter((r): r is BadgeLeaderboardRow => r !== null)
+      .sort((a, b) => b.badgeCount - a.badgeCount || a.fullName.localeCompare(b.fullName))
+      .slice(0, Math.max(1, Number(topN) || 10));
+  }
+
+  async listExcuses(studentId: number): Promise<Excuse[]> {
+    return this.excuses.filter((e) => e.studentId === Number(studentId));
+  }
+
+  async addExcuse(studentId: number, excuseDate: string, category: ExcuseCategory, note?: string): Promise<Excuse> {
+    const sid = Number(studentId);
+    const existing = this.excuses.find((e) => e.studentId === sid && e.excuseDate === excuseDate);
+    if (existing) {
+      existing.category = category;
+      existing.note = note || '';
+      this.mockBadgeSummary(sid); // self-heal
+      return { ...existing };
+    }
+    const e: Excuse = { id: this.excuseSeq++, studentId: sid, excuseDate, category, note: note || '' };
+    this.excuses.push(e);
+    this.mockBadgeSummary(sid); // self-heal
+    return { ...e };
+  }
+
+  async removeExcuse(excuseId: number): Promise<void> {
+    const e = this.excuses.find((x) => x.id === Number(excuseId));
+    if (e) {
+      this.excuses = this.excuses.filter((x) => x.id !== e.id);
+      this.mockBadgeSummary(e.studentId); // self-heal
+    }
   }
 
   async getReport(query: ReportQuery): Promise<ReportData> {

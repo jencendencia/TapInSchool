@@ -12,8 +12,10 @@ import { settingsStore } from '../db/settings';
 import { maskPhone } from './qr';
 import { computeScanFlag, flagSelectParams, flagSelectSql } from './bell-times';
 import { buildSmsMessage, resolveTemplate } from '../sms/message-builder';
+import { forcedEntryType, getScanMode } from './scan-mode';
 import {
   enqueueScanEvent,
+  getCachedStudentByGuardianPayload,
   getCachedStudentByPayload,
   getLastScanToday,
   recordScan,
@@ -24,6 +26,9 @@ import {
 import type {
   ActivityItem,
   AttendanceLog,
+  EntryType,
+  GuardianChildReport,
+  GuardianDayReport,
   ScanResult,
   ScanSource,
   Student,
@@ -54,12 +59,16 @@ export async function processScan(payload: string, source: ScanSource, bus: Scan
     return { kind: 'UNRECOGNIZED', message: 'Empty scan payload' };
   }
 
+  // Kiosk gate-direction mode: 'auto' → undefined (toggle engine decides);
+  // 'in'/'out' → every scan is forced to that entry type.
+  const forcedType = forcedEntryType(getScanMode());
+
   onlineScanCommitted = false;
   if (!db.isOnline()) {
-    return processScanOffline(trimmed, source, bus);
+    return processScanOffline(trimmed, source, bus, forcedType);
   }
   try {
-    return await processScanOnline(trimmed, source, bus);
+    return await processScanOnline(trimmed, source, bus, forcedType);
   } catch (err) {
     // A query failed while nominally online (connection dropped mid-scan) —
     // fall back to the local snapshot so the scan is still recorded. Only do
@@ -67,7 +76,7 @@ export async function processScan(payload: string, source: ScanSource, bus: Scan
     // attendance insert already succeeded).
     if (isConnectionError(err) && !onlineScanCommitted) {
       console.error('[tapin] online scan failed, using offline queue:', err);
-      return processScanOffline(trimmed, source, bus);
+      return processScanOffline(trimmed, source, bus, forcedType);
     }
     throw err;
   }
@@ -95,6 +104,7 @@ function toCachedStudent(student: Student): CachedStudent {
     full_name: student.full_name,
     grade_section: student.grade_section,
     parent_phone: student.parent_phone || null,
+    guardian_qr_hash_payload: student.guardian_qr_hash_payload || null,
     photo_url: student.photo_url || null,
     is_active: student.is_active,
   };
@@ -108,6 +118,10 @@ function toStudent(c: CachedStudent): Student {
     full_name: c.full_name,
     grade_section: c.grade_section,
     parent_phone: c.parent_phone || '',
+    lrn: '',
+    guardian_name: '',
+    guardian_address: '',
+    guardian_qr_hash_payload: c.guardian_qr_hash_payload || null,
     photo_url: c.photo_url,
     is_active: c.is_active,
     created_at: '',
@@ -118,6 +132,7 @@ async function processScanOnline(
   trimmed: string,
   source: ScanSource,
   bus: ScanEventBus,
+  forcedType?: EntryType,
 ): Promise<ScanResult> {
   const settings = settingsStore.get();
 
@@ -125,9 +140,16 @@ async function processScanOnline(
     'SELECT * FROM students WHERE qr_hash_payload = ? LIMIT 1',
     [trimmed],
   );
-  const student = students[0];
+  let student = students[0];
 
+  // Guardian QR (GP-…)? No attendance is recorded — the guardian sees the
+  // day report for EVERY child sharing this guardian identity.
   if (!student) {
+    const guardians = await db.query<Student[]>(
+      'SELECT * FROM students WHERE guardian_qr_hash_payload = ? ORDER BY id ASC',
+      [trimmed],
+    );
+    if (guardians.length) return handleGuardianScan(guardians, bus);
     const result: ScanResult = {
       kind: 'UNRECOGNIZED',
       message: 'Unrecognized QR code. Please report to the admin office.',
@@ -165,11 +187,14 @@ async function processScanOnline(
   }
 
   // --- Toggle engine (FR-4) ------------------------------------------------
+  // 'auto': the last scan today decides (IN → next OUT, else IN). A forced
+  // gate mode (kiosk toggle) overrides the toggle so gate staff can record a
+  // correct check-OUT for a student who forgot their morning swipe.
   const lastToday = await db.query<{ entry_type: 'IN' | 'OUT' }[]>(
     'SELECT entry_type FROM attendance_logs WHERE student_id = ? AND scanned_at >= CURDATE() ORDER BY scanned_at DESC LIMIT 1',
     [student.id],
   );
-  const entryType = lastToday[0]?.entry_type === 'IN' ? 'OUT' : 'IN';
+  const entryType = forcedType ?? (lastToday[0]?.entry_type === 'IN' ? 'OUT' : 'IN');
 
   // --- Commit log (FR-1, FR-3) ---------------------------------------------
   const insert = await db.execute(
@@ -230,16 +255,90 @@ async function processScanOnline(
   return result;
 }
 
+/**
+ * Guardian QR: read-only — build the day report for every child that shares
+ * this guardian identity and show it to the guardian. No IN/OUT toggle, no
+ * SMS, no offline write.
+ */
+async function handleGuardianScan(students: Student[], bus: ScanEventBus): Promise<ScanResult> {
+  const settings = settingsStore.get();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const hm = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const active = students.filter((s) => s.is_active);
+  if (!active.length) {
+    // Every child under this guardian is deactivated — same gate as a student scan.
+    const result: ScanResult = {
+      kind: 'BLOCKED',
+      message: 'Access restricted. Please report to the Principal / Admin Office.',
+      student: students[0],
+    };
+    bus.onScanResult(result);
+    return result;
+  }
+  const now = new Date();
+  const children: GuardianChildReport[] = [];
+  for (const s of active) {
+    const rows = await db.query<{ scanned_at: Date; entry_type: 'IN' | 'OUT'; source: ScanSource }[]>(
+      `SELECT scanned_at, entry_type, source FROM attendance_logs
+       WHERE student_id = ? AND scanned_at >= CURDATE()
+       ORDER BY scanned_at ASC`,
+      [s.id],
+    );
+    const scans = rows.map((r) => {
+      const at = new Date(r.scanned_at);
+      return {
+        time: hm(at),
+        entryType: r.entry_type,
+        flag: computeScanFlag(r.entry_type, at, settings),
+        source: r.source,
+      };
+    });
+    children.push({
+      studentId: s.id,
+      studentNo: s.student_no,
+      fullName: s.full_name,
+      gradeSection: s.grade_section,
+      scans,
+      present: scans.length > 0,
+    });
+  }
+  const report: GuardianDayReport = {
+    guardianName: students[0].guardian_name,
+    date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+    children,
+  };
+  const result: ScanResult = {
+    kind: 'GUARDIAN',
+    message: 'Guardian verified — here is today\u2019s attendance report.',
+    student: active[0],
+    guardianReport: report,
+  };
+  bus.onScanResult(result);
+  return result;
+}
+
 /** Processes a scan purely from the local snapshot and queues it for replay. */
 async function processScanOffline(
   trimmed: string,
   source: ScanSource,
   bus: ScanEventBus,
+  forcedType?: EntryType,
 ): Promise<ScanResult> {
   const settings = settingsStore.get();
   const student = getCachedStudentByPayload(trimmed);
 
   if (!student) {
+    // A guardian QR can't produce a report offline (it needs today's scan
+    // history from MySQL) — say so instead of a generic "unrecognized".
+    if (getCachedStudentByGuardianPayload(trimmed)) {
+      const result: ScanResult = {
+        kind: 'OFFLINE',
+        message:
+          'Guardian reports are available when the database is online. Please try again in a moment.',
+      };
+      bus.onScanResult(result);
+      return result;
+    }
     const result: ScanResult = {
       kind: 'OFFLINE',
       message:
@@ -276,7 +375,8 @@ async function processScanOffline(
   }
 
   // --- Toggle engine (FR-4) from the local snapshot --------------------------
-  const entryType = lastToday?.type === 'IN' ? 'OUT' : 'IN';
+  // Same forced-mode override as the online path.
+  const entryType = forcedType ?? (lastToday?.type === 'IN' ? 'OUT' : 'IN');
   const scannedAtDate = new Date(now);
   const flag = computeScanFlag(entryType, scannedAtDate, settings);
   const scannedAt = toLocalMysqlTime(scannedAtDate);

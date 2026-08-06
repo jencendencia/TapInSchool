@@ -10,18 +10,50 @@ export function getQrSecret(): string {
   return process.env.QR_SECRET || 'tapin-school-default-secret';
 }
 
-export function generatePayload(studentNo: string, secret: string = getQrSecret()): string {
-  const year = new Date().getFullYear();
+/**
+ * Check code derived from a hash input. `len` characters from the 26-letter
+ * alphabet → 26^len combinations (3 chars = 17,576; 6 chars ≈ 309M).
+ */
+function checkCode(input: string, len = 3): string {
   let hash = 0;
-  const input = `${studentNo}::${secret}`;
   for (let i = 0; i < input.length; i++) {
     hash = (hash * 31 + input.charCodeAt(i)) % 1000003;
   }
-  // 3-character check → 26^3 = 17,576 combinations, low collision risk.
-  const first = CHECK_ALPHABET[hash % CHECK_ALPHABET.length];
-  const second = CHECK_ALPHABET[Math.floor(hash / CHECK_ALPHABET.length) % CHECK_ALPHABET.length];
-  const third = CHECK_ALPHABET[Math.floor(hash / CHECK_ALPHABET.length / CHECK_ALPHABET.length) % CHECK_ALPHABET.length];
-  return `CP-${year}-${studentNo}${first}${second}${third}`;
+  let out = '';
+  for (let i = 0; i < len; i++) {
+    let h = hash;
+    for (let k = 0; k < i; k++) h = Math.floor(h / CHECK_ALPHABET.length);
+    out += CHECK_ALPHABET[h % CHECK_ALPHABET.length];
+  }
+  return out;
+}
+
+/**
+ * Student QR payload (CP-<YEAR>-<studentNo><check>). The hash input is
+ * `${studentNo}::${secret}` — do NOT change it: every printed student QR
+ * already encodes this exact derivation.
+ */
+export function generatePayload(studentNo: string, secret: string = getQrSecret()): string {
+  const year = new Date().getFullYear();
+  return `CP-${year}-${studentNo}${checkCode(`${studentNo}::${secret}`)}`;
+}
+
+/**
+ * Guardian QR payload (GP-<YEAR>-<identityHash>). Derived from the GUARDIAN's
+ * identity (name + address) rather than the student number, so every child
+ * sharing the same guardian name + address shares ONE guardian QR — scanning
+ * it shows all of their children's day reports. Salted differently from the
+ * student payload so the two codes never match.
+ */
+export function generateGuardianPayload(
+  guardianName: string,
+  guardianAddress: string = '',
+  secret: string = getQrSecret(),
+): string {
+  const year = new Date().getFullYear();
+  const identity = `${String(guardianName).trim()}::${String(guardianAddress).trim()}`;
+  // 6-char hash: identical identity → identical QR; near-zero collisions.
+  return `GP-${year}-${checkCode(`${identity}::${secret}`, 6)}`;
 }
 
 export function maskPhone(phone: string): string {

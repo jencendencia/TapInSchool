@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS students (
   full_name VARCHAR(120) NOT NULL,
   grade_section VARCHAR(40) NOT NULL DEFAULT '',
   parent_phone VARCHAR(20) NOT NULL DEFAULT '',
+  lrn VARCHAR(20) NOT NULL DEFAULT '',
+  guardian_name VARCHAR(120) NOT NULL DEFAULT '',
+  guardian_address VARCHAR(255) NOT NULL DEFAULT '',
+  guardian_qr_hash_payload VARCHAR(64) DEFAULT NULL,
   photo_url MEDIUMTEXT DEFAULT NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -161,6 +165,30 @@ CREATE TABLE IF NOT EXISTS enrollments (
   CONSTRAINT fk_enroll_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS student_badges (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  student_id INT UNSIGNED NOT NULL,
+  school_year VARCHAR(32) NOT NULL,
+  badge_code VARCHAR(16) NOT NULL,
+  week_start DATE NOT NULL,
+  earned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_student_badge (student_id, school_year, badge_code, week_start),
+  KEY idx_badges_year (school_year),
+  CONSTRAINT fk_badge_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS excuses (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  student_id INT UNSIGNED NOT NULL,
+  excuse_date DATE NOT NULL,
+  category ENUM('SICK','RELIGIOUS','SCHOOL_ACTIVITY','OTHER') NOT NULL DEFAULT 'OTHER',
+  note VARCHAR(255) NOT NULL DEFAULT '',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_excuse_student_date (student_id, excuse_date),
+  KEY idx_excuses_date (excuse_date),
+  CONSTRAINT fk_excuse_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 INSERT IGNORE INTO school_years (name) VALUES ('2026 - 2027');
 
 INSERT IGNORE INTO enrollments (student_id, school_year, grade_section)
@@ -217,4 +245,30 @@ export async function ensureSchema(query: (sql: string, params?: unknown[]) => P
   // Staff accounts have no password (admin-only dashboard); relax the old
   // NOT NULL constraint on existing installs so they can be created.
   await query('ALTER TABLE users MODIFY password_hash VARCHAR(255) DEFAULT NULL');
+
+  // ---- Idempotent migration: student LRN + guardian fields (guardian QR) ---
+  // Existing installs created `students` without these columns; the CREATE
+  // TABLE above covers fresh installs. information_schema keeps the ALTER
+  // from failing on re-runs.
+  const studentCols = (await query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'students'`,
+  )) as { COLUMN_NAME: string }[];
+  const sNames = new Set(studentCols.map((c) => c.COLUMN_NAME));
+  const adds: string[] = [];
+  if (!sNames.has('lrn')) adds.push("ADD COLUMN lrn VARCHAR(20) NOT NULL DEFAULT '' AFTER parent_phone");
+  if (!sNames.has('guardian_name')) adds.push("ADD COLUMN guardian_name VARCHAR(120) NOT NULL DEFAULT '' AFTER lrn");
+  if (!sNames.has('guardian_address')) adds.push("ADD COLUMN guardian_address VARCHAR(255) NOT NULL DEFAULT '' AFTER guardian_name");
+  if (!sNames.has('guardian_qr_hash_payload')) {
+    adds.push('ADD COLUMN guardian_qr_hash_payload VARCHAR(64) DEFAULT NULL AFTER guardian_address');
+  }
+  if (adds.length) await query(`ALTER TABLE students ${adds.join(', ')}`);
+  // Guardian QR payloads are now derived from the guardian identity, so
+  // multiple children can legitimately share the same payload — drop the old
+  // unique key that the first guardian build added (idempotent on re-runs).
+  const guardianIdx = (await query(
+    `SELECT INDEX_NAME FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'students' AND INDEX_NAME = 'uq_guardian_qr_payload'`,
+  )) as { INDEX_NAME: string }[];
+  if (guardianIdx.length) await query('ALTER TABLE students DROP INDEX uq_guardian_qr_payload');
 }
