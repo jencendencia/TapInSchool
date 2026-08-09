@@ -7,6 +7,7 @@ import QRCode from 'qrcode';
 import { BADGE_INFO, EXCUSE_CATEGORIES } from '../../../shared/types';
 import type {
   Badge,
+  BadgeCode,
   BadgeLeaderboardRow,
   Excuse,
   ExcuseCategory,
@@ -30,6 +31,7 @@ type ModalState =
 const EMPTY_FORM: StudentInput = {
   student_no: '',
   full_name: '',
+  gender: '',
   grade_section: '',
   parent_phone: '',
   lrn: '',
@@ -163,6 +165,14 @@ function StudentForm({
       <div className="field">
         <label>Full Name</label>
         <input required value={form.full_name} onChange={(e) => set('full_name', e.target.value)} placeholder="Juan Dela Cruz" />
+      </div>
+      <div className="field">
+        <label>Gender</label>
+        <select value={form.gender ?? ''} onChange={(e) => set('gender', e.target.value)}>
+          <option value="">— Select gender (optional) —</option>
+          <option value="male">Male</option>
+          <option value="female">Female</option>
+        </select>
       </div>
       <div className="field-row">
         <div className="field">
@@ -427,6 +437,7 @@ export function StudentsPage() {
   const [sections, setSections] = useState<Section[]>([]);
   const [yearEnroll, setYearEnroll] = useState<Map<number, string>>(new Map());
   const [search, setSearch] = useState('');
+  const [genderFilter, setGenderFilter] = useState<'' | 'male' | 'female'>('');
   const [modal, setModal] = useState<ModalState>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [badgesByStudent, setBadgesByStudent] = useState<Map<number, Badge[]>>(new Map());
@@ -554,13 +565,17 @@ const notify = (msg: string) => {
 
   if (!students) return <Spinner label="Loading students…" />;
 
+  // Gender is filtered client-side on top of the (server-side) name/no/section
+  // search, so both filters compose without extra round-trips.
+  const visible = genderFilter ? students.filter((s) => s.gender === genderFilter) : students;
+
   return (
     <div className="page">
       <div className="page-head">
         <div>
           <h2>Students</h2>
           <p className="text-dim">
-            {students.length} enrolled · SY {year}
+            {genderFilter ? `${visible.length} of ${students.length}` : students.length} enrolled · SY {year}
             {year !== currentYear && currentYear ? ` (current: ${currentYear})` : ''}
           </p>
         </div>
@@ -578,13 +593,22 @@ const notify = (msg: string) => {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
+        <select
+          value={genderFilter}
+          onChange={(e) => setGenderFilter(e.target.value as '' | 'male' | 'female')}
+          aria-label="Filter by gender"
+        >
+          <option value="">All genders</option>
+          <option value="male">Male</option>
+          <option value="female">Female</option>
+        </select>
       </div>
 
       {leaderboard.length > 0 && (
         <div className="stars-card">
           <div className="stars-head">
             <h3>🏆 Attendance Stars</h3>
-            <span className="text-dim">Top {leaderboard.length} by badges earned this school year</span>
+            <span className="text-dim">Top {leaderboard.length} by badge score this school year</span>
           </div>
           <div className="stars-row">
             {leaderboard.map((r, i) => (
@@ -594,7 +618,7 @@ const notify = (msg: string) => {
                   <span className="star-name">{r.fullName}</span>
                   <span className="text-dim">{r.gradeSection || '—'}</span>
                 </div>
-                <span className="star-count">🎖 {r.attendanceWeeks} · ⏱ {r.punctualityWeeks}</span>
+                <span className="star-count">⭐ {r.score} pts · 🎖 {r.attendanceBadges} · ⏱ {r.punctualityBadges}</span>
               </div>
             ))}
           </div>
@@ -602,11 +626,12 @@ const notify = (msg: string) => {
       )}
 
       <div className="table-wrap">
-        <table className="table">
+        <table className="table students-table">
           <thead>
             <tr>
               <th>Student</th>
               <th>Student No.</th>
+              <th>Gender</th>
               <th>Grade / Section</th>
               <th>Parent Mobile</th>
               <th>Guardian</th>
@@ -617,7 +642,7 @@ const notify = (msg: string) => {
             </tr>
           </thead>
           <tbody>
-            {students.map((s) => {
+            {visible.map((s) => {
               const sec = sectionOf(s);
               return (
                 <tr key={s.id}>
@@ -628,6 +653,7 @@ const notify = (msg: string) => {
                     </div>
                   </td>
                   <td className="mono">{s.student_no}</td>
+                  <td>{s.gender ? <span className="pill pill-dim">{s.gender === 'male' ? 'Male' : 'Female'}</span> : '—'}</td>
                   <td>
                     {sec || '—'}
                     {sec !== s.grade_section && s.grade_section ? (
@@ -651,21 +677,33 @@ const notify = (msg: string) => {
                     {(() => {
                       const list = badgesByStudent.get(s.id);
                       if (!list?.length) return <span className="text-dim">—</span>;
-                      const att = list.filter((b) => b.badgeCode === 'ATT_W').length;
-                      const punct = list.filter((b) => b.badgeCode === 'PUNCT_W').length;
-                      const weeks = list.map((b) => `${b.badgeCode} · week of ${b.weekStart}`).join('\n');
+                      const att = list.filter((b) => b.badgeCode.startsWith('ATT'));
+                      const punct = list.filter((b) => b.badgeCode.startsWith('PUNCT'));
+                      const detail = list
+                        .map((b) => {
+                          const info = BADGE_INFO[b.badgeCode];
+                          return `${info.tierIcon} ${info.label} · ${info.metal} (${info.windowLabel}) — ${b.periodStart}`;
+                        })
+                        .join('\n');
+                      const bestTierIcon = (badges: Badge[]): string => {
+                        let best: BadgeCode | null = null;
+                        for (const b of badges) {
+                          if (!best || BADGE_INFO[b.badgeCode].tier > BADGE_INFO[best].tier) best = b.badgeCode;
+                        }
+                        return best ? BADGE_INFO[best].tierIcon : '';
+                      };
                       return (
-                        <span className="badge-cell" title={weeks}>
-                          {att > 0 && (
+                        <span className="badge-cell" title={detail}>
+                          {att.length > 0 && (
                             <span className="badge-chip badge-att">
-                              {BADGE_INFO.ATT_W.icon}
-                              {att > 1 ? att : ''}
+                              {BADGE_INFO.ATT_W.icon} {att.length}
+                              <span className="badge-metal">{bestTierIcon(att)}</span>
                             </span>
                           )}
-                          {punct > 0 && (
+                          {punct.length > 0 && (
                             <span className="badge-chip badge-punct">
-                              {BADGE_INFO.PUNCT_W.icon}
-                              {punct > 1 ? punct : ''}
+                              {BADGE_INFO.PUNCT_W.icon} {punct.length}
+                              <span className="badge-metal">{bestTierIcon(punct)}</span>
                             </span>
                           )}
                         </span>
@@ -690,10 +728,12 @@ const notify = (msg: string) => {
                 </tr>
               );
             })}
-            {students.length === 0 && (
+            {visible.length === 0 && (
               <tr>
-                <td colSpan={9} className="empty-cell">
-                  No students yet. Add one manually or use CSV import / demo data.
+                <td colSpan={10} className="empty-cell">
+                  {students.length === 0
+                    ? 'No students yet. Add one manually or use CSV import / demo data.'
+                    : 'No students match the current gender filter.'}
                 </td>
               </tr>
             )}
@@ -718,6 +758,7 @@ const notify = (msg: string) => {
             initial={{
               student_no: modal.student.student_no,
               full_name: modal.student.full_name,
+              gender: modal.student.gender,
               grade_section: sectionOf(modal.student),
               parent_phone: modal.student.parent_phone,
               lrn: modal.student.lrn,
@@ -737,7 +778,7 @@ const notify = (msg: string) => {
       {modal?.type === 'import' && (
         <Modal title="Import Students from CSV" closeOnOverlay={false} onClose={() => setModal(null)}>
           <p className="text-dim">
-            Columns: <code>student_no,full_name,grade_section,parent_phone,lrn,guardian_name,guardian_address</code> (header row optional; LRN + guardian columns optional). QR payloads are generated automatically — a guardian QR is issued when a guardian name is present. Imported students are enrolled in the current school year.
+            Columns: <code>student_no,full_name,grade_section,parent_phone,lrn,guardian_name,guardian_address,gender</code> (header row optional; everything after <code>student_no,full_name</code> is optional). Gender accepts Male/Female (or M/F). QR payloads are generated automatically — a guardian QR is issued when a guardian name is present. Imported students are enrolled in the current school year.
           </p>
           <div className="form">
             <div className="field">

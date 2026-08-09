@@ -841,7 +841,7 @@ async function loadSmsAudit(args: { maskPhones: boolean; fromDt: string; toDt: s
      LEFT JOIN attendance_logs a ON a.id = sm.attendance_id
      LEFT JOIN students s ON s.id = a.student_id
      WHERE sm.status = 'FAILED' AND sm.created_at BETWEEN ? AND ?
-     ORDER BY sm.created_at DESC
+     ORDER BY sm.id DESC
      LIMIT ${SMS_FAILURE_CAP}`,
     [args.fromDt, args.toDt],
   );

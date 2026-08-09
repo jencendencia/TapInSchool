@@ -114,8 +114,8 @@ setCurrentSchoolYear: (name: string) => ipcRenderer.invoke('tapin:setCurrentScho
     ipcRenderer.invoke('tapin:getStudentBadges', studentId) as Promise<StudentBadgeSummary>,
   listBadges: (schoolYear?: string) =>
     ipcRenderer.invoke('tapin:listBadges', schoolYear) as Promise<Badge[]>,
-  badgeLeaderboard: (topN = 10) =>
-    ipcRenderer.invoke('tapin:badgeLeaderboard', topN) as Promise<BadgeLeaderboardRow[]>,
+  badgeLeaderboard: (topN = 10, section?: string, schoolYear?: string) =>
+    ipcRenderer.invoke('tapin:badgeLeaderboard', topN, section, schoolYear) as Promise<BadgeLeaderboardRow[]>,
   listExcuses: (studentId: number) =>
     ipcRenderer.invoke('tapin:listExcuses', studentId) as Promise<Excuse[]>,
   addExcuse: (studentId: number, excuseDate: string, category: ExcuseCategory, note?: string) =>

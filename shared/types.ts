@@ -18,6 +18,9 @@ export type ScanMode = 'auto' | 'in' | 'out';
 /** Attendance quality flag derived from bell times ('' when on time). */
 export type AttendanceFlag = '' | 'LATE' | 'EARLY';
 
+/** Student gender ('' when not set). */
+export type Gender = 'male' | 'female' | '';
+
 /** How the student photo renders on the kiosk scan-result card. */
 export type KioskPhotoStyle = 'avatar' | 'zoom' | 'fullbleed';
 
@@ -35,6 +38,7 @@ export interface Student {
   student_no: string;
   qr_hash_payload: string;
   full_name: string;
+  gender: Gender;
   grade_section: string;
   parent_phone: string;
   /** Learner Reference Number (DepEd LRN), optional. */
@@ -53,6 +57,8 @@ export interface Student {
 export interface StudentInput {
   student_no: string;
   full_name: string;
+  /** Optional — Male / Female ('' = not set). */
+  gender?: Gender;
   grade_section: string;
   parent_phone: string;
   /** Learner Reference Number (DepEd LRN), optional. */
@@ -234,6 +240,16 @@ export interface Settings {
   email_from: string;
   /** Report recipient(s), comma or semicolon separated. */
   email_recipient: string;
+
+  // ---- Automatic adviser reports (scheduled daily email) -----------------
+  /** When true, every day at adviser_report_time each section adviser is
+   *  emailed their section's per-student attendance report for the current
+   *  day (midnight → send time). Requires SMTP + adviser emails (Sections). */
+  adviser_report_enabled: boolean;
+  /** Local 'HH:MM' time the daily adviser report emails are sent (e.g. '20:00'). */
+  adviser_report_time: string;
+  /** Internal: last date (YYYY-MM-DD) the adviser report emails were sent. */
+  adviser_report_last_run: string;
 }
 
 export interface ProviderStatus {
@@ -748,31 +764,64 @@ export interface AnnouncementInput {
   sort_order?: number;
 }
 
-// ---- Badges & attendance recognition (weekly, positive/lenient) -------------
+// ---- Badges & attendance recognition (positive/lenient) ---------------------
 
-/** Weekly badge families. Tier 1 = the current week's window (Mon–Sun); future
- *  tiers (monthly/quarterly/yearly) extend this list. */
-export type BadgeCode = 'ATT_W' | 'PUNCT_W';
+/** Badge families (ATT attendance / PUNCT punctuality) × duration tiers:
+ *  weekly (Bronze) → monthly (Silver) → quarterly (Gold) → school year
+ *  (Platinum). Excused days never break a badge. */
+export type BadgeCode =
+  | 'ATT_W'
+  | 'ATT_M'
+  | 'ATT_Q'
+  | 'ATT_Y'
+  | 'PUNCT_W'
+  | 'PUNCT_M'
+  | 'PUNCT_Q'
+  | 'PUNCT_Y';
 
 /** Why a school day was excused — excused days never break a badge. */
 export type ExcuseCategory = 'SICK' | 'RELIGIOUS' | 'SCHOOL_ACTIVITY' | 'OTHER';
 
-/** Display metadata for badge codes (shared by kiosk, admin, mock). */
-export const BADGE_INFO: Record<BadgeCode, { label: string; icon: string }> = {
-  ATT_W: { label: 'Attendance Champion', icon: '🎖' },
-  PUNCT_W: { label: 'Punctuality Champion', icon: '⏱' },
+/** Display + scoring metadata for badge codes (shared by kiosk, admin, mock). */
+export interface BadgeInfo {
+  /** Family name, e.g. "Attendance Champion". */
+  label: string;
+  /** Family icon (🎖 attendance / ⏱ punctuality). */
+  icon: string;
+  /** 1 = weekly … 4 = school year (drives ordering + tie-breaks). */
+  tier: 1 | 2 | 3 | 4;
+  /** Score weight (1/3/6/10) — badge score = Σ points of earned badges. */
+  points: number;
+  /** Duration label, e.g. "Weekly". */
+  windowLabel: string;
+  /** Tier medal: 🥉 / 🥈 / 🥇 / 💎. */
+  tierIcon: string;
+  /** Tier name: Bronze / Silver / Gold / Platinum. */
+  metal: string;
+}
+
+export const BADGE_INFO: Record<BadgeCode, BadgeInfo> = {
+  ATT_W: { label: 'Attendance Champion', icon: '🎖', tier: 1, points: 1, windowLabel: 'Weekly', tierIcon: '🥉', metal: 'Bronze' },
+  ATT_M: { label: 'Attendance Champion', icon: '🎖', tier: 2, points: 3, windowLabel: 'Monthly', tierIcon: '🥈', metal: 'Silver' },
+  ATT_Q: { label: 'Attendance Champion', icon: '🎖', tier: 3, points: 6, windowLabel: 'Quarterly', tierIcon: '🥇', metal: 'Gold' },
+  ATT_Y: { label: 'Attendance Champion', icon: '🎖', tier: 4, points: 10, windowLabel: 'School Year', tierIcon: '💎', metal: 'Platinum' },
+  PUNCT_W: { label: 'Punctuality Champion', icon: '⏱', tier: 1, points: 1, windowLabel: 'Weekly', tierIcon: '🥉', metal: 'Bronze' },
+  PUNCT_M: { label: 'Punctuality Champion', icon: '⏱', tier: 2, points: 3, windowLabel: 'Monthly', tierIcon: '🥈', metal: 'Silver' },
+  PUNCT_Q: { label: 'Punctuality Champion', icon: '⏱', tier: 3, points: 6, windowLabel: 'Quarterly', tierIcon: '🥇', metal: 'Gold' },
+  PUNCT_Y: { label: 'Punctuality Champion', icon: '⏱', tier: 4, points: 10, windowLabel: 'School Year', tierIcon: '💎', metal: 'Platinum' },
 };
 
 export const EXCUSE_CATEGORIES: ExcuseCategory[] = ['SICK', 'RELIGIOUS', 'SCHOOL_ACTIVITY', 'OTHER'];
 
-/** A stored badge row — a student earned this badge for one week. */
+/** A stored badge row — a student earned this badge for one window. */
 export interface Badge {
   id: number;
   studentId: number;
   schoolYear: string;
   badgeCode: BadgeCode;
-  /** Monday (YYYY-MM-DD) of the week this badge covers. */
-  weekStart: string;
+  /** YYYY-MM-DD start of the covered window (Monday / 1st of month / quarter
+   *  / school year) — persisted in the student_badges.week_start column. */
+  periodStart: string;
   earnedAt: string;
 }
 
@@ -819,8 +868,12 @@ export interface BadgeLeaderboardRow {
   studentNo: string;
   /** Total earned badges this school year. */
   badgeCount: number;
-  attendanceWeeks: number;
-  punctualityWeeks: number;
+  /** Σ points of earned badges (ATT_W/PUNCT_W=1 … ATT_Y/PUNCT_Y=10). */
+  score: number;
+  /** Earned attendance-family badges (any tier). */
+  attendanceBadges: number;
+  /** Earned punctuality-family badges (any tier). */
+  punctualityBadges: number;
 }
 
 // ---- Auto-update (electron-updater → GitHub Releases) ----------------------
@@ -955,8 +1008,9 @@ export interface TapinApi {
   getStudentBadges(studentId: number): Promise<StudentBadgeSummary>;
   /** All stored badges, optionally filtered to one school year. */
   listBadges(schoolYear?: string): Promise<Badge[]>;
-  /** Top students by badge count for the current school year. */
-  badgeLeaderboard(topN?: number): Promise<BadgeLeaderboardRow[]>;
+  /** Badge ranking (highest score first), optionally narrowed to one section
+   *  or a specific school year (defaults to the current year). */
+  badgeLeaderboard(topN?: number, section?: string, schoolYear?: string): Promise<BadgeLeaderboardRow[]>;
   /** A student's recorded excused days. */
   listExcuses(studentId: number): Promise<Excuse[]>;
   /** Records an excused day (self-heals that student's badges). */

@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS students (
   student_no VARCHAR(32) NOT NULL,
   qr_hash_payload VARCHAR(64) NOT NULL,
   full_name VARCHAR(120) NOT NULL,
+  gender VARCHAR(10) NOT NULL DEFAULT '',
   grade_section VARCHAR(40) NOT NULL DEFAULT '',
   parent_phone VARCHAR(20) NOT NULL DEFAULT '',
   lrn VARCHAR(20) NOT NULL DEFAULT '',
@@ -256,6 +257,7 @@ export async function ensureSchema(query: (sql: string, params?: unknown[]) => P
   )) as { COLUMN_NAME: string }[];
   const sNames = new Set(studentCols.map((c) => c.COLUMN_NAME));
   const adds: string[] = [];
+  if (!sNames.has('gender')) adds.push("ADD COLUMN gender VARCHAR(10) NOT NULL DEFAULT '' AFTER full_name");
   if (!sNames.has('lrn')) adds.push("ADD COLUMN lrn VARCHAR(20) NOT NULL DEFAULT '' AFTER parent_phone");
   if (!sNames.has('guardian_name')) adds.push("ADD COLUMN guardian_name VARCHAR(120) NOT NULL DEFAULT '' AFTER lrn");
   if (!sNames.has('guardian_address')) adds.push("ADD COLUMN guardian_address VARCHAR(255) NOT NULL DEFAULT '' AFTER guardian_name");

@@ -1,6 +1,6 @@
 # TapIn School — Student Badge & Attendance Ranking (Plan)
 
-**Status:** Research & proposal — **rev. 2** (user decision: positive/lenient — excused days exempt) (no code changed)
+**Status:** Implemented — **rev. 3** (user decisions: positive/lenient — excused days exempt; year window = PH school year Jun 1 → Mar 31)
 **Date:** August 2026
 **Purpose:** Define a badge + ranking system that recognizes students with perfect attendance and perfect punctuality, grounded in the education-gamification research and in how TapIn actually records attendance (scans, bell-time flags, absence scheduler). Decides *what* before any code. Implements main plan item **7.8 (attendance streaks / gamification)** — see `FEATURE_IMPROVEMENT_PLAN.md`.
 
@@ -215,6 +215,8 @@ CREATE TABLE IF NOT EXISTS excuses (
 | 11 | Validation: typecheck + browser mock + code review | S | `npm run typecheck` |
 
 *Total: roughly a 3–4 day feature for one developer, following the same conventions as the rest of the app (contract → ipc → preload → renderer → mock).*
+
+> **Implementation status (rev. 4):** All four duration tiers are live — weekly `ATT_W`/`PUNCT_W` (Bronze 🥉), monthly `ATT_M`/`PUNCT_M` (Silver 🥈), quarterly `ATT_Q`/`PUNCT_Q` (Gold 🥇), and school-year `ATT_Y`/`PUNCT_Y` (Platinum 💎), with points (1/3/6/10) powering the leaderboard. The dedicated admin **Badges & Ranking** view (§7.3) shows the full ranking per section with section filter + the global school-year selector, plus a per-student badge history modal (current-week progress included). Window math lives in `shared/badge-windows.ts` (shared with the browser mock); the school-year window is derived from the year name (`2026 - 2027` → Jun 1 → Mar 31). Not yet built from the plan: configurable window guards + leaderboard toggles in Settings, the optional kiosk Attendance Stars carousel panel, and the Most Improved badge.
 
 ---
 

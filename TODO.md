@@ -1,11 +1,7 @@
-# Task: Configurable seconds-per-announcement on the Announcements page
+# TODO — Student Check-in Card: Full-bleed photo with overlay details
 
 ## Steps
-- [x] 1. `shared/types.ts`: add `announcement_slide_seconds: number` to `Settings`.
-- [x] 2. `electron/db/settings.ts`: add default + KEYS whitelist entry.
-- [x] 3. `src/lib/api.ts`: add default in `DEFAULT_MOCK_SETTINGS`.
-- [x] 4. `src/screens/admin/Announcements.tsx`: add "Display duration (seconds)" field + save.
-- [x] 5. `src/screens/KioskScreen.tsx`: use configured seconds for non-video slides.
-- [x] 6. Run `npm run typecheck` to verify.
-
-All steps complete. Typecheck passes cleanly.
+- [x] 1. Analyze task & read KioskScreen.tsx + styles.css
+- [x] 2. Restructure SuccessView so the name/details overlay the full-bleed photo
+- [x] 3. Update styles.css: photo fills card, details overlay on top, add drop shadows
+- [x] 4. Verify changes (tsc completed without errors)

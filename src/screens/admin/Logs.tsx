@@ -74,7 +74,7 @@ export function LogsPage() {
       </div>
 
       <div className="table-wrap">
-        <table className="table">
+        <table className="table logs-table">
           <thead>
             <tr>
               <th>#</th>

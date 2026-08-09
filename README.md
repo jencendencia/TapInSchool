@@ -50,6 +50,9 @@ npx vite                                  # open http://127.0.0.1:5173
 The queue worker polls `sms_logs` PENDING rows every 1 s (non-blocking), retries
 up to 5 times, then marks FAILED (retryable from the SMS Outbox).
 
+**PhilSMS walkthrough** (account sign-up → API token → sender ID → credits →
+app config → test send → troubleshooting): see [`PHILSMS_SETUP_GUIDE.md`](PHILSMS_SETUP_GUIDE.md).
+
 ---
 
 ## QR codes

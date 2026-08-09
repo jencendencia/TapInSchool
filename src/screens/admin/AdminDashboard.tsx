@@ -13,11 +13,12 @@ import { LogsPage } from './Logs';
 import { SmsOutboxPage } from './SmsOutbox';
 import { SettingsPage } from './Settings';
 import { ReportsPage } from './Reports';
+import { BadgesPage } from './Badges';
 import { AnnouncementsPage } from './Announcements';
 import { UsersPage } from './Users';
 import { Modal, SchoolLogo } from '../../components/shared';
 
-type Tab = 'overview' | 'students' | 'sections' | 'logs' | 'reports' | 'sms' | 'announcements' | 'users' | 'settings';
+type Tab = 'overview' | 'students' | 'sections' | 'logs' | 'reports' | 'badges' | 'sms' | 'announcements' | 'users' | 'settings';
 
 const NAV: { id: Tab; label: string; icon: string }[] = [
   { id: 'overview', label: 'Overview', icon: '📊' },
@@ -25,6 +26,7 @@ const NAV: { id: Tab; label: string; icon: string }[] = [
   { id: 'sections', label: 'Sections', icon: '🧑‍🏫' },
   { id: 'logs', label: 'Attendance Logs', icon: '🕐' },
   { id: 'reports', label: 'Reports', icon: '📄' },
+  { id: 'badges', label: 'Badges & Ranking', icon: '🏅' },
   { id: 'sms', label: 'SMS Outbox', icon: '✉' },
   { id: 'announcements', label: 'Announcements', icon: '📢' },
   { id: 'users', label: 'Users & Roles', icon: '🧑‍💼' },
@@ -90,6 +92,7 @@ export function AdminDashboard({ onLogout }: { onLogout: () => void }) {
           {tab === 'sections' && <SectionsPage />}
           {tab === 'logs' && <LogsPage />}
           {tab === 'reports' && <ReportsPage />}
+          {tab === 'badges' && <BadgesPage />}
 {tab === 'sms' && <SmsOutboxPage />}
           {tab === 'announcements' && <AnnouncementsPage />}
           {tab === 'users' && <UsersPage />}

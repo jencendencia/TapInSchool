@@ -396,11 +396,11 @@ setTestingEmail(true);
               value={settings.kiosk_photo_style}
               onChange={(e) => set('kiosk_photo_style', e.target.value as Settings['kiosk_photo_style'])}
             >
-              <option value="avatar">Round photo (default)</option>
-              <option value="zoom">Zoomed square photo</option>
-              <option value="fullbleed">Full-bleed banner photo</option>
+              <option value="avatar">Whole photo (default)</option>
+              <option value="zoom">Cropped to fill the panel</option>
+              <option value="fullbleed">Full-bleed fill + blend</option>
             </select>
-            <p className="field-hint">How the student photo appears on the kiosk after a scan. Students without a photo always fall back to their initials.</p>
+            <p className="field-hint">How the student photo fills the left panel of the check-in card after a scan. Students without a photo always fall back to their initials.</p>
           </div>
           <div className="field">
             <label>Debounce timeout (seconds, FR-5)</label>
@@ -584,6 +584,31 @@ setTestingEmail(true);
               {testingEmail ? 'Sending…' : '✉ Send test email'}
             </button>
           </div>
+        </div>
+
+        <div className="settings-card">
+          <h3>Automatic adviser reports</h3>
+          <label className="switch-row">
+            <span>Email advisers automatically</span>
+            <span
+              className={`switch ${settings.adviser_report_enabled ? 'on' : ''}`}
+              onClick={() => set('adviser_report_enabled', !settings.adviser_report_enabled)}
+            >
+              <span className="switch-knob" />
+            </span>
+          </label>
+          <div className="field">
+            <label>Send time</label>
+            <input type="time" value={settings.adviser_report_time} onChange={(e) => set('adviser_report_time', e.target.value)} />
+            <p className="field-hint">
+              Each adviser gets their section's per-student attendance report for the current day
+              (from midnight up to the send time). Days with no gate activity are skipped.
+            </p>
+          </div>
+          <p className="field-hint">
+            Requires a working SMTP setup above and adviser emails in the Sections tab. If the app
+            was off at the send time, the report goes out on the next start.
+          </p>
         </div>
       </div>
 

@@ -116,6 +116,10 @@ function toStudent(c: CachedStudent): Student {
     student_no: c.student_no,
     qr_hash_payload: c.qr_hash_payload,
     full_name: c.full_name,
+    // The offline snapshot is a minimal scan-validity cache — gender is not
+    // needed to process a scan, so it defaults to '' here (the full row with
+    // gender is loaded on the online path).
+    gender: '',
     grade_section: c.grade_section,
     parent_phone: c.parent_phone || '',
     lrn: '',

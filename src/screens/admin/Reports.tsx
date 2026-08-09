@@ -177,7 +177,7 @@ function RegisterView({ report }: { report: ReportData }) {
 function PerStudentView({ report }: { report: ReportData }) {
   return (
     <div className="table-wrap">
-      <table className="table">
+      <table className="table per-student-table">
         <thead>
           <tr>
             <th>Student</th><th>Section</th><th>Present</th><th>Late</th><th>Absent</th><th>Rate</th>

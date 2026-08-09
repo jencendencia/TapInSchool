@@ -9,6 +9,7 @@ import { ensureSchema } from './db/schema';
 import { ensureDefaultUsers } from './services/auth';
 import { getRecentActivity } from './services/attendance';
 import { startAbsenceService, stopAbsenceService } from './services/absence';
+import { startAdviserReportService, stopAdviserReportService } from './services/adviser-report';
 import { startBackupService, stopBackupService } from './services/backup';
 import { startBadgeService, stopBadgeService } from './services/badges';
 import { decorateDbDetail, startClockDriftCheck } from './services/clock';
@@ -305,6 +306,9 @@ async function serveLocalFile(filePath: string, mime: string): Promise<Response>
   // Automated absence detection (Phase 2, 4.2): nightly LATE/ABSENT flags +
   // optional parent SMS, with missed-day backfill.
   startAbsenceService();
+  // Automatic adviser reports: daily per-section report emails at the
+  // configured time (Settings → Email). No-ops when disabled.
+  startAdviserReportService();
   // Weekly attendance badges (7.8): periodic authoritative recompute.
   startBadgeService();
   // Offline write-behind queue: replays scans recorded during DB outages and
@@ -341,6 +345,7 @@ app.on('will-quit', () => {
   queueWorker.stop();
   stopBackupService();
   stopAbsenceService();
+  stopAdviserReportService();
   stopBadgeService();
   globalShortcut.unregisterAll();
 });

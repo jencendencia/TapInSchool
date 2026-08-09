@@ -1,16 +1,32 @@
-// Weekly attendance badges (FEATURE_IMPROVEMENT_PLAN 7.8 — BADGE_RANKING_PLAN.md rev. 2).
+// Attendance badges (FEATURE_IMPROVEMENT_PLAN 7.8 — BADGE_RANKING_PLAN.md rev. 2+).
 //
-// Positive / lenient model: a student earns an "Attendance Champion" badge
-// (ATT_W) for a calendar week (Mon–Sun) in which they were present every
-// NON-EXCUSED school day, and a "Punctuality Champion" badge (PUNCT_W) when
-// they were also never LATE/EARLY on a non-excused day. Excused days (sick,
-// religious observance, school-recognized activity) are neutral — they never
-// break a badge. A week needs ≥ MIN_WEEK_SCHOOL_DAYS non-excused school days
-// to count at all. Stored rows are authoritative-recomputed from the source
-// data, so manual log corrections and excuse edits self-heal badges.
+// Positive / lenient model: a student earns an "Attendance Champion" badge for
+// every window (week → Bronze, month → Silver, quarter → Gold, school year →
+// Platinum) in which they were present every NON-EXCUSED school day, and a
+// "Punctuality Champion" badge when they were also never LATE/EARLY on a
+// non-excused day. Excused days (sick, religious observance, school-recognized
+// activity) are neutral — they never break a badge. A window needs at least
+// BADGE_MIN_SCHOOL_DAYS non-excused school days to count at all. Stored rows
+// are authoritative-recomputed from the source data, so manual log corrections
+// and excuse edits self-heal badges.
+//
+// Window math (Mon–Sun week, calendar month, calendar quarter, school year
+// Jun 1 → Mar 31) lives in shared/badge-windows.ts and is shared with the
+// browser mock so demo mode always agrees with the real backend.
 import { db } from '../db/connection';
 import { settingsStore } from '../db/settings';
 import { computeScanFlag } from './bell-times';
+import {
+  BADGE_MIN_SCHOOL_DAYS,
+  addDays,
+  currentBadgePeriods,
+  fmtDay,
+  parseDay,
+  recomputeBadgePeriods,
+  type BadgePeriod,
+  type BadgeWindowKind,
+} from '../../shared/badge-windows';
+import { BADGE_INFO } from '../../shared/types';
 import type {
   Badge,
   BadgeCode,
@@ -22,32 +38,10 @@ import type {
   StudentBadgeSummary,
 } from '../../shared/types';
 
-/** A week only counts when it has at least this many non-excused school days. */
-export const MIN_WEEK_SCHOOL_DAYS = 3;
 const RECOMPUTE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-const pad = (n: number) => String(n).padStart(2, '0');
-export function fmtDay(d: Date): string {
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-function parseDay(raw: string | Date): Date {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(raw));
-  const d = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(raw);
-  return Number.isNaN(d.getTime()) ? new Date() : d;
-}
 function toDate(v: Date | string): Date {
   return v instanceof Date ? v : new Date(v);
-}
-function addDays(d: Date, n: number): Date {
-  const next = new Date(d);
-  next.setDate(next.getDate() + n);
-  return next;
-}
-/** Monday 00:00 (local) of the week containing `d`. */
-export function mondayOf(d: Date): Date {
-  const m = new Date(d);
-  m.setHours(0, 0, 0, 0);
-  return addDays(m, -((m.getDay() + 6) % 7));
 }
 
 interface BadgeRow {
@@ -70,12 +64,14 @@ interface ScanRow {
   scanned_at: Date | string;
 }
 
+/** The DB stores every window's start in the `week_start` column (kept for
+ *  backward compatibility); `periodStart` is its generic name in the API. */
 const toBadge = (r: BadgeRow): Badge => ({
   id: r.id,
   studentId: r.student_id,
   schoolYear: r.school_year,
   badgeCode: r.badge_code,
-  weekStart: fmtDay(parseDay(r.week_start)),
+  periodStart: fmtDay(parseDay(r.week_start)),
   earnedAt: r.earned_at,
 });
 const toExcuse = (r: ExcuseRow): Excuse => ({
@@ -127,18 +123,182 @@ async function ensureBadgeTables(): Promise<void> {
   badgeTablesEnsured = true;
 }
 
-/** Evaluates one student's CURRENT week and syncs its badge rows. Returns the
- *  summary plus `newlyEarned` when this call inserted a fresh badge (the kiosk
- *  celebrates that). Stored rows for the week are deleted when no longer
- *  earned, so badges always match the source data (authoritative recompute). */
+// ---- Window evaluation ------------------------------------------------------
+
+/** One window's outcome for a student. */
+interface PeriodResult {
+  kind: BadgeWindowKind;
+  /** YYYY-MM-DD start of the window (the stored period key). */
+  periodKey: string;
+  /** Non-excused school days (on/after the join day) in the window. */
+  requiredDays: number;
+  /** Distinct days the student scanned in the window (on/after join day). */
+  presentDays: number;
+  /** School days in the window the school has excused for the student. */
+  excusedDays: number;
+  /** True once the attendance badge can no longer be earned this window. */
+  attendanceMissed: boolean;
+  /** True when a LATE/EARLY flag exists on a non-excused day this window. */
+  punctualityMissed: boolean;
+  attendanceComplete: boolean;
+  punctualityComplete: boolean;
+}
+
+const ATT_CODE: Record<BadgeWindowKind, BadgeCode> = {
+  week: 'ATT_W',
+  month: 'ATT_M',
+  quarter: 'ATT_Q',
+  year: 'ATT_Y',
+};
+const PUNCT_CODE: Record<BadgeWindowKind, BadgeCode> = {
+  week: 'PUNCT_W',
+  month: 'PUNCT_M',
+  quarter: 'PUNCT_Q',
+  year: 'PUNCT_Y',
+};
+
+/** The badge codes a completed window earns (attendance + maybe punctuality). */
+function codesFor(res: Pick<PeriodResult, 'kind' | 'attendanceComplete' | 'punctualityComplete'>): BadgeCode[] {
+  const codes: BadgeCode[] = [];
+  if (res.attendanceComplete) codes.push(ATT_CODE[res.kind]);
+  if (res.punctualityComplete) codes.push(PUNCT_CODE[res.kind]);
+  return codes;
+}
+
+/** Evaluates many windows for one student against a single set of source
+ *  queries (school days / scans / excuses fetched once for the whole span).
+ *  School days use the gate-used heuristic shared with absence.ts + report.ts;
+ *  LATE/EARLY reuse bell-times.ts so badges can never disagree with Logs. */
+async function evaluatePeriods(
+  studentId: number,
+  periods: BadgePeriod[],
+  settings: Settings,
+  joinKey: string | null,
+): Promise<PeriodResult[]> {
+  if (!periods.length) return [];
+  // The periods are grouped by kind (weeks, then months, …), not sorted by
+  // start date — always query the TRUE earliest start / latest end so a long
+  // window (e.g. the school-year one) is never evaluated against a truncated
+  // range of school days.
+  let firstStart = periods[0].start;
+  let lastEnd = periods[0].end;
+  for (const p of periods) {
+    if (p.start.getTime() < firstStart.getTime()) firstStart = p.start;
+    if (p.end.getTime() > lastEnd.getTime()) lastEnd = p.end;
+  }
+  const firstKey = fmtDay(firstStart);
+  const lastEndKey = fmtDay(lastEnd);
+  const [schoolRows, scanRows, excRows] = await Promise.all([
+    db.query<{ d: string }[]>(
+      'SELECT DISTINCT DATE(scanned_at) d FROM attendance_logs WHERE scanned_at >= ? AND scanned_at < ?',
+      [firstKey, lastEndKey],
+    ),
+    db.query<ScanRow[]>(
+      `SELECT entry_type, scanned_at FROM attendance_logs
+       WHERE student_id = ? AND scanned_at >= ? AND scanned_at < ?`,
+      [studentId, firstKey, lastEndKey],
+    ),
+    db.query<{ excuse_date: string }[]>(
+      'SELECT excuse_date FROM excuses WHERE student_id = ? AND excuse_date >= ? AND excuse_date < ?',
+      [studentId, firstKey, lastEndKey],
+    ),
+  ]);
+  const schoolSet = new Set(schoolRows.map((r) => fmtDay(parseDay(r.d))));
+  const excSet = new Set(excRows.map((r) => fmtDay(parseDay(r.excuse_date))));
+  const presentDays = new Set<string>();
+  const punctMissedDays = new Set<string>();
+  for (const sc of scanRows) {
+    const at = toDate(sc.scanned_at);
+    const d = fmtDay(at);
+    presentDays.add(d);
+    if (!excSet.has(d) && computeScanFlag(sc.entry_type, at, settings)) punctMissedDays.add(d);
+  }
+
+  return periods.map((period) => {
+    const startKey = period.key;
+    const endKey = fmtDay(period.end);
+    const inRange = (d: string) => d >= startKey && d < endKey;
+    const afterJoin = (d: string) => !joinKey || d >= joinKey;
+    const requiredDays = [...schoolSet].filter((d) => inRange(d) && afterJoin(d) && !excSet.has(d)).length;
+    const present = [...presentDays].filter((d) => inRange(d) && afterJoin(d)).length;
+    const punctualityMissed = [...punctMissedDays].some((d) => inRange(d) && afterJoin(d));
+    const active = requiredDays >= BADGE_MIN_SCHOOL_DAYS[period.kind];
+    const attendanceComplete = active && present >= requiredDays;
+    return {
+      kind: period.kind,
+      periodKey: period.key,
+      requiredDays,
+      presentDays: present,
+      excusedDays: [...schoolSet].filter((d) => inRange(d) && excSet.has(d)).length,
+      attendanceMissed: active && !attendanceComplete,
+      punctualityMissed,
+      attendanceComplete,
+      punctualityComplete: attendanceComplete && !punctualityMissed,
+    };
+  });
+}
+
+/** Diffes `results` against the stored rows for (student, school year) and
+ *  inserts/deletes rows so badges always equal what is currently earned.
+ *  When `currentOnly` is given (kiosk path), only those period keys are
+ *  reconciled; older periods' stored rows are left untouched. Returns the
+ *  first badge this call inserted (the kiosk celebrates it). */
+async function syncBadges(
+  studentId: number,
+  year: string,
+  results: PeriodResult[],
+  currentOnly: Set<string> | null,
+): Promise<Badge | null> {
+  const earned: Array<{ code: BadgeCode; periodKey: string }> = [];
+  for (const res of results) {
+    for (const code of codesFor(res)) earned.push({ code, periodKey: res.periodKey });
+  }
+  const stored = await db.query<BadgeRow[]>(
+    'SELECT * FROM student_badges WHERE student_id = ? AND school_year = ?',
+    [studentId, year],
+  );
+  const want = new Map(earned.map((e) => [`${e.code}|${e.periodKey}`, e]));
+  const have = new Map(stored.map((r) => [`${r.badge_code}|${fmtDay(parseDay(r.week_start))}`, r]));
+  let newlyEarned: Badge | null = null;
+  for (const key of want.keys()) {
+    if (!have.has(key)) {
+      const e = want.get(key)!;
+      const res = await db.execute(
+        'INSERT INTO student_badges (student_id, school_year, badge_code, week_start) VALUES (?, ?, ?, ?)',
+        [studentId, year, e.code, e.periodKey],
+      );
+      if (!newlyEarned) {
+        newlyEarned = {
+          id: res.insertId,
+          studentId,
+          schoolYear: year,
+          badgeCode: e.code,
+          periodStart: e.periodKey,
+          earnedAt: new Date().toISOString(),
+        };
+      }
+    }
+  }
+  for (const key of have.keys()) {
+    if (!want.has(key)) {
+      const row = have.get(key)!;
+      if (!currentOnly || currentOnly.has(fmtDay(parseDay(row.week_start)))) {
+        await db.execute('DELETE FROM student_badges WHERE id = ?', [row.id]);
+      }
+    }
+  }
+  return newlyEarned;
+}
+
+/** Evaluates one student's CURRENT windows (week + month + quarter + school
+ *  year) and syncs their badge rows. Returns the summary plus `newlyEarned`
+ *  when a scan completed a window (the kiosk celebrates that). */
 export async function evaluateStudentToday(studentId: number): Promise<StudentBadgeSummary> {
   await ensureBadgeTables();
   const id = Number(studentId);
   const settings = settingsStore.get();
   const year = await currentSchoolYearName();
   const now = new Date();
-  const weekStart = mondayOf(now);
-  const weekEnd = addDays(weekStart, 7);
 
   const [stud] = await db.query<{ is_active: number }[]>('SELECT is_active FROM students WHERE id = ?', [id]);
   if (!stud || !stud.is_active) return { badges: [], currentWeek: null, newlyEarned: null };
@@ -150,43 +310,12 @@ export async function evaluateStudentToday(studentId: number): Promise<StudentBa
     [id],
   );
   const joinDay = join?.d ? parseDay(join.d) : null;
+  const joinKey = joinDay ? fmtDay(joinDay) : null;
 
-  const week = await evaluateWeek(id, weekStart, weekEnd, settings, joinDay);
-  const weekKey = fmtDay(weekStart);
-  const wanted: BadgeCode[] = [];
-  if (week.attendanceComplete) wanted.push('ATT_W');
-  if (week.punctualityComplete) wanted.push('PUNCT_W');
-
-  const stored = await db.query<BadgeRow[]>(
-    'SELECT * FROM student_badges WHERE student_id = ? AND school_year = ? AND week_start = ?',
-    [id, year, weekKey],
-  );
-  const have = new Set(stored.map((r) => r.badge_code));
-  let newlyEarned: Badge | null = null;
-  for (const code of wanted) {
-    if (!have.has(code)) {
-      const res = await db.execute(
-        'INSERT INTO student_badges (student_id, school_year, badge_code, week_start) VALUES (?, ?, ?, ?)',
-        [id, year, code, weekKey],
-      );
-      newlyEarned = {
-        id: res.insertId,
-        studentId: id,
-        schoolYear: year,
-        badgeCode: code,
-        weekStart: weekKey,
-        earnedAt: new Date().toISOString(),
-      };
-    }
-  }
-  for (const code of have) {
-    if (!wanted.includes(code)) {
-      await db.execute(
-        'DELETE FROM student_badges WHERE student_id = ? AND school_year = ? AND badge_code = ? AND week_start = ?',
-        [id, year, code, weekKey],
-      );
-    }
-  }
+  const periods = currentBadgePeriods(year, now);
+  const results = await evaluatePeriods(id, periods, settings, joinKey);
+  const currentKeys = new Set(periods.map((p) => p.key));
+  const newlyEarned = await syncBadges(id, year, results, currentKeys);
 
   const badges = (
     await db.query<BadgeRow[]>(
@@ -194,66 +323,28 @@ export async function evaluateStudentToday(studentId: number): Promise<StudentBa
       [id, year],
     )
   ).map(toBadge);
-  return { badges, currentWeek: week, newlyEarned };
-}
 
-/** Weekly progress for one student: required vs present days + flag check. */
-async function evaluateWeek(
-  studentId: number,
-  weekStart: Date,
-  weekEnd: Date,
-  settings: Settings,
-  joinDay: Date | null,
-): Promise<BadgeWeekProgress> {
-  const startKey = fmtDay(weekStart);
-  const endKey = fmtDay(weekEnd);
-  // School days (gate-used heuristic, shared with absence 4.2 + REPORTS_PLAN).
-  const schoolRows = await db.query<{ d: string }[]>(
-    'SELECT DISTINCT DATE(scanned_at) d FROM attendance_logs WHERE scanned_at >= ? AND scanned_at < ?',
-    [startKey, endKey],
-  );
-  const schoolDays = schoolRows.map((r) => fmtDay(parseDay(r.d)));
-  const excRows = await db.query<{ excuse_date: string }[]>(
-    'SELECT excuse_date FROM excuses WHERE student_id = ? AND excuse_date >= ? AND excuse_date < ?',
-    [studentId, startKey, endKey],
-  );
-  const excused = new Set(excRows.map((r) => fmtDay(parseDay(r.excuse_date))));
-  const scans = await db.query<ScanRow[]>(
-    `SELECT entry_type, scanned_at FROM attendance_logs
-     WHERE student_id = ? AND scanned_at >= ? AND scanned_at < ?`,
-    [studentId, startKey, endKey],
-  );
+  const weekRes = results.find((r) => r.kind === 'week') ?? null;
+  const currentWeek: BadgeWeekProgress | null = weekRes
+    ? {
+        weekStart: weekRes.periodKey,
+        weekEnd: fmtDay(addDays(parseDay(weekRes.periodKey), 6)),
+        requiredDays: weekRes.requiredDays,
+        presentDays: weekRes.presentDays,
+        excusedDays: weekRes.excusedDays,
+        attendanceMissed: weekRes.attendanceMissed,
+        punctualityMissed: weekRes.punctualityMissed,
+        attendanceComplete: weekRes.attendanceComplete,
+        punctualityComplete: weekRes.punctualityComplete,
+      }
+    : null;
 
-  const joinKey = joinDay ? fmtDay(joinDay) : null;
-  const required = schoolDays.filter((d) => !excused.has(d) && (!joinKey || d >= joinKey));
-  const present = new Set<string>();
-  let punctualityMissed = false;
-  for (const sc of scans) {
-    const d = fmtDay(parseDay(toDate(sc.scanned_at)));
-    if (!joinKey || d >= joinKey) present.add(d);
-    if (!excused.has(d) && computeScanFlag(sc.entry_type, toDate(sc.scanned_at), settings)) {
-      punctualityMissed = true;
-    }
-  }
-  const requiredDays = required.length;
-  const presentDays = present.size;
-  const active = requiredDays >= MIN_WEEK_SCHOOL_DAYS;
-  const attendanceComplete = active && presentDays >= requiredDays;
-  return {
-    weekStart: startKey,
-    weekEnd: fmtDay(addDays(weekEnd, -1)),
-    requiredDays,
-    presentDays,
-    excusedDays: schoolDays.filter((d) => excused.has(d)).length,
-    attendanceMissed: active && !attendanceComplete,
-    punctualityMissed,
-    attendanceComplete,
-    punctualityComplete: attendanceComplete && !punctualityMissed,
-  };
+  return { badges, currentWeek, newlyEarned };
 }
 
 /** Full authoritative resync of one student's badges for the current year —
- *  every week from their join day to today is re-derived and stored rows are
+ *  every week/month/quarter from their join day (clamped to the school year)
+ *  to today plus the school-year window is re-derived and stored rows are
  *  diffed (self-heals after log corrections / excuse edits). */
 export async function recomputeStudent(studentId: number): Promise<void> {
   const id = Number(studentId);
@@ -269,71 +360,10 @@ export async function recomputeStudent(studentId: number): Promise<void> {
     [id],
   );
   const joinDay = join?.d ? parseDay(join.d) : null;
-  const start = mondayOf(joinDay ?? new Date());
-  const end = mondayOf(new Date());
-  const endExclusive = addDays(end, 7);
-
-  const [schoolRows, scanRows, excRows] = await Promise.all([
-    db.query<{ d: string }[]>(
-      'SELECT DISTINCT DATE(scanned_at) d FROM attendance_logs WHERE scanned_at >= ? AND scanned_at < ?',
-      [fmtDay(start), fmtDay(endExclusive)],
-    ),
-    db.query<ScanRow[]>(
-      `SELECT entry_type, scanned_at FROM attendance_logs
-       WHERE student_id = ? AND scanned_at >= ? AND scanned_at < ?`,
-      [id, fmtDay(start), fmtDay(endExclusive)],
-    ),
-    db.query<{ excuse_date: string }[]>(
-      'SELECT excuse_date FROM excuses WHERE student_id = ? AND excuse_date >= ? AND excuse_date < ?',
-      [id, fmtDay(start), fmtDay(endExclusive)],
-    ),
-  ]);
-  const schoolSet = new Set(schoolRows.map((r) => fmtDay(parseDay(r.d))));
-  const excSet = new Set(excRows.map((r) => fmtDay(parseDay(r.excuse_date))));
-  const joinKey = joinDay ? fmtDay(joinDay) : '';
-
-  const presentByWeek = new Map<string, Set<string>>();
-  const punctMissedByWeek = new Set<string>();
-  for (const sc of scanRows) {
-    const d = toDate(sc.scanned_at);
-    const wk = fmtDay(mondayOf(d));
-    const day = fmtDay(d);
-    if (!presentByWeek.has(wk)) presentByWeek.set(wk, new Set());
-    presentByWeek.get(wk)!.add(day);
-    if (!excSet.has(day) && computeScanFlag(sc.entry_type, d, settings)) punctMissedByWeek.add(wk);
-  }
-
-  const earned: Array<{ code: BadgeCode; weekStart: string }> = [];
-  for (let w = start; w.getTime() <= end.getTime(); w = addDays(w, 7)) {
-    const wk = fmtDay(w);
-    const wkEnd = fmtDay(addDays(w, 7));
-    const required = [...schoolSet].filter(
-      (d) => d >= wk && d < wkEnd && !excSet.has(d) && (!joinKey || d >= joinKey),
-    ).length;
-    const present = presentByWeek.get(wk)?.size ?? 0;
-    const active = required >= MIN_WEEK_SCHOOL_DAYS;
-    const attOk = active && present >= required;
-    if (attOk) earned.push({ code: 'ATT_W', weekStart: wk });
-    if (attOk && !punctMissedByWeek.has(wk)) earned.push({ code: 'PUNCT_W', weekStart: wk });
-  }
-
-  const stored = await db.query<BadgeRow[]>(
-    'SELECT * FROM student_badges WHERE student_id = ? AND school_year = ?',
-    [id, year],
-  );
-  const want = new Map(earned.map((e) => [`${e.code}|${e.weekStart}`, e]));
-  const have = new Map(stored.map((r) => [`${r.badge_code}|${fmtDay(parseDay(r.week_start))}`, r]));
-  for (const key of want.keys()) {
-    if (!have.has(key)) {
-      await db.execute(
-        'INSERT INTO student_badges (student_id, school_year, badge_code, week_start) VALUES (?, ?, ?, ?)',
-        [id, year, want.get(key)!.code, want.get(key)!.weekStart],
-      );
-    }
-  }
-  for (const key of have.keys()) {
-    if (!want.has(key)) await db.execute('DELETE FROM student_badges WHERE id = ?', [have.get(key)!.id]);
-  }
+  const joinKey = joinDay ? fmtDay(joinDay) : null;
+  const periods = recomputeBadgePeriods(year, joinDay, new Date());
+  const results = await evaluatePeriods(id, periods, settings, joinKey);
+  await syncBadges(id, year, results, null);
 }
 
 /** Maintenance pass: resync every active student's badges. */
@@ -364,22 +394,37 @@ export async function listBadges(schoolYear?: string): Promise<Badge[]> {
   return rows.map(toBadge);
 }
 
-export async function badgeLeaderboard(topN = 10): Promise<BadgeLeaderboardRow[]> {
+/** Ranking of badge-earning students (highest score first). Sections resolve
+ *  through the selected school year's enrollments (falling back to the live
+ *  section) so past-year rankings match how that year's classes were grouped. */
+export async function badgeLeaderboard(topN = 10, section?: string, schoolYear?: string): Promise<BadgeLeaderboardRow[]> {
   await ensureBadgeTables();
-  const year = await currentSchoolYearName();
+  const year = schoolYear ?? (await currentSchoolYearName());
+  const sectionFilter = (section ?? '').trim();
+  // Points live in BADGE_INFO (shared/types.ts) — generate the SQL CASE from
+  // it so the leaderboard score can never drift from the badge catalog.
+  const scoreCase = (Object.keys(BADGE_INFO) as BadgeCode[])
+    .map((code) => `WHEN '${code}' THEN ${BADGE_INFO[code].points}`)
+    .join(' ');
   return db.query<BadgeLeaderboardRow[]>(
-    `SELECT s.id studentId, s.full_name fullName, s.grade_section gradeSection, s.student_no studentNo,
+    `SELECT s.id studentId,
+            COALESCE(e.grade_section, s.grade_section) gradeSection,
+            s.full_name fullName,
+            s.student_no studentNo,
             COUNT(b.id) badgeCount,
-            COALESCE(SUM(b.badge_code = 'ATT_W'), 0) attendanceWeeks,
-            COALESCE(SUM(b.badge_code = 'PUNCT_W'), 0) punctualityWeeks
+            COALESCE(SUM(b.badge_code LIKE 'ATT_%'), 0) attendanceBadges,
+            COALESCE(SUM(b.badge_code LIKE 'PUNCT_%'), 0) punctualityBadges,
+            COALESCE(SUM(CASE b.badge_code ${scoreCase} ELSE 0 END), 0) score
      FROM students s
+     LEFT JOIN enrollments e ON e.student_id = s.id AND e.school_year = ?
      LEFT JOIN student_badges b ON b.student_id = s.id AND b.school_year = ?
      WHERE s.is_active = 1
-     GROUP BY s.id, s.full_name, s.grade_section, s.student_no
+       AND (? = '' OR COALESCE(e.grade_section, s.grade_section) = ?)
+     GROUP BY s.id, s.full_name, s.grade_section, s.student_no, e.grade_section
      HAVING badgeCount > 0
-     ORDER BY badgeCount DESC, s.full_name ASC
+     ORDER BY score DESC, badgeCount DESC, s.full_name ASC
      LIMIT ?`,
-    [year, Math.max(1, Number(topN) || 10)],
+    [year, year, sectionFilter, sectionFilter, Math.max(1, Number(topN) || 10)],
   );
 }
 

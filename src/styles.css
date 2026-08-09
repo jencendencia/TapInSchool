@@ -241,6 +241,31 @@ button { font-family: inherit; }
 .kiosk-center { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; }
 .kiosk-side { width: 350px; display: flex; flex-direction: column; gap: 14px; min-height: 0; flex: none; }
 
+/* Check-in mode: while a successful scan shows the two-panel student check-in
+   card (photo left / details right), hide the right side panel so the card
+   occupies the whole main area — left and right panels combined, edge to edge.
+   Scoped to .result-card-fill (the success card) so error/blocked/guardian
+   cards keep their normal sizing. */
+.kiosk-main-full .kiosk-side { display: none; }
+
+/* The guardian day-report card fills the whole panel the same way: header
+   spans the full width and the report body scrolls internally when it's long
+   (the outer .result-card padding is dropped — the head/report sections carry
+   their own padding). */
+.kiosk-main-full .guardian-card {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  align-items: stretch;
+  overflow: hidden;
+}
+.kiosk-main-full .guardian-card .guardian-report {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 /* ---- Idle state ---- */
 .idle-view { display: flex; flex-direction: column; align-items: center; text-align: center; animation: centerEnter 0.5s ease; }
 .qr-pulse-wrap { position: relative; margin-bottom: 30px; }
@@ -262,7 +287,14 @@ button { font-family: inherit; }
 .cam-btn { margin-top: 24px; padding: 11px 22px; font-size: 15px; }
 
 /* ---- Result states ---- */
-.center-enter { display: flex; flex-direction: column; align-items: center; animation: centerEnter 0.35s cubic-bezier(0.2, 0.8, 0.3, 1.15); }
+.center-enter {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  /* Fill the whole left/center panel so full-panel content (announcements and
+     the student check-in card) can stretch edge to edge like the idle slide. */
+  width: 100%; flex: 1; min-height: 0;
+  position: relative; /* anchor for the in-card countdown ring */
+  animation: centerEnter 0.35s cubic-bezier(0.2, 0.8, 0.3, 1.15);
+}
 @keyframes centerEnter {
   from { opacity: 0; transform: translateY(14px) scale(0.98); }
   to { opacity: 1; transform: none; }
@@ -291,54 +323,80 @@ button { font-family: inherit; }
 .badge-in  { background: var(--emerald-soft); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.5); }
 .badge-out { background: var(--indigo-soft); color: #a5b4fc; border: 1px solid rgba(165, 180, 252, 0.5); }
 
-.result-card > .avatar { margin-bottom: 18px; }
 
-/* ---- Kiosk photo styles (Settings → Kiosk photo style) ---- */
-.photo-zoom { margin-bottom: 22px; }
-.photo-zoom-img {
-  width: 380px; height: 380px;
-  object-fit: cover;
-  border-radius: 26px;
-  border: 2px solid rgba(148, 163, 184, 0.35);
-  display: block;
-}
-/* Ring/glow follows the scan state like the card border (IN green / OUT indigo). */
-.photo-zoom-img.zoom-in {
-  border-color: rgba(52, 211, 153, 0.45);
-  box-shadow: 0 22px 60px rgba(16, 185, 129, 0.22), 0 8px 24px rgba(0, 0, 0, 0.45);
-}
-.photo-zoom-img.zoom-out {
-  border-color: rgba(165, 180, 252, 0.45);
-  box-shadow: 0 22px 60px rgba(99, 102, 241, 0.24), 0 8px 24px rgba(0, 0, 0, 0.45);
-}
 
-.result-card-bleed { padding: 0; overflow: hidden; align-items: stretch; }
-.bleed-photo { position: relative; flex: none; height: 340px; }
-.bleed-photo-img {
+/* ---- Student check-in card: two-panel layout (photo left / details right) ---- */
+.split-card {
+  flex-direction: row;
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+}
+.split-photo {
+  position: relative;
+  flex: 1.25;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+.split-photo-img {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
-  object-fit: cover;
   display: block;
+  object-fit: cover; /* fill the panel edge-to-edge */
 }
-.bleed-photo::after {
+/* 'fullbleed' style: a soft dark scrim at the seam so the photo melts into
+   the details panel. */
+.split-photo-seam::after {
   content: '';
-  position: absolute; inset: auto 0 0 0;
-  height: 130px;
-  background: linear-gradient(to top, rgba(2, 6, 23, 0.62), transparent);
+  position: absolute; inset: 0;
+  background: linear-gradient(to right, transparent 62%, rgba(15, 23, 42, 0.85) 100%);
   pointer-events: none;
 }
-.bleed-photo .badge-row {
-  position: absolute;
-  bottom: 18px; left: 0; right: 0;
-  display: flex; justify-content: center;
-  margin: 0;
-  z-index: 1;
+/* 'avatar' style: letterbox the WHOLE photo (contain) on the dark panel. */
+.split-photo-contain .split-photo-img { object-fit: contain; }
+/* No photo on file (or photos hidden): gradient tile with the initials. */
+.split-photo-noimg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(420px 300px at 30% 20%, rgba(99, 102, 241, 0.18), transparent 65%),
+    radial-gradient(380px 300px at 75% 85%, rgba(16, 185, 129, 0.14), transparent 65%),
+    linear-gradient(150deg, #131f3a, #0b1226);
 }
-.bleed-body {
-  display: flex; flex-direction: column; align-items: center;
+.split-photo-noimg .avatar { box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5); }
+
+/* Right panel: checked-in status, name, details, flags, badges, SMS notice. */
+.split-details {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
-  padding: 26px 64px 34px;
+  padding: 36px 46px;
+  overflow-y: auto; /* long badge stacks scroll inside the panel */
+  background: var(--surface);
 }
+/* Safe centering: auto margins center the stack while there's room, but turn
+   to 0 once the content overflows so the top is never clipped by scrolling. */
+.split-details > .badge-row { margin: auto 0 24px; }
+.split-details > .sms-toast { margin-bottom: auto; }
+.split-details .result-name {
+  font-size: 44px;
+  line-height: 1.08;
+  max-width: 100%;
+  overflow-wrap: anywhere; /* long names wrap inside the panel, never overflow */
+}
+.split-details .result-details { font-size: 18px; margin-top: 10px; }
+.split-details .result-time { font-size: 15px; margin-top: 8px; }
+.split-details .result-flag { margin-top: 14px; }
+.split-details .kiosk-badges { margin-top: 14px; }
+
+/* The student check-in card stretches to fill the whole main area; the
+   two-panel split above lays the photo and the details side by side. */
+.result-card-fill { width: 100%; flex: 1; min-height: 0; justify-content: center; overflow: hidden; }
 
 .result-name { font-size: 40px; font-weight: 780; letter-spacing: 0.005em; }
 .result-details { color: var(--text-dim); font-size: 17px; margin-top: 8px; }
@@ -388,7 +446,17 @@ button { font-family: inherit; }
 .result-icon { font-size: 56px; margin-bottom: 14px; }
 .result-msg { color: var(--text-dim); font-size: 17px; margin-top: 12px; max-width: 460px; }
 
-.countdown { margin-top: 26px; }
+.countdown {
+  /* In-card countdown ring: pinned to the top-right corner of the check-in /
+     guardian card (the card fills the whole panel, so the ring rides the
+     details panel's corner). Decorative — never blocks clicks below it. */
+  position: absolute;
+  top: 24px;
+  right: 26px;
+  margin: 0;
+  z-index: 2;
+  pointer-events: none;
+}
 .countdown-track { fill: none; stroke: #1e293b; stroke-width: 3; }
 .countdown-bar {
   fill: none; stroke: #64748b; stroke-width: 3;
@@ -945,9 +1013,19 @@ button { font-family: inherit; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  /* Wide tables (e.g. Students) scroll horizontally instead of clipping the
+     right-most columns — vertical clipping is kept so the rounded corners
+     stay clean. */
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 .table { width: 100%; border-collapse: collapse; font-size: 14px; }
+/* Wide tables keep a comfortable column layout and scroll horizontally inside
+   .table-wrap instead of squeezing/clipping (Students roster, attendance log,
+   per-student report). */
+.table.students-table { min-width: 1080px; }
+.table.logs-table { min-width: 900px; }
+.table.per-student-table { min-width: 1180px; }
 .table thead th {
   text-align: left;
   font-size: 11.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
@@ -1852,6 +1930,64 @@ input[type='checkbox'] {
   color: #7dd3fc;
   border: 1px solid rgba(56, 189, 248, 0.35);
 }
+/* Tier medal (🥈/🥇/💎) inside an admin badge chip — the highest tier the
+   student earned in that family. */
+.badge-metal { font-size: 11px; line-height: 1; opacity: 0.95; }
+
+/* Kiosk: the student's top earned awards (highest tier per family). */
+.kiosk-badges-earned {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-strong);
+}
+
+/* ---- Admin: Badges & Ranking view ---- */
+.rank-medal { font-size: 20px; line-height: 1; }
+.badge-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.badge-history-name { font-size: 17px; font-weight: 700; }
+.badge-history-score {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 14px;
+}
+.badge-history-score strong { font-size: 20px; color: #fcd34d; font-variant-numeric: tabular-nums; }
+.badge-history-week {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.badge-history-week h4 {
+  width: 100%;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+.badge-history-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+}
+.badge-history-badge .pill { margin-left: 2px; }
 
 /* Admin: excused days panel */
 .excuse-panel {

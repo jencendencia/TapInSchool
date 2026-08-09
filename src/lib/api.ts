@@ -14,6 +14,7 @@ import type {
   AnnouncementInput,
   AnnouncementMediaType,
   AttendanceFlag,
+  Gender,
   Badge,
   BadgeCode,
   BadgeLeaderboardRow,
@@ -65,6 +66,19 @@ ImportResult,
 } from '../../shared/types';
 import { buildReportHtml } from '../../shared/report-html';
 import { compareGrades } from './sort';
+import { BADGE_INFO } from '../../shared/types';
+import {
+  BADGE_MIN_SCHOOL_DAYS,
+  addDays,
+  addMonths,
+  currentBadgePeriods,
+  fmtDay as dayKey,
+  monthStart,
+  parseDay,
+  quarterStart,
+  type BadgePeriod,
+  type BadgeWindowKind,
+} from '../../shared/badge-windows';
 
 export const isElectron = typeof window !== 'undefined' && !!window.tapin;
 
@@ -105,6 +119,16 @@ export function mockGuardianPayload(guardianName: string, guardianAddress = ''):
     out += CHECK_ALPHABET[h % CHECK_ALPHABET.length];
   }
   return `GP-${new Date().getFullYear()}-${out}`;
+}
+
+/** Coerces a raw gender value to 'male' | 'female' | '' (mirrors the
+ *  normalizeGender helper in electron/ipc.ts — lenient about case and single
+ *  letters, e.g. 'M' / 'F' from CSV imports). */
+function normalizeGender(raw: unknown): '' | 'male' | 'female' {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (v === 'male' || v === 'm') return 'male';
+  if (v === 'female' || v === 'f') return 'female';
+  return '';
 }
 
 export function mockMaskPhone(phone: string): string {
@@ -156,22 +180,40 @@ school_name: 'TapIn School',
   smtp_allow_self_signed: false,
   email_from: '',
   email_recipient: '',
+  adviser_report_enabled: false,
+  adviser_report_time: '20:00',
+  adviser_report_last_run: '',
 };
 
 // ---------------------------------------------------------------------------
 // Mock implementation
 // ---------------------------------------------------------------------------
-// ---- Badge helpers (mirror electron/services/badges.ts week math) ---------
-const MIN_MOCK_WEEK_DAYS = 3;
-function dayKey(d: Date): string {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-function mondayOf(d: Date): Date {
-  const m = new Date(d);
-  m.setHours(0, 0, 0, 0);
-  m.setDate(m.getDate() - ((m.getDay() + 6) % 7));
-  return m;
+// Badge window math is shared with the backend (shared/badge-windows.ts) so
+// demo mode always agrees with electron/services/badges.ts.
+
+const ATT_CODE: Record<BadgeWindowKind, BadgeCode> = {
+  week: 'ATT_W',
+  month: 'ATT_M',
+  quarter: 'ATT_Q',
+  year: 'ATT_Y',
+};
+const PUNCT_CODE: Record<BadgeWindowKind, BadgeCode> = {
+  week: 'PUNCT_W',
+  month: 'PUNCT_M',
+  quarter: 'PUNCT_Q',
+  year: 'PUNCT_Y',
+};
+
+interface MockPeriodResult {
+  kind: BadgeWindowKind;
+  periodKey: string;
+  requiredDays: number;
+  presentDays: number;
+  excusedDays: number;
+  attendanceMissed: boolean;
+  punctualityMissed: boolean;
+  attendanceComplete: boolean;
+  punctualityComplete: boolean;
 }
 
 class MockApi implements TapinApi {
@@ -202,14 +244,14 @@ private sections: Section[] = [];
   private statusCbs = new Set<(s: SystemStatus) => void>();
 
   constructor() {
-    // [student_no, full_name, grade_section, parent_phone, lrn, guardian_name, guardian_address]
-    const demo: Array<[string, string, string, string, string, string, string]> = [
-      ['2024-0112', 'Juan Dela Cruz', 'Grade 7 - Section A', '09171234567', '136542110123', 'Maria Dela Cruz', '123 Mabini St., Barangay San Roque, Manila'],
-      ['2024-0113', 'Maria Santos', 'Grade 7 - Section A', '09182345678', '136542110124', 'Antonio Santos', '456 Rizal Ave., Quezon City'],
-      ['2024-0215', 'Carlos Garcia', 'Grade 8 - Section B', '09193456789', '136542110125', 'Maria Dela Cruz', '123 Mabini St., Barangay San Roque, Manila'],
-      ['2024-0318', 'Ana Reyes', 'Grade 9 - Section C', '09184567890', '136542110126', 'Luzviminda Reyes', '789 Bonifacio Rd., Pasig City'],
-      ['2024-0421', 'Miguel Torres', 'Grade 10 - Section D', '09195678901', '136542110127', '', ''],
-      ['2024-0524', 'Liza Fernandez', 'Grade 11 - STEM', '09196789012', '136542110128', '', ''],
+    // [student_no, full_name, gender, grade_section, parent_phone, lrn, guardian_name, guardian_address]
+    const demo: Array<[string, string, Gender, string, string, string, string, string]> = [
+      ['2024-0112', 'Juan Dela Cruz', 'male', 'Grade 7 - Section A', '09171234567', '136542110123', 'Maria Dela Cruz', '123 Mabini St., Barangay San Roque, Manila'],
+      ['2024-0113', 'Maria Santos', 'female', 'Grade 7 - Section A', '09182345678', '136542110124', 'Antonio Santos', '456 Rizal Ave., Quezon City'],
+      ['2024-0215', 'Carlos Garcia', 'male', 'Grade 8 - Section B', '09193456789', '136542110125', 'Maria Dela Cruz', '123 Mabini St., Barangay San Roque, Manila'],
+      ['2024-0318', 'Ana Reyes', 'female', 'Grade 9 - Section C', '09184567890', '136542110126', 'Luzviminda Reyes', '789 Bonifacio Rd., Pasig City'],
+      ['2024-0421', 'Miguel Torres', 'male', 'Grade 10 - Section D', '09195678901', '136542110127', '', ''],
+      ['2024-0524', 'Liza Fernandez', 'female', 'Grade 11 - STEM', '09196789012', '136542110128', '', ''],
     ];
     // Demo accounts: admin (dashboard) + staff (kiosk manual check-in PIN).
     this.users = [
@@ -231,11 +273,13 @@ private sections: Section[] = [];
       },
     ];
 
-    this.students = demo.map(([student_no, full_name, grade_section, parent_phone, lrn, guardian_name, guardian_address]) => ({
+    this.students = demo.map(
+      ([student_no, full_name, gender, grade_section, parent_phone, lrn, guardian_name, guardian_address]) => ({
       id: this.idSeq++,
       student_no,
       qr_hash_payload: mockPayload(student_no),
       full_name,
+      gender,
       grade_section,
       parent_phone,
       lrn,
@@ -343,8 +387,9 @@ private sections: Section[] = [];
         const inTime = new Date(day);
         inTime.setHours(6 + (i % 3), 20 + ((i * 13) % 35), (i * 7) % 60);
         this.addLog(s, 'IN', inTime, d === 0);
+        // OUT after the 16:00 dismissal so no EARLY flags pollute the demo.
         const outTime = new Date(day);
-        outTime.setHours(15 + (i % 2), 10 + ((i * 17) % 40), (i * 11) % 60);
+        outTime.setHours(16 + (i % 2), 10 + ((i * 17) % 40), (i * 11) % 60);
         this.addLog(s, 'OUT', outTime, d === 0);
       }
     }
@@ -361,6 +406,40 @@ private sections: Section[] = [];
         excuseDate: dayKey(excDay),
         category: 'SICK',
         note: 'Flu — adviser approved',
+      });
+    }
+
+    // Pre-seed badges for past periods that can NEVER collide with a CURRENT
+    // window key (this week / this month / this quarter / this school year) —
+    // otherwise mockBadgeSummary's self-heal would treat the stored row as
+    // stale and delete it (e.g. a monthly row keyed to the current quarter's
+    // start looks like a wrong quarter badge). Walk back until the key is
+    // clear, so the sample Silver/Gold badges persist across scans.
+    const seedYear = this.schoolYears[0]?.name ?? '2026 - 2027';
+    const curKeys = new Set(currentBadgePeriods(this.currentYearName(), new Date()).map((p) => p.key));
+    let seedMonthKey = dayKey(addMonths(monthStart(new Date()), -1));
+    while (curKeys.has(seedMonthKey)) seedMonthKey = dayKey(addMonths(parseDay(seedMonthKey), -1));
+    let seedQuarterKey = dayKey(quarterStart(addMonths(new Date(), -3)));
+    while (curKeys.has(seedQuarterKey)) seedQuarterKey = dayKey(addMonths(parseDay(seedQuarterKey), -3));
+    const seededBadges: Array<{ studentId: number; badgeCode: BadgeCode; periodStart: string }> = [];
+    const juan = this.students.find((s) => s.student_no === '2024-0112');
+    const maria = this.students.find((s) => s.student_no === '2024-0113');
+    if (juan) {
+      seededBadges.push(
+        { studentId: juan.id, badgeCode: 'ATT_M', periodStart: seedMonthKey },
+        { studentId: juan.id, badgeCode: 'PUNCT_M', periodStart: seedMonthKey },
+        { studentId: juan.id, badgeCode: 'ATT_Q', periodStart: seedQuarterKey },
+      );
+    }
+    if (maria) seededBadges.push({ studentId: maria.id, badgeCode: 'ATT_M', periodStart: seedMonthKey });
+    for (const sb of seededBadges) {
+      this.badges.push({
+        id: this.badgeSeq++,
+        studentId: sb.studentId,
+        schoolYear: seedYear,
+        badgeCode: sb.badgeCode,
+        periodStart: sb.periodStart,
+        earnedAt: new Date().toISOString(),
       });
     }
   }
@@ -793,6 +872,7 @@ private sections: Section[] = [];
       student_no: studentNo,
       qr_hash_payload: mockPayload(studentNo),
       full_name: input.full_name,
+      gender: normalizeGender(input.gender),
       grade_section: isCurrent ? (input.grade_section || '') : '',
       parent_phone: input.parent_phone || '',
       lrn: String(input.lrn ?? '').trim(),
@@ -828,6 +908,7 @@ private sections: Section[] = [];
       if (name) s.guardian_qr_hash_payload = mockGuardianPayload(name, address);
       else s.guardian_qr_hash_payload = null;
     }
+    if ('gender' in input) s.gender = normalizeGender(input.gender);
     // Keep the requested (or current) school year's enrollment in sync when the
     // section changes. Only the current year's enrollment mirrors onto
     // students.grade_section (the live section).
@@ -856,8 +937,22 @@ private sections: Section[] = [];
     const result: ImportResult = { added: 0, skipped: 0, errors: [] };
     const lines = csv.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     const start = lines[0]?.toLowerCase().includes('student_no') ? 1 : 0;
+    // Locate the gender column by header name when a header is present so it
+    // can live anywhere in the file (docs put it last); legacy files without
+    // a gender column fall back to ''; headerless files that append gender as
+    // an 8th column keep working positionally.
+    let genderIdx = -1;
+    if (start === 1) {
+      genderIdx = lines[0]
+        .toLowerCase()
+        .split(',')
+        .map((c) => c.trim())
+        .indexOf('gender');
+    }
     for (let i = start; i < lines.length; i++) {
-      const [studentNo, fullName, gradeSection, phone, lrn, guardianName, guardianAddress] = lines[i].split(',');
+      const parts = lines[i].split(',');
+      const [studentNo, fullName, gradeSection, phone, lrn, guardianName, guardianAddress] = parts;
+      const gender = normalizeGender(genderIdx >= 0 ? parts[genderIdx] : parts.length > 7 ? parts[7] : undefined);
       if (!studentNo || !fullName) {
         result.errors.push(`Row ${i + 1}: missing student_no or full_name`);
         result.skipped++;
@@ -870,6 +965,7 @@ private sections: Section[] = [];
       await this.createStudent({
         student_no: studentNo,
         full_name: fullName,
+        gender,
         grade_section: gradeSection ?? '',
         parent_phone: phone ?? '',
         lrn: lrn ?? '',
@@ -885,9 +981,9 @@ private sections: Section[] = [];
     if (this.students.length > 0) return { added: 0, skipped: this.students.length, errors: [] };
     return this.importStudentsCsv(
       [
-        'student_no,full_name,grade_section,parent_phone',
-        '2025-0101,Demo Student One,Grade 7 - Section A,09170000001',
-        '2025-0102,Demo Student Two,Grade 8 - Section B,09170000002',
+        'student_no,full_name,grade_section,parent_phone,gender',
+        '2025-0101,Demo Student One,Grade 7 - Section A,09170000001,Male',
+        '2025-0102,Demo Student Two,Grade 8 - Section B,09170000002,Female',
       ].join('\n'),
     );
   }
@@ -906,14 +1002,8 @@ private sections: Section[] = [];
     if (filter.entryType) rows = rows.filter((r) => r.entry_type === filter.entryType);
     if (filter.from) rows = rows.filter((r) => r.scanned_at >= filter.from!);
     if (filter.to) rows = rows.filter((r) => r.scanned_at <= filter.to!);
-    // Grouped by grade (numerically: Grade 7 before Grade 10), section, then
-    // newest first — mirrors the real listLogs ordering.
-    rows.sort(
-      (a, b) =>
-        compareGrades(a.grade_section, b.grade_section) ||
-        a.grade_section.localeCompare(b.grade_section) ||
-        (a.scanned_at < b.scanned_at ? 1 : -1),
-    );
+    // Chronological log: newest record first (the # column is the record id).
+    rows.sort((a, b) => b.id - a.id);
     const total = rows.length;
     const offset = filter.offset ?? 0;
     const limit = filter.limit ?? 50;
@@ -933,6 +1023,8 @@ private sections: Section[] = [];
       const q = filter.search.toLowerCase();
       rows = rows.filter((r) => (r.full_name ?? '').toLowerCase().includes(q) || r.parent_phone.includes(q));
     }
+    // Newest first (the # column is the record id) — mirrors real listSms.
+    rows.sort((a, b) => b.id - a.id);
     const total = rows.length;
     const offset = filter.offset ?? 0;
     const limit = filter.limit ?? 50;
@@ -1161,83 +1253,104 @@ async deleteSchoolYear(name: string): Promise<void> {
     this.announcements = this.announcements.filter((a) => a.id !== id);
   }
 
-  // ---- Badges & excused days (weekly recognition) ---------------------------
-  private mockWeekProgress(studentId: number): BadgeWeekProgress {
-    const now = new Date();
-    const weekStart = mondayOf(now);
-    const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekEnd.getDate() + 7);
-    const inWeek = (d: Date) => d.getTime() >= weekStart.getTime() && d.getTime() < weekEnd.getTime();
-    const schoolDays = new Set(
-      this.logs.filter((l) => inWeek(new Date(l.scanned_at))).map((l) => dayKey(new Date(l.scanned_at))),
-    );
+  // ---- Badges & excused days (attendance recognition) -----------------------
+  /** Mirrors electron/services/badges.ts evaluatePeriods against the mock's
+   *  in-memory logs / excuses (same window math + same rules). */
+  private mockEvalPeriods(studentId: number, periods: BadgePeriod[]): MockPeriodResult[] {
     const excused = new Set(this.excuses.filter((e) => e.studentId === studentId).map((e) => e.excuseDate));
     const mine = this.logs.filter((l) => l.student_id === studentId);
-    const joinKey = mine.map((l) => dayKey(new Date(l.scanned_at))).sort()[0];
-    const required = [...schoolDays].filter((d) => !excused.has(d) && (!joinKey || d >= joinKey));
-    const scans = mine.filter((l) => inWeek(new Date(l.scanned_at)));
-    const present = new Set<string>();
-    let punctualityMissed = false;
-    for (const l of scans) {
+    const joinKey = mine.map((l) => dayKey(new Date(l.scanned_at))).sort()[0] ?? null;
+    const schoolSet = new Set(this.logs.map((l) => dayKey(new Date(l.scanned_at))));
+    const presentDays = new Set<string>();
+    const punctMissedDays = new Set<string>();
+    for (const l of mine) {
       const d = dayKey(new Date(l.scanned_at));
-      if (!joinKey || d >= joinKey) present.add(d);
-      if (!excused.has(d) && l.flag) punctualityMissed = true;
+      presentDays.add(d);
+      if (!excused.has(d) && l.flag) punctMissedDays.add(d);
     }
-    const requiredDays = required.length;
-    const active = requiredDays >= MIN_MOCK_WEEK_DAYS;
-    const attendanceComplete = active && present.size >= requiredDays;
-    return {
-      weekStart: dayKey(weekStart),
-      weekEnd: dayKey(new Date(weekEnd.getTime() - 86400000)),
-      requiredDays,
-      presentDays: present.size,
-      excusedDays: [...schoolDays].filter((d) => excused.has(d)).length,
-      attendanceMissed: active && !attendanceComplete,
-      punctualityMissed,
-      attendanceComplete,
-      punctualityComplete: attendanceComplete && !punctualityMissed,
-    };
+    return periods.map((period) => {
+      const startKey = period.key;
+      const endKey = dayKey(period.end);
+      const inRange = (d: string) => d >= startKey && d < endKey;
+      const afterJoin = (d: string) => !joinKey || d >= joinKey;
+      const requiredDays = [...schoolSet].filter((d) => inRange(d) && afterJoin(d) && !excused.has(d)).length;
+      const present = [...presentDays].filter((d) => inRange(d) && afterJoin(d)).length;
+      const punctualityMissed = [...punctMissedDays].some((d) => inRange(d) && afterJoin(d));
+      const active = requiredDays >= BADGE_MIN_SCHOOL_DAYS[period.kind];
+      const attendanceComplete = active && present >= requiredDays;
+      return {
+        kind: period.kind,
+        periodKey: period.key,
+        requiredDays,
+        presentDays: present,
+        excusedDays: [...schoolSet].filter((d) => inRange(d) && excused.has(d)).length,
+        attendanceMissed: active && !attendanceComplete,
+        punctualityMissed,
+        attendanceComplete,
+        punctualityComplete: attendanceComplete && !punctualityMissed,
+      };
+    });
   }
 
   private mockBadgeSummary(studentId: number): StudentBadgeSummary {
     const year = this.currentYearName();
-    const week = this.mockWeekProgress(studentId);
+    const periods = currentBadgePeriods(year, new Date());
+    const results = this.mockEvalPeriods(studentId, periods);
+    const wanted: Array<{ code: BadgeCode; periodKey: string }> = [];
+    for (const res of results) {
+      if (res.attendanceComplete) wanted.push({ code: ATT_CODE[res.kind], periodKey: res.periodKey });
+      if (res.punctualityComplete) wanted.push({ code: PUNCT_CODE[res.kind], periodKey: res.periodKey });
+    }
+    const want = new Map(wanted.map((w) => [`${w.code}|${w.periodKey}`, w]));
     const existing = this.badges.filter((b) => b.studentId === studentId && b.schoolYear === year);
-    const have = new Set(existing.map((b) => `${b.badgeCode}|${b.weekStart}`));
-    const wanted: BadgeCode[] = [];
-    if (week.attendanceComplete) wanted.push('ATT_W');
-    if (week.punctualityComplete) wanted.push('PUNCT_W');
+    const have = new Set(existing.map((b) => `${b.badgeCode}|${b.periodStart}`));
     let newlyEarned: Badge | null = null;
-    for (const code of wanted) {
-      const key = `${code}|${week.weekStart}`;
+    for (const key of want.keys()) {
       if (!have.has(key)) {
+        const w = want.get(key)!;
         const b: Badge = {
           id: this.badgeSeq++,
           studentId,
           schoolYear: year,
-          badgeCode: code,
-          weekStart: week.weekStart,
+          badgeCode: w.code,
+          periodStart: w.periodKey,
           earnedAt: new Date().toISOString(),
         };
         this.badges.push(b);
         if (!newlyEarned) newlyEarned = b;
       }
     }
-    // Authoritative: drop current-week rows no longer earned.
+    // Authoritative: drop CURRENT-period rows no longer earned; past rows
+    // (including pre-seeded demo badges) are left intact.
+    const currentKeys = new Set(periods.map((p) => p.key));
     this.badges = this.badges.filter(
       (b) =>
         !(
           b.studentId === studentId &&
           b.schoolYear === year &&
-          b.weekStart === week.weekStart &&
-          !wanted.includes(b.badgeCode)
+          currentKeys.has(b.periodStart) &&
+          !want.has(`${b.badgeCode}|${b.periodStart}`)
         ),
     );
+    const weekRes = results.find((r) => r.kind === 'week') ?? null;
+    const currentWeek: BadgeWeekProgress | null = weekRes
+      ? {
+          weekStart: weekRes.periodKey,
+          weekEnd: dayKey(addDays(parseDay(weekRes.periodKey), 6)),
+          requiredDays: weekRes.requiredDays,
+          presentDays: weekRes.presentDays,
+          excusedDays: weekRes.excusedDays,
+          attendanceMissed: weekRes.attendanceMissed,
+          punctualityMissed: weekRes.punctualityMissed,
+          attendanceComplete: weekRes.attendanceComplete,
+          punctualityComplete: weekRes.punctualityComplete,
+        }
+      : null;
     return {
       badges: this.badges
         .filter((b) => b.studentId === studentId && b.schoolYear === year)
-        .sort((a, b) => b.weekStart.localeCompare(a.weekStart)),
-      currentWeek: week,
+        .sort((a, b) => b.periodStart.localeCompare(a.periodStart)),
+      currentWeek,
       newlyEarned,
     };
   }
@@ -1251,33 +1364,44 @@ async deleteSchoolYear(name: string): Promise<void> {
     return [...this.badges].filter((b) => b.schoolYear === year);
   }
 
-  async badgeLeaderboard(topN = 10): Promise<BadgeLeaderboardRow[]> {
-    const year = this.currentYearName();
-    const counts = new Map<number, { badgeCount: number; att: number; punct: number }>();
+  async badgeLeaderboard(topN = 10, section?: string, schoolYear?: string): Promise<BadgeLeaderboardRow[]> {
+    const year = schoolYear || this.currentYearName();
+    // Sections resolve through the selected school year's enrollments, falling
+    // back to the live section — mirrors electron/services/badges.ts.
+    const secOf = new Map(
+      this.enrollments.filter((e) => e.schoolYear === year && e.gradeSection).map((e) => [e.studentId, e.gradeSection]),
+    );
+    const sectionFilter = (section ?? '').trim();
+    const counts = new Map<number, { badgeCount: number; att: number; punct: number; score: number }>();
     for (const b of this.badges) {
       if (b.schoolYear !== year) continue;
-      const c = counts.get(b.studentId) ?? { badgeCount: 0, att: 0, punct: 0 };
+      const info = BADGE_INFO[b.badgeCode];
+      const c = counts.get(b.studentId) ?? { badgeCount: 0, att: 0, punct: 0, score: 0 };
       c.badgeCount++;
-      if (b.badgeCode === 'ATT_W') c.att++;
+      if (b.badgeCode.startsWith('ATT')) c.att++;
       else c.punct++;
+      c.score += info.points;
       counts.set(b.studentId, c);
     }
     return [...counts.entries()]
       .map(([studentId, c]) => {
         const s = this.students.find((x) => x.id === studentId);
         if (!s) return null;
+        const gradeSection = secOf.get(studentId) ?? s.grade_section;
+        if (sectionFilter && gradeSection !== sectionFilter) return null;
         return {
           studentId,
           fullName: s.full_name,
-          gradeSection: s.grade_section,
+          gradeSection,
           studentNo: s.student_no,
           badgeCount: c.badgeCount,
-          attendanceWeeks: c.att,
-          punctualityWeeks: c.punct,
+          score: c.score,
+          attendanceBadges: c.att,
+          punctualityBadges: c.punct,
         };
       })
       .filter((r): r is BadgeLeaderboardRow => r !== null)
-      .sort((a, b) => b.badgeCount - a.badgeCount || a.fullName.localeCompare(b.fullName))
+      .sort((a, b) => b.score - a.score || b.badgeCount - a.badgeCount || a.fullName.localeCompare(b.fullName))
       .slice(0, Math.max(1, Number(topN) || 10));
   }
 

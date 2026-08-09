@@ -6,6 +6,7 @@ import { BADGE_INFO } from '../../shared/types';
 import type {
   ActivityItem,
   Announcement,
+  BadgeCode,
   KioskPhotoStyle,
   ScanMode,
   ScanResult,
@@ -66,7 +67,12 @@ function SuccessView({
   const student = result.student!;
   const isIn = result.entryType === 'IN';
   const hasPhoto = showPhoto && !!student.photo_url;
-  const bleed = photoStyle === 'fullbleed' && hasPhoto;
+  // Two-panel check-in card: photo fills the left panel, details fill the
+  // right. The photo style setting still frames the photo inside its panel —
+  // 'avatar' letterboxes the whole photo (contain); 'zoom' crops it to fill;
+  // 'fullbleed' crops it to fill AND blends into the details panel.
+  const cover = photoStyle !== 'avatar' && hasPhoto;
+  const seam = photoStyle === 'fullbleed' && cover;
 
   const badge = (
     <div className="badge-row">
@@ -76,102 +82,131 @@ function SuccessView({
     </div>
   );
 
-  // Layout variants (Settings → Kiosk photo style): full-bleed banner at the
-  // top of the card, a large zoomed square, or the default round avatar.
-  const photo = bleed ? (
-    <div className="bleed-photo">
-      <img className="bleed-photo-img" src={student.photo_url!} alt={student.full_name} />
+  // Right panel: the check-in status, name, details, flags, badges and SMS
+  // notice, stacked and centered.
+  const details = (
+    <div className="split-details">
       {badge}
+      <h1 className="result-name">{student.full_name}</h1>
+      <p className="result-details">
+        {student.grade_section} <span className="sep">•</span> Student No. {student.student_no}
+      </p>
+      <p className="result-time">{fmtTimeSec(result.log?.scanned_at ?? new Date().toISOString())}</p>
+      {result.log?.flag === 'LATE' && (
+        <div className="result-flag flag-late">⚠ Arrived late</div>
+      )}
+      {result.log?.flag === 'EARLY' && (
+        <div className="result-flag flag-early">⏱ Early departure</div>
+      )}
+      {badges?.currentWeek && (badges.currentWeek.requiredDays > 0 || badges.currentWeek.excusedDays > 0) && (
+        <div className="kiosk-badges">
+          {badges.currentWeek.requiredDays === 0 ? (
+            <span className="kiosk-badge kiosk-badge-dim">
+              {BADGE_INFO.ATT_W.icon} No class days recorded yet this week
+            </span>
+          ) : badges.currentWeek.attendanceComplete ? (
+            <span className="kiosk-badge kiosk-badge-earned">
+              {BADGE_INFO.ATT_W.icon} {BADGE_INFO.ATT_W.label}
+            </span>
+          ) : (
+            <span className={`kiosk-badge${badges.currentWeek.attendanceMissed ? ' kiosk-badge-missed' : ''}`}>
+              {badges.currentWeek.attendanceMissed
+                ? `${BADGE_INFO.ATT_W.icon} Week missed — see you next week!`
+                : `${BADGE_INFO.ATT_W.icon} ${badges.currentWeek.presentDays}/${badges.currentWeek.requiredDays} days this week`}
+            </span>
+          )}
+          {badges.currentWeek.punctualityComplete && (
+            <span className="kiosk-badge kiosk-badge-earned">
+              {BADGE_INFO.PUNCT_W.icon} {BADGE_INFO.PUNCT_W.label}
+            </span>
+          )}
+          {badges.currentWeek.excusedDays > 0 && (
+            <span className="kiosk-badge kiosk-badge-dim">✓ {badges.currentWeek.excusedDays} excused</span>
+          )}
+        </div>
+      )}
+      {(() => {
+        // Highest earned tier per family (Attendance / Punctuality) — e.g.
+        // "🥈 Silver · Monthly" — so the card shows the student's top award.
+        const earned = badges?.badges ?? [];
+        if (!earned.length) return null;
+        const bestOf = (fam: 'ATT' | 'PUNCT'): BadgeCode | null => {
+          let acc: BadgeCode | null = null;
+          for (const b of earned) {
+            if (!b.badgeCode.startsWith(fam)) continue;
+            if (!acc || BADGE_INFO[b.badgeCode].tier > BADGE_INFO[acc].tier) acc = b.badgeCode;
+          }
+          return acc;
+        };
+        const chips = (['ATT', 'PUNCT'] as const).map(bestOf).filter((c): c is BadgeCode => !!c);
+        if (!chips.length) return null;
+        return (
+          <div className="kiosk-badges kiosk-badges-earned">
+            {chips.map((code) => {
+              const info = BADGE_INFO[code];
+              return (
+                <span
+                  key={code}
+                  className="kiosk-badge kiosk-badge-earned"
+                  title={`${info.label} — ${info.metal} (${info.windowLabel})`}
+                >
+                  {info.icon} {info.metal} · {info.windowLabel}
+                </span>
+              );
+            })}
+          </div>
+        );
+      })()}
+      {badges?.newlyEarned && (
+        <div className="new-badge-pop">
+          <span className="new-badge-icon">🏆</span>
+          <div>
+            <strong>NEW BADGE!</strong>
+            <span>
+              {BADGE_INFO[badges.newlyEarned.badgeCode].tierIcon}{' '}
+              {BADGE_INFO[badges.newlyEarned.badgeCode].label} —{' '}
+              {BADGE_INFO[badges.newlyEarned.badgeCode].windowLabel} 🎉
+            </span>
+          </div>
+        </div>
+      )}
+      {result.queuedOffline ? (
+        result.smsQueued ? (
+          <div className="sms-toast">
+            <span className="sms-toast-icon">⏳</span>
+            Saved offline — will sync & notify parent when connection returns
+          </div>
+        ) : (
+          <div className="sms-toast sms-toast-none">Saved offline — will sync when connection returns</div>
+        )
+      ) : result.smsQueued ? (
+        <div className="sms-toast">
+          <span className="sms-toast-icon">✉</span>
+          Parent SMS queued to {result.parentPhoneMasked}
+        </div>
+      ) : (
+        <div className="sms-toast sms-toast-none">No parent number on file — SMS skipped</div>
+      )}
     </div>
-  ) : photoStyle === 'zoom' && hasPhoto ? (
-    <div className="photo-zoom">
-      <img
-        className={`photo-zoom-img ${isIn ? 'zoom-in' : 'zoom-out'}`}
-        src={student.photo_url!}
-        alt={student.full_name}
-      />
+  );
+
+  // Left panel: the student photo. With a photo it fills the panel — cropped to
+  // fill in zoom/fullbleed, letterboxed whole-photo in avatar mode; without one
+  // the panel becomes a gradient tile with the student's initials.
+  const photo = hasPhoto ? (
+    <div className={`split-photo${!cover ? ' split-photo-contain' : ''}${seam ? ' split-photo-seam' : ''}`}>
+      <img className="split-photo-img" src={student.photo_url!} alt={student.full_name} />
     </div>
   ) : (
-    <Avatar
-      name={student.full_name}
-      photoUrl={student.photo_url}
-      showPhoto={showPhoto}
-      size={photoStyle === 'zoom' ? 360 : 312}
-    />
+    <div className="split-photo split-photo-noimg">
+      <Avatar name={student.full_name} showPhoto={false} size={190} />
+    </div>
   );
 
   return (
-    <div className={`result-card ${bleed ? 'result-card-bleed ' : ''}${isIn ? 'success-in' : 'success-out'}`}>
+    <div className={`result-card result-card-fill split-card ${isIn ? 'success-in' : 'success-out'}`}>
       {photo}
-      <div className={bleed ? 'bleed-body' : undefined}>
-        {!bleed && badge}
-        <h1 className="result-name">{student.full_name}</h1>
-        <p className="result-details">
-          {student.grade_section} <span className="sep">•</span> Student No. {student.student_no}
-        </p>
-        <p className="result-time">{fmtTimeSec(result.log?.scanned_at ?? new Date().toISOString())}</p>
-        {result.log?.flag === 'LATE' && (
-          <div className="result-flag flag-late">⚠ Arrived late</div>
-        )}
-        {result.log?.flag === 'EARLY' && (
-          <div className="result-flag flag-early">⏱ Early departure</div>
-        )}
-        {badges?.currentWeek && (badges.currentWeek.requiredDays > 0 || badges.currentWeek.excusedDays > 0) && (
-          <div className="kiosk-badges">
-            {badges.currentWeek.requiredDays === 0 ? (
-              <span className="kiosk-badge kiosk-badge-dim">
-                {BADGE_INFO.ATT_W.icon} No class days recorded yet this week
-              </span>
-            ) : badges.currentWeek.attendanceComplete ? (
-              <span className="kiosk-badge kiosk-badge-earned">
-                {BADGE_INFO.ATT_W.icon} {BADGE_INFO.ATT_W.label}
-              </span>
-            ) : (
-              <span className={`kiosk-badge${badges.currentWeek.attendanceMissed ? ' kiosk-badge-missed' : ''}`}>
-                {badges.currentWeek.attendanceMissed
-                  ? `${BADGE_INFO.ATT_W.icon} Week missed — see you next week!`
-                  : `${BADGE_INFO.ATT_W.icon} ${badges.currentWeek.presentDays}/${badges.currentWeek.requiredDays} days this week`}
-              </span>
-            )}
-            {badges.currentWeek.punctualityComplete && (
-              <span className="kiosk-badge kiosk-badge-earned">
-                {BADGE_INFO.PUNCT_W.icon} {BADGE_INFO.PUNCT_W.label}
-              </span>
-            )}
-            {badges.currentWeek.excusedDays > 0 && (
-              <span className="kiosk-badge kiosk-badge-dim">✓ {badges.currentWeek.excusedDays} excused</span>
-            )}
-          </div>
-        )}
-        {badges?.newlyEarned && (
-          <div className="new-badge-pop">
-            <span className="new-badge-icon">🏆</span>
-            <div>
-              <strong>NEW BADGE!</strong>
-              <span>
-                {BADGE_INFO[badges.newlyEarned.badgeCode].label} — this week 🎉
-              </span>
-            </div>
-          </div>
-        )}
-        {result.queuedOffline ? (
-          result.smsQueued ? (
-            <div className="sms-toast">
-              <span className="sms-toast-icon">⏳</span>
-              Saved offline — will sync & notify parent when connection returns
-            </div>
-          ) : (
-            <div className="sms-toast sms-toast-none">Saved offline — will sync when connection returns</div>
-          )
-        ) : result.smsQueued ? (
-          <div className="sms-toast">
-            <span className="sms-toast-icon">✉</span>
-            Parent SMS queued to {result.parentPhoneMasked}
-          </div>
-        ) : (
-          <div className="sms-toast sms-toast-none">No parent number on file — SMS skipped</div>
-        )}
-        </div>
+      {details}
     </div>
   );
 }
@@ -557,7 +592,14 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
       </header>
 
       {/* ---- Main area ---- */}
-<main className="kiosk-main">
+      {/* Check-in mode: the student check-in card and the guardian day-report
+          card take over the whole main area (left and right panels) — the side
+          panel is hidden only for successful scans, so the card spans the full
+          width. Error/blocked results keep the side panel so staff can watch
+          the live feed. */}
+<main
+        className={`kiosk-main${center.kind === 'result' && (center.result.kind === 'SUCCESS' || center.result.kind === 'GUARDIAN') ? ' kiosk-main-full' : ''}`}
+      >
         <section className="kiosk-center">
           {center.kind === 'idle' && announcements.length > 0 && (
             <div key={announceIndex} className="center-enter announcement-carousel">

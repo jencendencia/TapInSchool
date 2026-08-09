@@ -25,6 +25,7 @@ import {
   evaluateStudentToday,
   listBadges,
   listExcuses,
+  recomputeAllBadges,
   recomputeStudent,
   removeExcuse,
 } from './services/badges';
@@ -335,14 +336,15 @@ export function registerIpc(scanner: ScannerHook): void {
       : [];
     const liveSection = yearRow?.is_current ? String(input.grade_section ?? '').trim() : '';
     const res = await db.execute(
-      `INSERT INTO students (student_no, qr_hash_payload, full_name, grade_section, parent_phone,
+      `INSERT INTO students (student_no, qr_hash_payload, full_name, gender, grade_section, parent_phone,
                              lrn, guardian_name, guardian_address, guardian_qr_hash_payload,
                              photo_url, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         studentNo,
         payload,
         input.full_name,
+        normalizeGender(input.gender),
         liveSection,
         input.parent_phone || '',
         String(input.lrn ?? '').trim(),
@@ -382,6 +384,10 @@ export function registerIpc(scanner: ScannerHook): void {
     add('guardian_address', 'guardian_address', '');
     add('photo_url', 'photo_url', null);
     add('is_active', 'is_active', true);
+    if ('gender' in input) {
+      sets.push('gender = ?');
+      params.push(normalizeGender(input.gender));
+    }
     // Guardian QR lifecycle: the payload is a hash of the guardian identity
     // (name + address), so changing either field re-issues the QR; clearing the
     // name removes it. Children sharing the identity share the same QR.
@@ -707,15 +713,77 @@ export function registerIpc(scanner: ScannerHook): void {
 
   ipcMain.handle('tapin:seedDemoData', async (): Promise<ImportResult> => {
     const csv = [
-      'student_no,full_name,grade_section,parent_phone',
-      '2024-0112,Juan Dela Cruz,Grade 7 - Section A,09171234567',
-      '2024-0113,Maria Santos,Grade 7 - Section A,09182345678',
-      '2024-0215,Carlos Garcia,Grade 8 - Section B,09193456789',
-      '2024-0318,Ana Reyes,Grade 9 - Section C,09184567890',
-      '2024-0421,Miguel Torres,Grade 10 - Section D,09195678901',
-      '2024-0524,Liza Fernandez,Grade 11 - STEM,09196789012',
+      'student_no,full_name,grade_section,parent_phone,gender',
+      '2024-0112,Juan Dela Cruz,Grade 7 - Section A,09171234567,Male',
+      '2024-0113,Maria Santos,Grade 7 - Section A,09182345678,Female',
+      '2024-0215,Carlos Garcia,Grade 8 - Section B,09193456789,Male',
+      '2024-0318,Ana Reyes,Grade 9 - Section C,09184567890,Female',
+      '2024-0421,Miguel Torres,Grade 10 - Section D,09195678901,Male',
+      '2024-0524,Liza Fernandez,Grade 11 - STEM,09196789012,Female',
     ].join('\n');
-    return importCsv(csv);
+    const result = await importCsv(csv);
+    // Fresh demo import: seed ~30 days of attendance history so the badge
+    // system has real data to evaluate — weekly/monthly/quarterly badges show
+    // up right away instead of waiting for real scans. Story mirrors the
+    // browser mock: Ana missed a day that is EXCUSED (badge preserved), Miguel
+    // missed a day with no excuse (his badges are missed). Skipped when the
+    // demo students already have logs (e.g. a real roster that happens to use
+    // the same student numbers).
+    const demoNos = ['2024-0112', '2024-0113', '2024-0215', '2024-0318', '2024-0421', '2024-0524'];
+    const placeholders = demoNos.map(() => '?').join(',');
+    const rows = await db.query<{ id: number; student_no: string }[]>(
+      `SELECT id, student_no FROM students WHERE student_no IN (${placeholders})`,
+      demoNos,
+    );
+    if (rows.length) {
+      const [logCount] = await db.query<{ c: number }[]>(
+        `SELECT COUNT(*) c FROM attendance_logs a JOIN students s ON s.id = a.student_id
+         WHERE s.student_no IN (${placeholders})`,
+        demoNos,
+      );
+      if (result.added > 0 || (logCount?.c ?? 0) === 0) {
+        const pad2 = (n: number) => String(n).padStart(2, '0');
+        const iso = (dt: Date) => `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+        const values: string[] = [];
+        const params: unknown[] = [];
+        for (let d = 29; d >= 0; d--) {
+          const day = new Date();
+          day.setDate(day.getDate() - d);
+          rows.forEach((s, i) => {
+            if ((s.student_no === '2024-0318' && d === 2) || (s.student_no === '2024-0421' && d === 1)) return;
+            const inTime = new Date(day);
+            inTime.setHours(6 + (i % 3), 20 + ((i * 13) % 35), (i * 7) % 60, 0);
+            // OUT after the 16:00 dismissal so no EARLY flags pollute the demo
+            // (students 1/2/4/5 arrive after the 07:15 late cutoff → LATE,
+            // which is what keeps their punctuality badges unearned).
+            const outTime = new Date(day);
+            outTime.setHours(16 + (i % 2), 10 + ((i * 17) % 40), (i * 11) % 60, 0);
+            values.push("(?, ?, 'SCANNER', ?)", "(?, ?, 'SCANNER', ?)");
+            params.push(s.id, 'IN', inTime, s.id, 'OUT', outTime);
+          });
+        }
+        if (values.length) {
+          await db.execute(
+            `INSERT INTO attendance_logs (student_id, entry_type, source, scanned_at) VALUES ${values.join(', ')}`,
+            params,
+          );
+        }
+        const ana = rows.find((r) => r.student_no === '2024-0318');
+        if (ana) {
+          const excDay = new Date();
+          excDay.setDate(excDay.getDate() - 2);
+          await db.execute(
+            `INSERT INTO excuses (student_id, excuse_date, category, note) VALUES (?, ?, 'SICK', 'Flu — adviser approved')
+             ON DUPLICATE KEY UPDATE category = 'SICK', note = 'Flu — adviser approved'`,
+            [ana.id, iso(excDay)],
+          );
+        }
+        // Compute badges from the seeded history so the demo shows them now.
+        await recomputeAllBadges();
+        void refreshOfflineCache();
+      }
+    }
+    return result;
   });
 
   async function importCsv(csv: string): Promise<ImportResult> {
@@ -735,9 +803,18 @@ export function registerIpc(scanner: ScannerHook): void {
     };
     const header = lines[0].toLowerCase();
     const start = header.includes('student_no') ? 1 : 0;
+    // When a header row is present, locate the gender column by name so it can
+    // live anywhere in the file (docs put it last). Legacy files without a
+    // gender column fall back to ''; headerless files that append gender as an
+    // 8th column keep working positionally.
+    let genderIdx = -1;
+    if (start === 1) {
+      genderIdx = splitCsvLine(lines[0]).map((c) => c.trim().toLowerCase()).indexOf('gender');
+    }
     for (let i = start; i < lines.length; i++) {
-      const [studentNo, fullName, gradeSection, parentPhone, lrn, guardianName, guardianAddress] =
-        splitCsvLine(lines[i]);
+      const parts = splitCsvLine(lines[i]);
+      const [studentNo, fullName, gradeSection, parentPhone, lrn, guardianName, guardianAddress] = parts;
+      const gender = genderIdx >= 0 ? parts[genderIdx] : parts.length > 7 ? parts[7] : undefined;
       if (!studentNo || !fullName) {
         result.errors.push(`Row ${i + 1}: missing student_no or full_name`);
         result.skipped++;
@@ -751,13 +828,14 @@ export function registerIpc(scanner: ScannerHook): void {
         const gName = String(guardianName ?? '').trim();
         const gAddress = String(guardianAddress ?? '').trim();
         const res = await db.execute(
-          `INSERT INTO students (student_no, qr_hash_payload, full_name, grade_section, parent_phone,
+          `INSERT INTO students (student_no, qr_hash_payload, full_name, gender, grade_section, parent_phone,
                                  lrn, guardian_name, guardian_address, guardian_qr_hash_payload)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             studentNo,
             payload,
             fullName,
+            normalizeGender(gender),
             gradeSection || '',
             parentPhone || '',
             String(lrn ?? '').trim(),
@@ -780,6 +858,15 @@ export function registerIpc(scanner: ScannerHook): void {
     await syncSectionRegistry();
     void refreshOfflineCache();
     return result;
+  }
+
+  /** Coerces a raw gender value to 'male' | 'female' | '' (lenient about
+   *  case and single letters, e.g. 'M' / 'F' from CSV imports). */
+  function normalizeGender(raw: unknown): '' | 'male' | 'female' {
+    const v = String(raw ?? '').trim().toLowerCase();
+    if (v === 'male' || v === 'm') return 'male';
+    if (v === 'female' || v === 'f') return 'female';
+    return '';
   }
 
   function splitCsvLine(line: string): string[] {
@@ -835,16 +922,14 @@ export function registerIpc(scanner: ScannerHook): void {
       params,
     );
     const flagParams = flagSelectParams(settingsStore.get());
-    // Grouped by grade (numerically: Grade 7 before Grade 10), newest scans
-    // first within each grade. "Grade 7 - Section A" → second token "7".
-    const gradeOrd = `CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(s.grade_section, ' ', 2), ' ', -1) AS UNSIGNED)`;
+    // Chronological log: newest record first (the # column is the record id).
     const rows = await db.query<AttendanceLogRow[]>(
       `SELECT a.id, a.student_id, a.entry_type, a.scanned_at, a.source,
               s.full_name, s.student_no, s.grade_section,
               ${flagSelectSql()}
        FROM attendance_logs a JOIN students s ON s.id = a.student_id
        ${whereSql}
-       ORDER BY ${gradeOrd}, s.grade_section, a.scanned_at DESC LIMIT ? OFFSET ?`,
+       ORDER BY a.id DESC LIMIT ? OFFSET ?`,
       [...flagParams, ...params, limit, offset],
     );
     return { rows, total: count?.c ?? 0 };
@@ -872,14 +957,13 @@ export function registerIpc(scanner: ScannerHook): void {
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const flagParams = flagSelectParams(settingsStore.get());
-    const gradeOrd = `CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(s.grade_section, ' ', 2), ' ', -1) AS UNSIGNED)`;
     const rows = await db.query<AttendanceLogRow[]>(
       `SELECT a.id, a.student_id, a.entry_type, a.scanned_at, a.source,
               s.full_name, s.student_no, s.grade_section,
               ${flagSelectSql()}
        FROM attendance_logs a JOIN students s ON s.id = a.student_id
        ${whereSql}
-       ORDER BY ${gradeOrd}, s.grade_section, a.scanned_at DESC LIMIT 5000`,
+       ORDER BY a.id DESC LIMIT 5000`,
       [...flagParams, ...params],
     );
     const header = 'ID,Student No,Full Name,Grade Section,Type,Source,Flag,Scanned At';
@@ -921,7 +1005,7 @@ export function registerIpc(scanner: ScannerHook): void {
        LEFT JOIN attendance_logs a ON a.id = sm.attendance_id
        LEFT JOIN students s ON s.id = a.student_id
        ${whereSql}
-       ORDER BY sm.created_at DESC LIMIT ? OFFSET ?`,
+       ORDER BY sm.id DESC LIMIT ? OFFSET ?`,
       [...params, limit, offset],
     );
     return { rows, total: count?.c ?? 0 };
@@ -1068,6 +1152,9 @@ ipcMain.handle('tapin:testEmail', async (_e, to: string, settings: Settings): Pr
     // absence_last_run is owned by the absence service; never let a stale
     // renderer copy clobber it (that would re-trigger backfill + SMS).
     delete patch.absence_last_run;
+    // adviser_report_last_run is owned by the adviser-report service; a stale
+    // renderer copy must not re-trigger (or suppress) today's send.
+    delete patch.adviser_report_last_run;
     // In auto-detect mode the GSM provider owns gsm_com_port/gsm_baud (it
     // persists the detected port/baud itself) — a stale renderer copy must
     // not overwrite the live detection.
@@ -1104,9 +1191,12 @@ const next = await settingsStore.update(patch);
     return listBadges(schoolYear);
   });
 
-  ipcMain.handle('tapin:badgeLeaderboard', async (_e, topN = 10): Promise<BadgeLeaderboardRow[]> => {
-    return badgeLeaderboard(topN);
-  });
+  ipcMain.handle(
+    'tapin:badgeLeaderboard',
+    async (_e, topN = 10, section?: string, schoolYear?: string): Promise<BadgeLeaderboardRow[]> => {
+      return badgeLeaderboard(topN, section, schoolYear);
+    },
+  );
 
   ipcMain.handle('tapin:listExcuses', async (_e, studentId: number): Promise<Excuse[]> => {
     return listExcuses(Number(studentId));

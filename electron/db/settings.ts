@@ -43,6 +43,9 @@ school_name: process.env.SCHOOL_NAME || 'TapIn School',
     smtp_allow_self_signed: false,
     email_from: '',
     email_recipient: '',
+    adviser_report_enabled: false,
+    adviser_report_time: '20:00',
+    adviser_report_last_run: '',
   };
 }
 
@@ -77,6 +80,9 @@ const KEYS = [
   'smtp_allow_self_signed',
   'email_from',
   'email_recipient',
+  'adviser_report_enabled',
+  'adviser_report_time',
+  'adviser_report_last_run',
 ] as const;
 
 function parseValue(key: (typeof KEYS)[number], raw: string): unknown {
