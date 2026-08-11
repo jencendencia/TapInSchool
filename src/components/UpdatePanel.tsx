@@ -65,6 +65,7 @@ export function UpdatePanel() {
   const showCheck = status?.status !== 'available' && status?.status !== 'downloading' && status?.status !== 'downloaded';
   const showDownload = status?.status === 'available';
   const showInstall = status?.status === 'downloaded';
+  const availableData = status?.status === 'available' ? (status.data as { version?: string; releaseDate?: string; releaseNotes?: string }) : null;
 
   return (
     <div className="update-panel">
@@ -98,6 +99,12 @@ export function UpdatePanel() {
         )}
       </div>
       {statusText && <p className="field-hint">{statusText}</p>}
+      {availableData?.releaseNotes && (
+        <div className="update-notes">
+          <span className="update-notes-label">What's new</span>
+          <pre>{availableData.releaseNotes}</pre>
+        </div>
+      )}
       <p className="field-hint">
         Updates are downloaded from GitHub Releases and installed on restart. Auto-checks run in the background.
       </p>
