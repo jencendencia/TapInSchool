@@ -11,6 +11,7 @@ import type {
   BadgeLeaderboardRow,
   Excuse,
   ExcuseCategory,
+  Guardian,
   ImportResult,
   Section,
   Student,
@@ -19,11 +20,13 @@ import type {
 import { api } from '../../lib/api';
 import { sortGrades } from '../../lib/sort';
 import { Avatar, Modal, QrCodeImage, Spinner, Toast } from '../../components/shared';
+import { GuardianForm } from '../../components/GuardianForm';
 import { useSchoolYear } from './schoolYear';
 
 type ModalState =
   | { type: 'add'; nextNo: string }
   | { type: 'edit'; student: Student }
+  | { type: 'excuses'; student: Student }
   | { type: 'qr'; student: Student }
   | { type: 'import' }
   | null;
@@ -35,8 +38,7 @@ const EMPTY_FORM: StudentInput = {
   grade_section: '',
   parent_phone: '',
   lrn: '',
-  guardian_name: '',
-  guardian_address: '',
+  guardian_id: null,
   photo_url: null,
   is_active: true,
 };
@@ -87,21 +89,29 @@ function fileToResizedDataUrl(file: File, maxSize = 320, quality = 0.78): Promis
 function StudentForm({
   initial,
   sections,
+  guardians,
   onSave,
   onCancel,
+  onGuardiansChange,
   autoStudentNo,
 }: {
   initial: StudentInput;
   /** Registered sections (Sections tab) — the only sections that can be chosen. */
   sections: Section[];
+  /** Registered guardians for the searchable dropdown (Guardians tab). */
+  guardians: Guardian[];
   onSave: (input: StudentInput) => void;
   onCancel: () => void;
+  /** Called after an inline guardian registration so the parent reloads the list. */
+  onGuardiansChange?: () => void;
   /** When true, the Student No. field is auto-generated (read-only). */
   autoStudentNo?: boolean;
 }) {
   const [form, setForm] = useState<StudentInput>(initial);
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [guardianId, setGuardianId] = useState<number | null>(initial.guardian_id ?? null);
+  const [guardianFormOpen, setGuardianFormOpen] = useState(false);
   const photoRef = useRef<HTMLInputElement>(null);
   const set = (k: keyof StudentInput, v: string | boolean | null) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -137,12 +147,13 @@ function StudentForm({
       setError('Select a grade and section (or add the section in the Sections tab first).');
       return;
     }
-    onSave({ ...form, grade_section: selectedSection });
+    onSave({ ...form, grade_section: selectedSection, guardian_id: guardianId });
   };
 
   const gradeSections = sections.filter((s) => s.grade === grade);
 
   return (
+    <>
     <form
       className="form"
       onSubmit={(e) => {
@@ -219,10 +230,6 @@ function StudentForm({
         Sections are managed in the Sections tab — add a new one there if it's missing.
       </p>
       <div className="field">
-        <label>Parent Mobile (SMS)</label>
-        <input value={form.parent_phone} onChange={(e) => set('parent_phone', e.target.value)} placeholder="09171234567" />
-      </div>
-      <div className="field">
         <label>LRN (Learner Reference Number)</label>
         <input
           value={form.lrn}
@@ -232,13 +239,16 @@ function StudentForm({
         />
       </div>
       <div className="field">
-        <label>Guardian's Name</label>
-        <input value={form.guardian_name} onChange={(e) => set('guardian_name', e.target.value)} placeholder="e.g. Maria Dela Cruz" />
-        <p className="field-hint">When set, the guardian gets their own QR — scanning it at the kiosk shows the child's attendance report for today.</p>
-      </div>
-      <div className="field">
-        <label>Guardian's Address</label>
-        <input value={form.guardian_address} onChange={(e) => set('guardian_address', e.target.value)} placeholder="e.g. 123 Mabini St., Manila" />
+        <label>Guardian</label>
+        <GuardianPicker
+          guardians={guardians}
+          value={guardians.find((g) => g.id === guardianId) ?? null}
+          onChange={(g) => setGuardianId(g ? g.id : null)}
+          onRegister={() => setGuardianFormOpen(true)}
+        />
+        <p className="field-hint">
+          Guardians are registered in the Guardians tab (or right here). The guardian's mobile receives this student's SMS alerts, and their QR shows the child's attendance report at the kiosk. No guardian = no SMS alerts or guardian QR.
+        </p>
       </div>
       <div className="field">
         <label>Photo</label>
@@ -286,6 +296,125 @@ function StudentForm({
         <button type="submit" className="btn-primary">Save Student</button>
       </div>
     </form>
+
+      {guardianFormOpen && (
+        <Modal title="Register New Guardian" closeOnOverlay={false} onClose={() => setGuardianFormOpen(false)}>
+          <GuardianForm
+            onSaved={(g, outcome) => {
+              setGuardianFormOpen(false);
+              // 'created' → pick the new guardian; 'exists' → pick the existing
+              // one the admin confirmed; 'updated' → keep the current selection.
+              if (outcome !== 'updated') setGuardianId(g.id);
+              onGuardiansChange?.();
+            }}
+            onCancel={() => setGuardianFormOpen(false)}
+          />
+        </Modal>
+      )}
+    </>
+  );
+}
+
+/** Searchable guardian dropdown: type to filter the registered guardians by
+ *  name, mobile, or address; pick one, clear it, or jump straight into the
+ *  inline registration form (which runs the duplicate-name check). */
+function GuardianPicker({
+  guardians,
+  value,
+  onChange,
+  onRegister,
+}: {
+  guardians: Guardian[];
+  value: Guardian | null;
+  onChange: (g: Guardian | null) => void;
+  onRegister: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  // Close the dropdown when clicking anywhere outside it.
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = guardians.filter(
+    (g) =>
+      !q ||
+      g.full_name.toLowerCase().includes(q) ||
+      g.mobile.toLowerCase().includes(q) ||
+      g.address.toLowerCase().includes(q),
+  );
+
+  const pick = (g: Guardian) => {
+    onChange(g);
+    setQuery('');
+    setOpen(false);
+  };
+
+  return (
+    <div className="guardian-picker" ref={wrapRef}>
+      {value ? (
+        <div className="guardian-selected">
+          <div className="guardian-selected-main">
+            <span className="guardian-selected-name">{value.full_name}</span>
+            <span className="text-dim guardian-selected-meta">
+              {[value.mobile, value.address].filter(Boolean).join(' · ') || 'No contact details'}
+            </span>
+          </div>
+          <button type="button" className="btn-icon" title="Remove guardian" onClick={() => onChange(null)}>
+            ✕
+          </button>
+        </div>
+      ) : (
+        <>
+          <input
+            className="guardian-picker-input"
+            placeholder="Search guardian name, mobile, or address…"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setOpen(true);
+            }}
+            onFocus={() => setOpen(true)}
+          />
+          {open && (
+            <div className="guardian-options">
+              {filtered.map((g) => (
+                <button type="button" key={g.id} className="guardian-option" onClick={() => pick(g)}>
+                  <span className="guardian-option-name">{g.full_name}</span>
+                  <span className="text-dim guardian-option-meta">
+                    {[g.mobile, g.address].filter(Boolean).join(' · ') || 'No contact details'}
+                  </span>
+                </button>
+              ))}
+              {filtered.length === 0 && (
+                <div className="guardian-option guardian-option-empty text-dim">
+                  No guardian matches “{query}” — register one below.
+                </div>
+              )}
+              <button
+                type="button"
+                className="guardian-option guardian-option-new"
+                onClick={(e) => {
+                  e.preventDefault();
+                  setOpen(false);
+                  onRegister();
+                }}
+              >
+                ＋ Register new guardian…
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -349,7 +478,7 @@ function QrModal({ student, section, onClose }: { student: Student; section: str
           </>
         ) : (
           <p className="qr-note text-dim" style={{ padding: '18px 0' }}>
-            No guardian QR yet. Edit the student and add a Guardian\u2019s Name — the guardian QR is generated automatically.
+            No guardian QR yet. Edit the student and link a guardian from the dropdown — the guardian QR is generated automatically.
           </p>
         )}
       </div>
@@ -364,9 +493,26 @@ const EXCUSE_PILL: Record<ExcuseCategory, string> = {
   OTHER: 'pill-dim',
 };
 
+const EXCUSE_ICONS: Record<ExcuseCategory, string> = {
+  SICK: '🤒',
+  RELIGIOUS: '🕊️',
+  SCHOOL_ACTIVITY: '🏫',
+  OTHER: '📌',
+};
+
+/** Per-category accent class for the segmented reason picker. */
+const EXCUSE_SEG: Record<ExcuseCategory, string> = {
+  SICK: 'seg-sick',
+  RELIGIOUS: 'seg-religious',
+  SCHOOL_ACTIVITY: 'seg-school',
+  OTHER: 'seg-other',
+};
+
 /** Excused-days manager (weekly badges are lenient: excused days never break a
- *  badge). Shown inside the Edit modal; adding/removing self-heals badges. */
-function ExcusePanel({ studentId }: { studentId: number }) {
+ *  badge). Opens from its own row icon (📅) beside Edit; adding/removing
+ *  self-heals badges. Pass `standalone` when it is the modal's only content so
+ *  the top divider (meant for the bottom of the Edit form) is suppressed. */
+function ExcusePanel({ studentId, standalone }: { studentId: number; standalone?: boolean }) {
   const [list, setList] = useState<Excuse[] | null>(null);
   const [date, setDate] = useState('');
   const [cat, setCat] = useState<ExcuseCategory>('SICK');
@@ -377,8 +523,12 @@ function ExcusePanel({ studentId }: { studentId: number }) {
   useEffect(load, [load]);
   const add = async () => {
     if (!date) return;
+    // 'Other' requires a note explaining the reason.
+    if (cat === 'OTHER' && !note.trim()) return;
     try {
-      await api.addExcuse(studentId, date, cat, note || undefined);
+      // The note is only meaningful for the OTHER reason — never send a stale
+      // hidden note with another category.
+      await api.addExcuse(studentId, date, cat, cat === 'OTHER' ? note || undefined : undefined);
       setDate('');
       setNote('');
       load();
@@ -391,27 +541,57 @@ function ExcusePanel({ studentId }: { studentId: number }) {
     load();
   };
   return (
-    <div className="excuse-panel">
+    <div className={`excuse-panel${standalone ? ' excuse-panel-standalone' : ''}`}>
       <h4>
         Excused days <span className="text-dim">(sick, religious, school activities — never break a badge)</span>
       </h4>
-      <div className="excuse-add">
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Excuse date" />
-        <select value={cat} onChange={(e) => setCat(e.target.value as ExcuseCategory)} aria-label="Excuse category">
-          {EXCUSE_CATEGORIES.map((c) => (
-            <option key={c} value={c}>
-              {c.replace('_', ' ')}
-            </option>
-          ))}
-        </select>
-        <input
-          placeholder="Note (optional)"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          aria-label="Excuse note"
-        />
-        <button className="btn-primary" onClick={() => void add()} disabled={!date}>
-          Add excuse
+      <div className="excuse-card">
+        <div className={`excuse-fields${cat === 'OTHER' ? '' : ' excuse-fields-single'}`}>
+          <label className="excuse-field">
+            <span className="excuse-label">Date</span>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Excuse date" />
+          </label>
+          {cat === 'OTHER' && (
+            <label className="excuse-field excuse-field-note">
+              <span className="excuse-label">Note / details <span className="excuse-label-req">*</span></span>
+              <input
+                required
+                placeholder="e.g. Family emergency, appointment…"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                aria-label="Excuse note (required)"
+              />
+            </label>
+          )}
+        </div>
+        <div className="excuse-seg-wrap">
+          <span className="excuse-label">Reason</span>
+          <div className="excuse-seg" role="group" aria-label="Excuse category">
+            {EXCUSE_CATEGORIES.map((c) => (
+              <button
+                key={c}
+                type="button"
+                aria-pressed={cat === c}
+                className={`excuse-seg-btn ${EXCUSE_SEG[c]}${cat === c ? ' active' : ''}`}
+                onClick={() => {
+                  // The note only belongs to OTHER — drop it when switching away.
+                  if (c !== 'OTHER') setNote('');
+                  setCat(c);
+                }}
+              >
+                <span aria-hidden>{EXCUSE_ICONS[c]}</span>
+                {c.replace('_', ' ')}
+              </button>
+            ))}
+          </div>
+        </div>
+        <button
+          className="btn-primary excuse-add-btn"
+          onClick={() => void add()}
+          disabled={!date || (cat === 'OTHER' && !note.trim())}
+          title={cat === 'OTHER' && !note.trim() ? 'Add a note to explain this reason' : undefined}
+        >
+          ＋ Add excuse
         </button>
       </div>
       <ul className="excuse-list">
@@ -435,6 +615,7 @@ export function StudentsPage() {
   const { year, currentYear } = useSchoolYear();
   const [students, setStudents] = useState<Student[] | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
+  const [guardians, setGuardians] = useState<Guardian[]>([]);
   const [yearEnroll, setYearEnroll] = useState<Map<number, string>>(new Map());
   const [search, setSearch] = useState('');
   const [genderFilter, setGenderFilter] = useState<'' | 'male' | 'female'>('');
@@ -456,6 +637,12 @@ export function StudentsPage() {
   useEffect(() => {
     void api.listSections().then(setSections);
   }, []);
+
+  // Registered guardians feed the Add/Edit student dropdown (Guardians tab).
+  const reloadGuardians = () => {
+    void api.listGuardians().then(setGuardians);
+  };
+  useEffect(reloadGuardians, []);
 
   // Badges + leaderboard (weekly recognition) — refresh whenever the roster
   // changes so new/deleted students stay in sync.
@@ -722,6 +909,7 @@ const notify = (msg: string) => {
                     <div className="row-actions">
                       <button className="btn-icon" title="QR code" onClick={() => setModal({ type: 'qr', student: s })}>▦</button>
                       <button className="btn-icon" title="Edit" onClick={() => setModal({ type: 'edit', student: s })}>✎</button>
+                      <button className="btn-icon" title="Excused days (badge exemptions)" onClick={() => setModal({ type: 'excuses', student: s })}>📅</button>
                       <button className="btn-icon danger" title="Delete" onClick={() => void removeStudent(s)}>🗑</button>
                     </div>
                   </td>
@@ -746,8 +934,10 @@ const notify = (msg: string) => {
           <StudentForm
             initial={{ ...EMPTY_FORM, student_no: modal.nextNo }}
             sections={sections}
+            guardians={guardians}
             onSave={(i) => void saveStudent(i)}
             onCancel={() => setModal(null)}
+            onGuardiansChange={reloadGuardians}
             autoStudentNo
           />
         </Modal>
@@ -762,23 +952,28 @@ const notify = (msg: string) => {
               grade_section: sectionOf(modal.student),
               parent_phone: modal.student.parent_phone,
               lrn: modal.student.lrn,
-              guardian_name: modal.student.guardian_name,
-              guardian_address: modal.student.guardian_address,
+              guardian_id: modal.student.guardian_id,
               photo_url: modal.student.photo_url,
               is_active: modal.student.is_active,
             }}
             sections={sections}
+            guardians={guardians}
             onSave={(i) => void saveStudent(i)}
             onCancel={() => setModal(null)}
+            onGuardiansChange={reloadGuardians}
           />
-          <ExcusePanel studentId={modal.student.id} />
+        </Modal>
+      )}
+      {modal?.type === 'excuses' && (
+        <Modal title={`Excused days — ${modal.student.full_name}`} onClose={() => setModal(null)}>
+          <ExcusePanel studentId={modal.student.id} standalone />
         </Modal>
       )}
       {modal?.type === 'qr' && <QrModal student={modal.student} section={sectionOf(modal.student) || '—'} onClose={() => setModal(null)} />}
       {modal?.type === 'import' && (
         <Modal title="Import Students from CSV" closeOnOverlay={false} onClose={() => setModal(null)}>
           <p className="text-dim">
-            Columns: <code>student_no,full_name,grade_section,parent_phone,lrn,guardian_name,guardian_address,gender</code> (header row optional; everything after <code>student_no,full_name</code> is optional). Gender accepts Male/Female (or M/F). QR payloads are generated automatically — a guardian QR is issued when a guardian name is present. Imported students are enrolled in the current school year.
+            Columns: <code>student_no,full_name,grade_section,parent_phone,lrn,guardian_name,guardian_address,gender</code> (header row optional; everything after <code>student_no,full_name</code> is optional). Gender accepts Male/Female (or M/F). QR payloads are generated automatically — rows that name a guardian auto-register them in the Guardians registry (matched by name + address) and link the student. Imported students are enrolled in the current school year.
           </p>
           <div className="form">
             <div className="field">

@@ -15,14 +15,20 @@ import { buildSmsMessage, resolveTemplate } from '../sms/message-builder';
 import { forcedEntryType, getScanMode } from './scan-mode';
 import {
   enqueueScanEvent,
+  enqueueVisitorScanEvent,
   getCachedStudentByGuardianPayload,
   getCachedStudentByPayload,
+  getCachedVisitorByPayload,
   getLastScanToday,
+  getVisitorLastScanToday,
   recordScan,
+  recordVisitorScan,
   toLocalMysqlTime,
   upsertCachedStudent,
+  upsertCachedVisitor,
   type CachedStudent,
 } from './offline';
+import { processVisitorScan } from './visitors';
 import type {
   ActivityItem,
   AttendanceLog,
@@ -32,6 +38,7 @@ import type {
   ScanResult,
   ScanSource,
   Student,
+  Visitor,
 } from '../../shared/types';
 
 export interface ScanEventBus {
@@ -126,6 +133,9 @@ function toStudent(c: CachedStudent): Student {
     guardian_name: '',
     guardian_address: '',
     guardian_qr_hash_payload: c.guardian_qr_hash_payload || null,
+    // The snapshot is a minimal scan-validity cache — the guardian link is not
+    // needed to process a scan, so it defaults to null here.
+    guardian_id: null,
     photo_url: c.photo_url,
     is_active: c.is_active,
     created_at: '',
@@ -154,6 +164,40 @@ async function processScanOnline(
       [trimmed],
     );
     if (guardians.length) return handleGuardianScan(guardians, bus);
+
+    // Visitor QR (VP-…)? Check the visitors table.
+    if (trimmed.startsWith('VP-')) {
+      const visitors = await db.query<Visitor[]>(
+        'SELECT * FROM visitors WHERE qr_hash_payload = ? LIMIT 1',
+        [trimmed],
+      );
+      const visitor = visitors[0];
+      if (!visitor) {
+        const result: ScanResult = {
+          kind: 'UNRECOGNIZED',
+          message: 'Unrecognized visitor QR code. Please register at the gate.',
+        };
+        bus.onScanResult(result);
+        return result;
+      }
+      if (!visitor.is_active) {
+        const result: ScanResult = {
+          kind: 'BLOCKED',
+          message: 'Visitor access restricted. Please contact the admin office.',
+          visitor,
+        };
+        bus.onScanResult(result);
+        return result;
+      }
+      const { result } = await processVisitorScan(visitor, source, forcedType);
+      // Keep the offline snapshot fresh in case the DB drops right after this
+      // scan (mirrors the student flow below).
+      upsertCachedVisitor(visitor);
+      if (result.entryType) recordVisitorScan(visitor.id, result.entryType, Date.now());
+      bus.onScanResult(result);
+      return result;
+    }
+
     const result: ScanResult = {
       kind: 'UNRECOGNIZED',
       message: 'Unrecognized QR code. Please report to the admin office.',
@@ -329,6 +373,75 @@ async function processScanOffline(
   forcedType?: EntryType,
 ): Promise<ScanResult> {
   const settings = settingsStore.get();
+  // Visitor QR (VP-…) offline? Check the cached visitors.
+  if (trimmed.startsWith('VP-')) {
+    const cachedVisitor = getCachedVisitorByPayload(trimmed);
+    if (!cachedVisitor) {
+      const result: ScanResult = {
+        kind: 'OFFLINE',
+        message: 'Database offline and visitor data not loaded yet. Please try again in a moment.',
+      };
+      bus.onScanResult(result);
+      return result;
+    }
+    if (!cachedVisitor.is_active) {
+      const result: ScanResult = {
+        kind: 'BLOCKED',
+        message: 'Visitor access restricted. Please contact the admin office.',
+        visitor: cachedVisitor,
+      };
+      bus.onScanResult(result);
+      return result;
+    }
+    const lastToday = getVisitorLastScanToday(cachedVisitor.id);
+    const now = Date.now();
+    if (lastToday) {
+      const elapsedMs = now - lastToday.time;
+      if (elapsedMs < settings.debounce_seconds * 1000) {
+        const wait = Math.max(1, Math.ceil((settings.debounce_seconds * 1000 - elapsedMs) / 1000));
+        const result: ScanResult = {
+          kind: 'DUPLICATE',
+          message: `QR already scanned — please wait ${wait}s.`,
+          visitor: cachedVisitor,
+        };
+        bus.onScanResult(result);
+        return result;
+      }
+    }
+    const entryType: EntryType = forcedType ?? (lastToday?.type === 'IN' ? 'OUT' : 'IN');
+    try {
+      await enqueueVisitorScanEvent({
+        studentId: 0,
+        visitorId: cachedVisitor.id,
+        parentPhone: null,
+        entryType,
+        scannedAt: toLocalMysqlTime(new Date(now)),
+        source,
+        smsQueued: false,
+        flag: '',
+      });
+    } catch (err) {
+      const result: ScanResult = {
+        kind: 'ERROR',
+        message: 'Visitor scan could not be saved. Please notify the admin.',
+        visitor: cachedVisitor,
+      };
+      bus.onScanResult(result);
+      return result;
+    }
+    recordVisitorScan(cachedVisitor.id, entryType, now);
+    const result: ScanResult = {
+      kind: 'VISITOR',
+      message: entryType === 'IN' ? 'Visitor checked IN (offline)' : 'Visitor checked OUT (offline)',
+      visitor: cachedVisitor,
+      entryType,
+      log: { id: 0, student_id: 0, entry_type: entryType, scanned_at: toLocalMysqlTime(new Date(now)), source, flag: '' },
+      queuedOffline: true,
+    };
+    bus.onScanResult(result);
+    return result;
+  }
+
   const student = getCachedStudentByPayload(trimmed);
 
   if (!student) {

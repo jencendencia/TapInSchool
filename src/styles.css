@@ -59,7 +59,7 @@ button { font-family: inherit; }
 /* ===========================================================================
    Buttons
    =========================================================================== */
-.btn-primary, .btn-ghost, .btn-icon {
+.btn-primary, .btn-ghost, .btn-icon, .btn-danger {
   border: none;
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -76,6 +76,17 @@ button { font-family: inherit; }
 .btn-primary:hover { filter: brightness(1.08); transform: translateY(-1px); }
 .btn-primary:active { transform: translateY(0); }
 .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+.btn-danger {
+  background: linear-gradient(180deg, #f43f5e, #e11d48);
+  color: #fff;
+  padding: 9px 18px;
+  font-size: 14px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.15) inset, 0 4px 14px rgba(244, 63, 94, 0.25);
+}
+.btn-danger:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.btn-danger:active { transform: translateY(0); }
+.btn-danger:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
 
 .btn-ghost {
   background: transparent;
@@ -96,6 +107,8 @@ button { font-family: inherit; }
   display: inline-flex; align-items: center; justify-content: center;
 }
 .btn-icon:hover { background: var(--surface-2); color: var(--text); }
+.btn-icon:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-icon:disabled:hover { background: transparent; color: var(--text-dim); }
 .btn-icon.danger:hover { background: var(--rose-soft); color: var(--rose); }
 
 /* ===========================================================================
@@ -872,6 +885,30 @@ button { font-family: inherit; }
 .stat-label { font-size: 12.5px; font-weight: 600; letter-spacing: 0.03em; }
 .stat-value { font-size: 32px; font-weight: 780; font-variant-numeric: tabular-nums; margin: 6px 0 2px; }
 .stat-sub { font-size: 12px; }
+/* Summary stat cards are buttons when they open a drilldown — keep the card
+   look, add the affordance. */
+.stat-card-clickable {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  position: relative;
+}
+.stat-card-clickable:hover { border-color: var(--accent, #6366f1); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); }
+.stat-card-clickable:active { transform: translateY(0); }
+.stat-card-clickable:focus-visible { outline: 2px solid var(--accent, #6366f1); outline-offset: 2px; }
+.stat-view {
+  margin-top: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent, #a5b4fc);
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.stat-card:hover .stat-view,
+.stat-card:focus-visible .stat-view { opacity: 1; transform: translateY(0); }
 
 /* ---- Charts ---- */
 .chart-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-bottom: 14px; }
@@ -1995,10 +2032,84 @@ input[type='checkbox'] {
   padding-top: 16px;
   border-top: 1px solid var(--border-strong);
 }
-.excuse-panel h4 { margin: 0 0 10px; font-size: 14px; }
-.excuse-add { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-.excuse-add input, .excuse-add select { flex: 1 1 130px; }
-.excuse-add input[type='date'] { max-width: 150px; flex: 0 1 150px; }
+/* Standalone in its own modal (no divider needed above it). */
+.excuse-panel-standalone { margin-top: 0; padding-top: 0; border-top: none; }
+.excuse-panel h4 { margin: 0 0 12px; font-size: 14px; }
+.excuse-card {
+  background: linear-gradient(180deg, var(--surface-2), rgba(15, 23, 42, 0.4));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.excuse-fields {
+  display: grid;
+  grid-template-columns: minmax(150px, 200px) 1fr;
+  gap: 10px;
+}
+@media (max-width: 640px) { .excuse-fields { grid-template-columns: 1fr; } }
+/* Only the Date field is shown until “Other” is picked — let it take the row. */
+.excuse-fields-single { grid-template-columns: minmax(200px, 1fr); }
+.excuse-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.excuse-field-note { animation: excuseNoteIn 0.18s ease; }
+@keyframes excuseNoteIn {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+.excuse-label {
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.excuse-label-req { color: var(--rose); }
+.excuse-card input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 10px 13px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.excuse-card input:focus {
+  border-color: var(--emerald);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+}
+.excuse-card input::placeholder { color: var(--text-faint); }
+.excuse-card input[type='date'] { color-scheme: dark; }
+.excuse-seg-wrap { display: flex; flex-direction: column; gap: 7px; }
+.excuse-seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.excuse-seg-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+.excuse-seg-btn:hover { color: var(--text); border-color: #475569; background: var(--surface-2); transform: translateY(-1px); }
+.excuse-seg-btn.active, .excuse-seg-btn.active:hover { transform: none; }
+.excuse-seg-btn.seg-sick.active { background: var(--amber-soft); border-color: var(--amber); color: #fcd34d; }
+.excuse-seg-btn.seg-religious.active { background: var(--indigo-soft); border-color: var(--indigo); color: #a5b4fc; }
+.excuse-seg-btn.seg-school.active { background: var(--emerald-soft); border-color: var(--emerald); color: #6ee7b7; }
+.excuse-seg-btn.seg-other.active { background: rgba(148, 163, 184, 0.14); border-color: #64748b; color: var(--text); }
+.excuse-add-btn { width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .excuse-list {
   list-style: none;
   margin: 0;
@@ -2024,4 +2135,169 @@ input[type='checkbox'] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- Visitors (walk-in gate passes) ---- */
+.visitor-card { gap: 4px; padding-top: 32px; }
+.visitor-badge-row { margin-top: 4px; }
+.visitor-avatar {
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 16px 0 8px;
+  background: linear-gradient(140deg, rgba(52, 211, 153, 0.16), rgba(99, 102, 241, 0.18));
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+.visitor-avatar .avatar-initials { font-size: 42px; }
+.visitor-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 17px;
+  margin-top: 8px;
+}
+.visitor-line-icon { font-size: 15px; opacity: 0.9; }
+
+/* Admin: Visitors page sub-tabs (Registry / Visit Logs) */
+.subnav {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-strong);
+  margin-bottom: 16px;
+}
+.subnav-btn {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 9px 14px;
+  font: inherit;
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 8px 8px 0 0;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.subnav-btn:hover { color: var(--text); background: var(--surface-2); }
+.subnav-btn.active {
+  color: var(--emerald);
+  border-bottom-color: var(--emerald);
+}
+
+/* Status lock/unlock toggle in the visitor registry */
+.toggle-btn { margin-left: 6px; font-size: 13px; vertical-align: middle; }
+
+/* ---- Kiosk: quick visitor registration (staff PIN) ---- */
+.manual-form { display: flex; flex-direction: column; gap: 12px; }
+.manual-form .field input { width: 100%; }
+.manual-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+.manual-done {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+.manual-done .qr-modal { margin-top: 4px; }
+
+/* ---- Guardian picker (Add/Edit Student) + guardian registry ---- */
+.guardian-picker { position: relative; }
+.guardian-picker-input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 9px 13px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.guardian-picker-input:focus {
+  border-color: var(--emerald);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+}
+.guardian-options {
+  position: absolute; z-index: 60;
+  top: calc(100% + 6px); left: 0; right: 0;
+  max-height: 260px; overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  padding: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+  animation: centerEnter 0.14s ease;
+}
+.guardian-option {
+  display: flex; flex-direction: column; gap: 2px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  color: var(--text);
+  padding: 9px 11px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.guardian-option:hover { background: var(--surface-2); }
+.guardian-option-name { font-weight: 600; }
+.guardian-option-meta { font-size: 12px; }
+.guardian-option-empty { cursor: default; padding: 12px 11px; font-size: 13px; }
+.guardian-option-empty:hover { background: transparent; }
+.guardian-option-new {
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 7px 7px;
+  color: #34d399;
+  font-weight: 600;
+  margin-top: 2px;
+  padding-top: 11px;
+}
+.guardian-selected {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--emerald);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
+  padding: 9px 12px;
+}
+.guardian-selected-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.guardian-selected-name { font-weight: 650; }
+.guardian-selected-meta { font-size: 12px; }
+
+/* Duplicate-name confirmation panel (GuardianForm) */
+.guardian-dup {
+  display: flex; flex-direction: column; gap: 12px;
+  text-align: center;
+  padding: 8px 4px;
+}
+.guardian-dup-icon { font-size: 34px; }
+.guardian-dup-title { font-size: 17px; }
+.guardian-dup-details {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-size: 13.5px;
+  text-align: left;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.guardian-dup-details span { margin-right: 6px; }
+.guardian-dup-question { font-size: 14px; }
+.guardian-dup-actions {
+  display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;
 }

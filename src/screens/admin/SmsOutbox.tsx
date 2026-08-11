@@ -10,6 +10,9 @@ export function SmsOutboxPage() {
   const [rows, setRows] = useState<SmsLogRow[] | null>(null);
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState<SmsStatus | ''>('');
+  // Optional created-date range (YYYY-MM-DD).
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const [offset, setOffset] = useState(0);
   const [expanded, setExpanded] = useState<SmsLogRow | null>(null);
   const [testOpen, setTestOpen] = useState(false);
@@ -18,11 +21,13 @@ export function SmsOutboxPage() {
   const [toast, setToast] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    void api.listSms({ status: status || undefined, limit: PAGE_SIZE, offset }).then((res) => {
-      setRows(res.rows);
-      setTotal(res.total);
-    });
-  }, [status, offset]);
+    void api
+      .listSms({ status: status || undefined, from: from || undefined, to: to || undefined, limit: PAGE_SIZE, offset })
+      .then((res) => {
+        setRows(res.rows);
+        setTotal(res.total);
+      });
+  }, [status, from, to, offset]);
 
   useEffect(load, [load]);
 
@@ -64,6 +69,14 @@ export function SmsOutboxPage() {
           <option value="SENT">SENT</option>
           <option value="FAILED">FAILED</option>
         </select>
+        <label className="report-range-label text-dim">
+          From
+          <input type="date" value={from} max={to || undefined} onChange={(e) => { setFrom(e.target.value); setOffset(0); }} title="Only show messages created on/after this date" />
+        </label>
+        <label className="report-range-label text-dim">
+          To
+          <input type="date" value={to} min={from || undefined} onChange={(e) => { setTo(e.target.value); setOffset(0); }} title="Only show messages created on/before this date" />
+        </label>
       </div>
 
       <div className="table-wrap">

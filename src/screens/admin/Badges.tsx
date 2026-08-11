@@ -52,6 +52,7 @@ function BadgeHistoryModal({
   badges,
   currentWeek,
   currentYear,
+  hasRange,
   onClose,
 }: {
   row: BadgeLeaderboardRow;
@@ -59,6 +60,8 @@ function BadgeHistoryModal({
   /** Weekly progress — only fetched when viewing the CURRENT school year. */
   currentWeek: BadgeWeekProgress | null;
   currentYear: boolean;
+  /** Whether an earned-date filter is active (affects the empty state text). */
+  hasRange: boolean;
   onClose: () => void;
 }) {
   const att = badges.filter((b) => b.badgeCode.startsWith('ATT'));
@@ -145,7 +148,7 @@ function BadgeHistoryModal({
         </div>
       ) : (
         <p className="text-dim" style={{ padding: '14px 0' }}>
-          No badges earned in this school year yet.
+          No badges match the current school year{hasRange ? ' and date range' : ''}.
         </p>
       )}
     </Modal>
@@ -156,6 +159,9 @@ export function BadgesPage() {
   const { year, currentYear } = useSchoolYear();
   const [section, setSection] = useState('');
   const [search, setSearch] = useState('');
+  // Optional earned-date range (YYYY-MM-DD) — narrows the ranking + history.
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const [rows, setRows] = useState<BadgeLeaderboardRow[] | null>(null);
   const [badgesByStudent, setBadgesByStudent] = useState<Map<number, Badge[]>>(new Map());
   const [students, setStudents] = useState<Student[]>([]);
@@ -179,18 +185,20 @@ export function BadgesPage() {
   }, [year]);
 
   // A section from a previous school year won't exist in the new one — reset
-  // the filter whenever the globally selected year changes.
+  // the filters whenever the globally selected year changes.
   useEffect(() => {
     setSection('');
+    setFrom('');
+    setTo('');
   }, [year]);
 
   const load = useCallback(() => {
     void api
-      .badgeLeaderboard(FULL_LIMIT, section || undefined, year || undefined)
+      .badgeLeaderboard(FULL_LIMIT, section || undefined, year || undefined, from || undefined, to || undefined)
       .then(setRows)
       .catch(() => setRows([]));
     void api
-      .listBadges(year || undefined)
+      .listBadges(year || undefined, from || undefined, to || undefined)
       .then((list) => {
         const map = new Map<number, Badge[]>();
         for (const b of list) {
@@ -201,7 +209,7 @@ export function BadgesPage() {
         setBadgesByStudent(map);
       })
       .catch(() => undefined);
-  }, [section, year]);
+  }, [section, year, from, to]);
 
   useEffect(load, [load]);
 
@@ -277,6 +285,14 @@ export function BadgesPage() {
               <option key={s} value={s}>{s}</option>
             ))}
           </select>
+        </label>
+        <label className="report-range-label text-dim">
+          Earned from
+          <input type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} title="Only count badges earned on/after this date" />
+        </label>
+        <label className="report-range-label text-dim">
+          to
+          <input type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} title="Only count badges earned on/before this date" />
         </label>
         <input
           className="search-input"
@@ -390,6 +406,7 @@ export function BadgesPage() {
           badges={badgesByStudent.get(history.row.studentId) ?? []}
           currentWeek={history.week}
           currentYear={year === currentYear}
+          hasRange={!!from || !!to}
           onClose={() => setHistory(null)}
         />
       )}

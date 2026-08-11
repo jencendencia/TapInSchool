@@ -21,8 +21,9 @@ import { useClock } from '../hooks/useClock';
 import { ActivityFeed } from '../components/ActivityFeed';
 import { CameraScanner } from '../components/CameraScanner';
 import { ManualCheckIn } from '../components/ManualCheckIn';
+import { VisitorRegister } from '../components/VisitorRegister';
 import { WindowControls } from '../components/WindowControls';
-import { Avatar, QrCodeImage, SchoolLogo, fmtTimeSec } from '../components/shared';
+import { Avatar, QrCodeImage, SchoolLogo, Toast, fmtTimeSec } from '../components/shared';
 
 const AUTO_RESET_MS = 4000;
 // Guardians get extra time to read the day report before the kiosk resets.
@@ -211,6 +212,40 @@ function SuccessView({
   );
 }
 
+function VisitorView({ result }: { result: ScanResult }) {
+  const visitor = result.visitor!;
+  const isIn = result.entryType === 'IN';
+  return (
+    <div className={`result-card result-card-fill visitor-card ${isIn ? 'success-in' : 'success-out'}`}>
+      <div className="visitor-badge-row">
+        <span className={`status-badge ${isIn ? 'badge-in' : 'badge-out'}`}>
+          {isIn ? '✓ VISITOR CHECKED IN' : '⟲ VISITOR CHECKED OUT'}
+        </span>
+      </div>
+      <div className="visitor-avatar">
+        <Avatar name={visitor.full_name} showPhoto={false} size={116} />
+      </div>
+      <h1 className="result-name">{visitor.full_name}</h1>
+      {visitor.purpose && (
+        <p className="visitor-line">
+          <span className="visitor-line-icon">📋</span> {visitor.purpose}
+        </p>
+      )}
+      {visitor.host_office && (
+        <p className="visitor-line">
+          <span className="visitor-line-icon">🏛</span> Visiting {visitor.host_office}
+        </p>
+      )}
+      <p className="result-time">{fmtTimeSec(result.log?.scanned_at ?? new Date().toISOString())}</p>
+      {result.queuedOffline ? (
+        <div className="sms-toast sms-toast-none">Saved offline — will sync when connection returns</div>
+      ) : (
+        <div className="sms-toast sms-toast-none">Walk-in visitor · reusable VP QR pass</div>
+      )}
+    </div>
+  );
+}
+
 function GuardianView({ result }: { result: ScanResult }) {
   const report = result.guardianReport!;
   return (
@@ -299,10 +334,12 @@ function DuplicateView({ result }: { result: ScanResult }) {
 function IdleView({
   onCamera,
   onManual,
+  onRegister,
   schoolName,
 }: {
   onCamera: () => void;
   onManual: () => void;
+  onRegister: () => void;
   schoolName?: string | null;
 }) {
   return (
@@ -325,6 +362,9 @@ function IdleView({
         <button className="btn-ghost cam-btn" onClick={onManual}>
           📇 Forgot your QR?
         </button>
+        <button className="btn-ghost cam-btn" onClick={onRegister}>
+          🧑‍🤝‍🧑 Register Visitor
+        </button>
       </div>
     </div>
   );
@@ -346,8 +386,19 @@ function AnnouncementsView({
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+    // Play WITH audio: the announcement video's sound track should be heard
+    // on the kiosk. Electron allows autoplay with sound by default, so this
+    // works in the app; in a plain browser (demo mode) unmuted autoplay can
+    // be blocked, so fall back to muted playback to keep the carousel moving.
+    v.muted = false;
+    v.volume = 1;
     const p = v.play();
-    if (p && typeof p.catch === 'function') p.catch(() => undefined);
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => {
+        v.muted = true;
+        void v.play().catch(() => undefined);
+      });
+    }
   }, [announcement.media_url]);
   return (
     <div className={`announcement-slide${announcement.media_url ? '' : ' announcement-text-only'}`}>
@@ -357,7 +408,6 @@ function AnnouncementsView({
           className="announcement-media announcement-video"
           src={announcement.media_url}
           autoPlay
-          muted
           playsInline
           onEnded={onVideoEnded}
         />
@@ -380,6 +430,12 @@ export function KioskScreen({ onOpenAdmin }: { onOpenAdmin: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [camOpen, setCamOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
+  const [visitorRegOpen, setVisitorRegOpen] = useState(false);
+  // "Visitor registered" announcement: fired when the registration modal
+  // closes after a successful create (so it never shows behind the modal).
+  const [visitorToast, setVisitorToast] = useState<string | null>(null);
+  const [lastRegistered, setLastRegistered] = useState<string | null>(null);
+  const visitorToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [announceIndex, setAnnounceIndex] = useState(0);
   const [badgeSummary, setBadgeSummary] = useState<StudentBadgeSummary | null>(null);
@@ -473,6 +529,7 @@ const armAnnounceIdle = useCallback(() => {
       else if (r.kind === 'UNRECOGNIZED') playUnrecognized();
       else if (r.kind === 'DUPLICATE') playUnrecognized();
       else if (r.kind === 'GUARDIAN') playSuccess();
+      else if (r.kind === 'VISITOR') playSuccess();
       showResultRef.current(r);
     });
     const offActivity = api.onActivity(setActivity);
@@ -485,6 +542,7 @@ const armAnnounceIdle = useCallback(() => {
       if (resetTimer.current) clearTimeout(resetTimer.current);
       if (announceTimer.current) clearTimeout(announceTimer.current);
       if (announceIdleTimer.current) clearTimeout(announceIdleTimer.current);
+      if (visitorToastTimer.current) clearTimeout(visitorToastTimer.current);
     };
     // Run exactly once on mount. Subscribers use showResultRef so they always
     // call the latest showResult without this effect re-running.
@@ -532,6 +590,23 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
     void api.processScan(student.qr_hash_payload, 'MANUAL');
   };
 
+  const showVisitorToast = useCallback((msg: string) => {
+    if (visitorToastTimer.current) clearTimeout(visitorToastTimer.current);
+    setVisitorToast(msg);
+    visitorToastTimer.current = setTimeout(() => setVisitorToast(null), 3500);
+  }, []);
+
+  // Closes the registration modal, then announces the newly registered visitor
+  // (only when one was actually created in this session — cancelling the PIN
+  // or the form shows no toast).
+  const closeVisitorRegister = useCallback(() => {
+    setVisitorRegOpen(false);
+    if (lastRegistered) {
+      showVisitorToast(`✅ ${lastRegistered} registered — QR pass issued`);
+      setLastRegistered(null);
+    }
+  }, [lastRegistered, showVisitorToast]);
+
   const simulateScan = () => {
     const no = DEMO_STUDENT_NOS[Math.floor(Math.random() * DEMO_STUDENT_NOS.length)];
     void api.processScan(mockPayload(no), 'SCANNER');
@@ -540,6 +615,15 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
   const simulateGuardianScan = () => {
     const [name, address] = DEMO_GUARDIANS[Math.floor(Math.random() * DEMO_GUARDIANS.length)];
     void api.processScan(mockGuardianPayload(name, address), 'SCANNER');
+  };
+
+  const simulateVisitorScan = () => {
+    // Pick the first active registered visitor so the kiosk demo drives the
+    // same VP QR the admin prints (IN/OUT toggles on repeated clicks).
+    void api.listVisitors().then((list) => {
+      const v = list.find((x) => x.is_active) ?? list[0];
+      if (v) void api.processScan(v.qr_hash_payload, 'SCANNER');
+    });
   };
 
   return (
@@ -583,6 +667,13 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
             >
               📇
             </button>
+            <button
+              className="btn-icon admin-btn"
+              onClick={() => setVisitorRegOpen(true)}
+              title="Register a walk-in visitor (staff PIN)"
+            >
+              🧑‍🤝‍🧑
+            </button>
             <button className="btn-icon admin-btn" onClick={onOpenAdmin} title="Open Admin Dashboard (Ctrl+Shift+A)">
               ⚙
             </button>
@@ -598,7 +689,7 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
           width. Error/blocked results keep the side panel so staff can watch
           the live feed. */}
 <main
-        className={`kiosk-main${center.kind === 'result' && (center.result.kind === 'SUCCESS' || center.result.kind === 'GUARDIAN') ? ' kiosk-main-full' : ''}`}
+        className={`kiosk-main${center.kind === 'result' && (center.result.kind === 'SUCCESS' || center.result.kind === 'GUARDIAN' || center.result.kind === 'VISITOR') ? ' kiosk-main-full' : ''}`}
       >
         <section className="kiosk-center">
           {center.kind === 'idle' && announcements.length > 0 && (
@@ -620,6 +711,7 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
             <IdleView
               onCamera={() => setCamOpen(true)}
               onManual={() => setManualOpen(true)}
+              onRegister={() => setVisitorRegOpen(true)}
               schoolName={settings?.school_name}
             />
           )}
@@ -657,6 +749,23 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
                     cy="23"
                     r="20"
                     style={{ animationDuration: `${GUARDIAN_RESET_MS}ms` }}
+                  />
+                </svg>
+              </div>
+            </div>
+          )}
+          {center.kind === 'result' && center.result.kind === 'VISITOR' && (
+            <div key={centerKey.current} className="center-enter">
+              <VisitorView result={center.result} />
+              <div className="countdown" aria-hidden>
+                <svg width="46" height="46" viewBox="0 0 46 46">
+                  <circle className="countdown-track" cx="23" cy="23" r="20" />
+                  <circle
+                    className="countdown-bar"
+                    cx="23"
+                    cy="23"
+                    r="20"
+                    style={{ animationDuration: `${AUTO_RESET_MS}ms` }}
                   />
                 </svg>
               </div>
@@ -755,6 +864,9 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
               <button className="btn-ghost simulate-btn" onClick={simulateGuardianScan}>
                 🧑‍👧 Simulate guardian (demo)
               </button>
+              <button className="btn-ghost simulate-btn" onClick={() => void simulateVisitorScan()}>
+                🧑‍🤝‍🧑 Simulate visitor (demo)
+              </button>
             </div>
           )}
         </aside>
@@ -773,6 +885,14 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
         onClose={() => setManualOpen(false)}
         onCheckIn={handleManualCheckIn}
       />
+
+      <VisitorRegister
+        open={visitorRegOpen}
+        onClose={closeVisitorRegister}
+        onRegistered={(v) => setLastRegistered(v.full_name)}
+      />
+
+      {visitorToast && <Toast message={visitorToast} />}
     </div>
   );
 }

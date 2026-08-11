@@ -21,6 +21,10 @@ import type {
   PerStudentRow,
   RegisterRow,
   ReportData,
+  ReportDrilldownMetric,
+  ReportDrilldownQuery,
+  ReportDrilldownResult,
+  ReportDrilldownRow,
   ReportQuery,
   ReportRegister,
   ReportTrends,
@@ -321,6 +325,343 @@ export async function getReportData(query: ReportQuery): Promise<ReportData> {
     smsAudit,
     trends,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Summary-card drilldowns (click a stat card → who is behind this number?)
+// ---------------------------------------------------------------------------
+
+interface DrilldownScope {
+  fromStr: string;
+  toStr: string;
+  fromDt: string;
+  toDt: string;
+  late: string;
+  early: string;
+  maskPhones: boolean;
+  /** Gate-used days in the range (denominator for attendance rates). */
+  schoolDays: number;
+  sectionWhere: string;
+  sectionParams: unknown[];
+  yearJoin: string;
+  yearParams: unknown[];
+  secExpr: string;
+}
+
+function drilldownRow(r: {
+  student_id: number;
+  student_no: string;
+  full_name: string;
+  grade_section: string;
+  parent_phone: string;
+  value: number;
+  value2?: number;
+  value3?: number;
+  time?: string | null;
+}, maskPhones: boolean): ReportDrilldownRow {
+  return {
+    studentId: r.student_id,
+    studentNo: r.student_no,
+    fullName: r.full_name,
+    gradeSection: r.grade_section,
+    parentPhone: phoneOf(r.parent_phone, maskPhones),
+    value: r.value,
+    value2: r.value2,
+    value3: r.value3,
+    time: r.time ?? undefined,
+  };
+}
+
+/** Every student with ≥1 scan — total / IN / OUT counts. */
+async function ddScans(args: DrilldownScope): Promise<ReportDrilldownRow[]> {
+  const rows = await db.query<
+    { student_id: number; student_no: string; full_name: string; grade_section: string; parent_phone: string; total: number; ins: number; outs: number }[]
+  >(
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
+            COUNT(a.id) total,
+            COALESCE(SUM(a.entry_type = 'IN'), 0) ins,
+            COALESCE(SUM(a.entry_type = 'OUT'), 0) outs
+     FROM students s ${args.yearJoin}
+     LEFT JOIN attendance_logs a ON a.student_id = s.id AND a.scanned_at BETWEEN ? AND ?
+     WHERE s.is_active = 1${args.sectionWhere}
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
+     HAVING total > 0
+     ORDER BY total DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name`,
+    [...args.yearParams, args.fromDt, args.toDt, ...args.sectionParams],
+  );
+  return rows.map((r) =>
+    drilldownRow({ ...r, value: r.total, value2: r.ins, value3: r.outs }, args.maskPhones),
+  );
+}
+
+/** Students with ≥1 IN scan — IN count + last IN time (newest arrival first). */
+async function ddIn(args: DrilldownScope): Promise<ReportDrilldownRow[]> {
+  const rows = await db.query<
+    { student_id: number; student_no: string; full_name: string; grade_section: string; parent_phone: string; ins: number; last_in: string | null }[]
+  >(
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
+            COUNT(a.id) ins, DATE_FORMAT(MAX(a.scanned_at), '%H:%i') last_in
+     FROM students s ${args.yearJoin}
+     JOIN attendance_logs a ON a.student_id = s.id AND a.entry_type = 'IN' AND a.scanned_at BETWEEN ? AND ?
+     WHERE s.is_active = 1${args.sectionWhere}
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
+     ORDER BY MAX(a.scanned_at) DESC`,
+    [...args.yearParams, args.fromDt, args.toDt, ...args.sectionParams],
+  );
+  return rows.map((r) => drilldownRow({ ...r, value: r.ins, time: r.last_in }, args.maskPhones));
+}
+
+/** Students with ≥1 OUT scan — OUT count + last OUT time (newest departure first). */
+async function ddOut(args: DrilldownScope): Promise<ReportDrilldownRow[]> {
+  const rows = await db.query<
+    { student_id: number; student_no: string; full_name: string; grade_section: string; parent_phone: string; outs: number; last_out: string | null }[]
+  >(
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
+            COUNT(a.id) outs, DATE_FORMAT(MAX(a.scanned_at), '%H:%i') last_out
+     FROM students s ${args.yearJoin}
+     JOIN attendance_logs a ON a.student_id = s.id AND a.entry_type = 'OUT' AND a.scanned_at BETWEEN ? AND ?
+     WHERE s.is_active = 1${args.sectionWhere}
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
+     ORDER BY MAX(a.scanned_at) DESC`,
+    [...args.yearParams, args.fromDt, args.toDt, ...args.sectionParams],
+  );
+  return rows.map((r) => drilldownRow({ ...r, value: r.outs, time: r.last_out }, args.maskPhones));
+}
+
+/** Students with flagged-late IN scans — times late + total minutes late. */
+async function ddLate(args: DrilldownScope): Promise<ReportDrilldownRow[]> {
+  if (!args.late) return [];
+  const rows = await db.query<
+    { student_id: number; student_no: string; full_name: string; grade_section: string; parent_phone: string; late_count: number; late_mins: number }[]
+  >(
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
+            COUNT(*) late_count,
+            COALESCE(SUM(TIMESTAMPDIFF(MINUTE, TIMESTAMP(DATE(a.scanned_at), ?), a.scanned_at)), 0) late_mins
+     FROM students s ${args.yearJoin}
+     JOIN attendance_logs a ON a.student_id = s.id AND a.entry_type = 'IN' AND a.scanned_at BETWEEN ? AND ?
+       AND TIME(a.scanned_at) > ?
+     WHERE s.is_active = 1${args.sectionWhere}
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
+     ORDER BY late_count DESC, late_mins DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name`,
+    // Text order: SELECT late cutoff, yearJoin, BETWEEN, TIME > cutoff, section.
+    [args.late, ...args.yearParams, args.fromDt, args.toDt, args.late, ...args.sectionParams],
+  );
+  return rows.map((r) =>
+    drilldownRow({ ...r, value: r.late_count, value2: r.late_mins }, args.maskPhones),
+  );
+}
+
+/** Students with flagged-early OUT scans — times early. */
+async function ddEarly(args: DrilldownScope): Promise<ReportDrilldownRow[]> {
+  if (!args.early) return [];
+  const rows = await db.query<
+    { student_id: number; student_no: string; full_name: string; grade_section: string; parent_phone: string; early_count: number }[]
+  >(
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
+            COUNT(*) early_count
+     FROM students s ${args.yearJoin}
+     JOIN attendance_logs a ON a.student_id = s.id AND a.entry_type = 'OUT' AND a.scanned_at BETWEEN ? AND ?
+       AND TIME(a.scanned_at) < ?
+     WHERE s.is_active = 1${args.sectionWhere}
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
+     ORDER BY early_count DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name`,
+    [...args.yearParams, args.fromDt, args.toDt, args.early, ...args.sectionParams],
+  );
+  return rows.map((r) => drilldownRow({ ...r, value: r.early_count }, args.maskPhones));
+}
+
+/** Students absent on ≥1 school day — days absent (worst first). */
+async function ddAbsent(args: DrilldownScope): Promise<ReportDrilldownRow[]> {
+  const rows = await db.query<
+    { student_id: number; student_no: string; full_name: string; grade_section: string; parent_phone: string; days_absent: number }[]
+  >(
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone, COUNT(*) days_absent
+     FROM students s ${args.yearJoin}
+     JOIN (SELECT DISTINCT DATE(scanned_at) day FROM attendance_logs WHERE scanned_at BETWEEN ? AND ?) d
+     WHERE s.is_active = 1${args.sectionWhere}
+       AND NOT EXISTS (SELECT 1 FROM attendance_logs a
+                       WHERE a.student_id = s.id AND a.scanned_at BETWEEN ? AND ? AND DATE(a.scanned_at) = d.day)
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
+     ORDER BY days_absent DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name
+     LIMIT ${DETAIL_ROW_CAP}`,
+    [...args.yearParams, args.fromDt, args.toDt, ...args.sectionParams, args.fromDt, args.toDt],
+  );
+  return rows.map((r) => drilldownRow({ ...r, value: r.days_absent }, args.maskPhones));
+}
+
+/** Presence per student — shared by the present / attendance / at-risk metrics. */
+async function ddPresence(args: DrilldownScope): Promise<
+  { student_id: number; student_no: string; full_name: string; grade_section: string; parent_phone: string; present_days: number }[]
+> {
+  return db.query(
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
+            COUNT(DISTINCT DATE(a.scanned_at)) present_days
+     FROM students s ${args.yearJoin}
+     LEFT JOIN attendance_logs a ON a.student_id = s.id AND a.scanned_at BETWEEN ? AND ?
+     WHERE s.is_active = 1${args.sectionWhere}
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone`,
+    [...args.yearParams, args.fromDt, args.toDt, ...args.sectionParams],
+  );
+}
+
+/** Students with ≥1 on-time IN scan — on-time arrival count. */
+async function ddOnTime(args: DrilldownScope): Promise<ReportDrilldownRow[]> {
+  const rows = await db.query<
+    { student_id: number; student_no: string; full_name: string; grade_section: string; parent_phone: string; on_time: number }[]
+  >(
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
+            COUNT(a.id) on_time
+     FROM students s ${args.yearJoin}
+     JOIN attendance_logs a ON a.student_id = s.id AND a.entry_type = 'IN' AND a.scanned_at BETWEEN ? AND ?
+       AND (? = '' OR TIME(a.scanned_at) <= ?)
+     WHERE s.is_active = 1${args.sectionWhere}
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
+     ORDER BY on_time DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name`,
+    // Text order: yearJoin, JOIN BETWEEN, the two on-time cutoff placeholders.
+    [...args.yearParams, args.fromDt, args.toDt, args.late, args.late, ...args.sectionParams],
+  );
+  return rows.map((r) => drilldownRow({ ...r, value: r.on_time }, args.maskPhones));
+}
+
+/** Students who received parent-alert SMS in the range — SMS count. */
+async function ddSms(args: DrilldownScope): Promise<ReportDrilldownRow[]> {
+  // Each SMS resolves to a student via its attendance link, else by recipient
+  // phone among active students (covers automated absence alerts that have no
+  // linked scan).
+  const rows = await db.query<
+    { student_id: number; student_no: string; full_name: string; grade_section: string; parent_phone: string; sms_count: number }[]
+  >(
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone, COUNT(x.id) sms_count
+     FROM students s ${args.yearJoin}
+     LEFT JOIN (
+       SELECT sm.id, COALESCE(al.student_id, ps.id) student_id
+       FROM sms_logs sm
+       LEFT JOIN attendance_logs al ON al.id = sm.attendance_id
+       LEFT JOIN students ps ON ps.parent_phone = sm.parent_phone AND ps.is_active = 1 AND ps.parent_phone <> ''
+       WHERE sm.created_at BETWEEN ? AND ?
+     ) x ON x.student_id = s.id
+     WHERE s.is_active = 1${args.sectionWhere}
+     GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
+     HAVING sms_count > 0
+     ORDER BY sms_count DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name`,
+    [...args.yearParams, args.fromDt, args.toDt, ...args.sectionParams],
+  );
+  return rows.map((r) => drilldownRow({ ...r, value: r.sms_count }, args.maskPhones));
+}
+
+/**
+ * One summary stat card's student-level breakdown. Mirrors the summary's own
+ * math (same range cap, section/school-year scoping, late/early cutoffs,
+ * 80% at-risk threshold) so the drilldown always agrees with the card it came
+ * from.
+ */
+export async function getReportDrilldown(query: ReportDrilldownQuery): Promise<ReportDrilldownResult> {
+  const today = fmtDay(new Date());
+  const metric: ReportDrilldownMetric = query?.metric ?? 'present';
+  const section = (query?.section ?? '').trim() || '';
+  const maskPhones = !!query?.maskPhones;
+
+  let from = parseDay(query?.from) ?? parseDay(today)!;
+  let to = parseDay(query?.to) ?? from;
+  if (from.getTime() > to.getTime()) [from, to] = [to, from];
+  if (to.getTime() - from.getTime() > (MAX_RANGE_DAYS - 1) * 86400000) {
+    from = addDays(to, -(MAX_RANGE_DAYS - 1));
+  }
+  const fromStr = fmtDay(from);
+  const toStr = fmtDay(to);
+  const fromDt = `${fromStr} 00:00:00`;
+  const toDt = `${toStr} 23:59:59`;
+  const { late, early } = flagCutoffs(settingsStore.get());
+  const schoolYear = (query?.schoolYear ?? '').trim();
+  const yearJoin = schoolYear
+    ? `LEFT JOIN enrollments e ON e.student_id = s.id AND e.school_year = ?`
+    : '';
+  const yearParams: unknown[] = schoolYear ? [schoolYear] : [];
+  const secExpr = schoolYear ? `COALESCE(NULLIF(e.grade_section, ''), s.grade_section)` : 's.grade_section';
+  const sectionWhere = section ? ` AND ${secExpr} = ?` : '';
+  const sectionParams: unknown[] = section ? [section] : [];
+
+  const schoolDays = await (async () => {
+    const [row] = await db.query<{ c: number }[]>(
+      `SELECT COUNT(DISTINCT DATE(scanned_at)) c FROM attendance_logs WHERE scanned_at BETWEEN ? AND ?`,
+      [fromDt, toDt],
+    );
+    return row?.c ?? 0;
+  })();
+
+  const scope: DrilldownScope = {
+    fromStr,
+    toStr,
+    fromDt,
+    toDt,
+    late,
+    early,
+    maskPhones,
+    schoolDays,
+    sectionWhere,
+    sectionParams,
+    yearJoin,
+    yearParams,
+    secExpr,
+  };
+
+  let rows: ReportDrilldownRow[] = [];
+  if (metric === 'scans') rows = await ddScans(scope);
+  else if (metric === 'in') rows = await ddIn(scope);
+  else if (metric === 'out') rows = await ddOut(scope);
+  else if (metric === 'late') rows = await ddLate(scope);
+  else if (metric === 'early') rows = await ddEarly(scope);
+  else if (metric === 'absent') rows = await ddAbsent(scope);
+  else if (metric === 'onTime') rows = await ddOnTime(scope);
+  else if (metric === 'sms') rows = await ddSms(scope);
+  else if (metric === 'present' || metric === 'attendance' || metric === 'atRisk') {
+    const presence = await ddPresence(scope);
+    const absentDays = (p: number) => Math.max(0, schoolDays - p);
+    if (metric === 'present') {
+      rows = presence
+        .filter((r) => r.present_days > 0)
+        .map((r) =>
+          drilldownRow(
+            {
+              ...r,
+              value: r.present_days,
+              value2: schoolDays > 0 ? Math.round((r.present_days / schoolDays) * 1000) / 10 : undefined,
+            },
+            maskPhones,
+          ),
+        );
+    } else if (metric === 'attendance') {
+      rows = presence.map((r) =>
+        drilldownRow(
+          {
+            ...r,
+            value: r.present_days,
+            value2: absentDays(r.present_days),
+            value3: schoolDays > 0 ? Math.round((r.present_days / schoolDays) * 1000) / 10 : undefined,
+          },
+          maskPhones,
+        ),
+      );
+      rows.sort((a, b) => (b.value3 ?? -1) - (a.value3 ?? -1));
+    } else {
+      // at-risk: active students below the 80% threshold, worst first.
+      rows = presence
+        .filter((r) => schoolDays > 0 && r.present_days / schoolDays < 0.8)
+        .map((r) =>
+          drilldownRow(
+            {
+              ...r,
+              value: Math.round((r.present_days / schoolDays) * 1000) / 10,
+              value2: absentDays(r.present_days),
+            },
+            maskPhones,
+          ),
+        );
+      rows.sort((a, b) => a.value - b.value || (b.value2 ?? 0) - (a.value2 ?? 0));
+    }
+  }
+
+  return { metric, from: fromStr, to: toStr, rows };
 }
 
 // ---------------------------------------------------------------------------

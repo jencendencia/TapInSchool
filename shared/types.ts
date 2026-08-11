@@ -31,7 +31,8 @@ export type ScanResultKind =
   | 'DUPLICATE'
   | 'OFFLINE'
   | 'ERROR'
-  | 'GUARDIAN';
+  | 'GUARDIAN'
+  | 'VISITOR';
 
 export interface Student {
   id: number;
@@ -48,6 +49,9 @@ export interface Student {
   guardian_address: string;
   /** Guardian's own QR payload (GP-… prefix). Null when no guardian is set. */
   guardian_qr_hash_payload: string | null;
+  /** Linked guardian registry row (null = legacy/unlinked record). The name /
+   *  address / phone / QR columns above are a denormalized snapshot of it. */
+  guardian_id: number | null;
   /** URL or inline data URI of the uploaded student photo (resized thumbnail). */
   photo_url: string | null;
   is_active: boolean;
@@ -66,6 +70,10 @@ export interface StudentInput {
   /** Guardian's full name — when set, a guardian QR is generated. */
   guardian_name?: string;
   guardian_address?: string;
+  /** Guardian registry row to link (new student form). When set, the backend
+   *  copies the guardian's mobile/name/address/QR onto the student snapshot.
+   *  Pass null to explicitly remove the guardian link on edit. */
+  guardian_id?: number | null;
   /** URL or inline data URI of the uploaded student photo (resized thumbnail). */
   photo_url?: string | null;
   is_active?: boolean;
@@ -150,6 +158,8 @@ export interface ScanResult {
   kind: ScanResultKind;
   message: string;
   student?: Student;
+  /** Populated for kind 'VISITOR' — the visitor whose QR was scanned. */
+  visitor?: Visitor;
   entryType?: EntryType;
   log?: AttendanceLog;
   smsQueued?: boolean;
@@ -158,6 +168,79 @@ export interface ScanResult {
   queuedOffline?: boolean;
   /** Populated for kind 'GUARDIAN' — the child's attendance so far today. */
   guardianReport?: GuardianDayReport;
+}
+
+// ---- Guardians (registry + duplicate-name registration flow) ----------------
+
+/** A registered guardian/parent. Students link to one row via
+ *  Student.guardian_id; the guardian's contact details are snapshotted onto
+ *  each linked student so SMS, guardian-QR scans, reports and the offline
+ *  cache keep working without JOINs. */
+export interface Guardian {
+  id: number;
+  full_name: string;
+  /** SMS contact number (copied onto linked students' parent_phone). */
+  mobile: string;
+  address: string;
+  /** Guardian QR payload (GP-… prefix) — identity hash of name + address, so
+   *  two guardians sharing a name but not an address get distinct QRs. */
+  qr_hash_payload: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GuardianInput {
+  full_name: string;
+  mobile?: string;
+  address?: string;
+}
+
+/** Outcome of a guardian create/update: the write succeeded, or it was blocked
+ *  because another guardian already carries the same name (the UI then asks
+ *  whether it is the same person before saving anyway via allowSameName). */
+export type GuardianWriteResult =
+  | { outcome: 'created' | 'updated'; guardian: Guardian }
+  | { outcome: 'duplicate'; existing: Guardian };
+
+// ---- Visitors (walk-in QR registration & IN/OUT logging) ------------------
+
+/** A walk-in visitor registered at the gate; each gets a reusable QR (VP-…). */
+export interface Visitor {
+  id: number;
+  full_name: string;
+  contact_phone: string;
+  /** Purpose of the visit, e.g. "Meeting", "Delivery", "Pickup". */
+  purpose: string;
+  /** Person or office being visited. */
+  host_office: string;
+  /** Government ID type + number presented at the gate (optional). */
+  id_presented: string;
+  qr_hash_payload: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VisitorInput {
+  full_name: string;
+  contact_phone?: string;
+  purpose?: string;
+  host_office?: string;
+  id_presented?: string;
+}
+
+/** One visitor IN/OUT scan (the visitor equivalent of AttendanceLogRow). */
+export interface VisitorLogRow {
+  id: number;
+  visitor_id: number;
+  full_name: string;
+  contact_phone: string;
+  purpose: string;
+  host_office: string;
+  entry_type: EntryType;
+  source: ScanSource;
+  scanned_at: string;
 }
 
 export interface LoginResult {
@@ -320,6 +403,10 @@ export interface LogFilter {
 export interface SmsFilter {
   status?: SmsStatus;
   search?: string;
+  /** Inclusive start date (YYYY-MM-DD) — only messages created on/after it. */
+  from?: string;
+  /** Inclusive end date (YYYY-MM-DD) — only messages created on/before it. */
+  to?: string;
   limit?: number;
   offset?: number;
 }
@@ -653,6 +740,63 @@ export interface ReportData {
   trends: ReportTrends;
 }
 
+/**
+ * Summary-card drilldowns (Reports → Summary view). Each metric answers "who
+ * is behind this number?" with one row per relevant student (grade + section
+ * resolved for the selected school year), or per calendar day for 'ada'.
+ */
+export type ReportDrilldownMetric =
+  | 'scans' // every student with ≥1 scan: total / IN / OUT counts
+  | 'in' // students with ≥1 IN scan (+ last IN time)
+  | 'out' // students with ≥1 OUT scan (+ last OUT time)
+  | 'late' // students with ≥1 flagged-late IN (+ total minutes late)
+  | 'early' // students with ≥1 flagged-early OUT
+  | 'absent' // students absent on ≥1 school day (days absent)
+  | 'present' // students with ≥1 scan (present days + rate)
+  | 'sms' // students who received parent-alert SMS
+  | 'attendance' // every active student's present/absent days + rate
+  | 'onTime' // students with ≥1 on-time IN scan
+  | 'atRisk' // active students with attendance < 80% (worst first)
+  | 'ada'; // per-day presence (the ADA breakdown)
+
+export interface ReportDrilldownRow {
+  studentId: number;
+  studentNo: string;
+  fullName: string;
+  gradeSection: string;
+  /** Masked when the report's mask-phones toggle is on. */
+  parentPhone: string;
+  /** Metric-specific primary number (scan count, absent days, SMS count, …). */
+  value: number;
+  /** Metric-specific secondary number (OUT count, minutes late, absent days…). */
+  value2?: number;
+  /** Metric-specific tertiary number (rate %, early count…). */
+  value3?: number;
+  /** Metric-specific 'HH:MM' timestamp (last IN / last OUT time). */
+  time?: string;
+}
+
+export interface ReportDrilldownQuery {
+  metric: ReportDrilldownMetric;
+  /** Inclusive start date, YYYY-MM-DD. */
+  from: string;
+  /** Inclusive end date, YYYY-MM-DD. */
+  to: string;
+  /** Optional exact grade_section filter (mirrors the report toolbar). */
+  section?: string;
+  /** School year the section groupings reflect ('' = current sections). */
+  schoolYear?: string;
+  /** Mask parent phone numbers. */
+  maskPhones?: boolean;
+}
+
+export interface ReportDrilldownResult {
+  metric: ReportDrilldownMetric;
+  from: string;
+  to: string;
+  rows: ReportDrilldownRow[];
+}
+
 export interface ExportResult {
   ok: boolean;
   filePath?: string;
@@ -970,6 +1114,24 @@ export interface TapinApi {
   importStudentsCsv(csv: string): Promise<ImportResult>;
   seedDemoData(): Promise<ImportResult>;
 
+  // ---- Guardians (registry + student linking) -----------------------------
+  /** All registered guardians, sorted by name, optionally narrowed by search. */
+  listGuardians(search?: string): Promise<Guardian[]>;
+  /** Case-insensitive name lookup powering the duplicate-registration prompt. */
+  findGuardiansByName(name: string): Promise<Guardian[]>;
+  /** Registers a guardian. Returns outcome 'duplicate' with the existing
+   *  guardian when the name is already taken (pass allowSameName to save a
+   *  same-named, different-person record anyway). */
+  createGuardian(input: GuardianInput, opts?: { allowSameName?: boolean }): Promise<GuardianWriteResult>;
+  /** Updates a guardian; mobile/address changes re-sync linked students. */
+  updateGuardian(
+    id: number,
+    patch: Partial<GuardianInput & { is_active?: boolean }>,
+    opts?: { allowSameName?: boolean },
+  ): Promise<GuardianWriteResult>;
+  /** Deletes a guardian, unlinking (but not wiping) its students' snapshots. */
+  deleteGuardian(id: number): Promise<void>;
+
   listLogs(filter?: LogFilter): Promise<Paged<AttendanceLogRow>>;
   exportLogsCsv(filter?: LogFilter): Promise<string>;
 
@@ -1006,11 +1168,13 @@ export interface TapinApi {
   // ---- Badges & excused days (weekly recognition) -------------------------
   /** Earned badges + current-week progress for one student (kiosk scan path). */
   getStudentBadges(studentId: number): Promise<StudentBadgeSummary>;
-  /** All stored badges, optionally filtered to one school year. */
-  listBadges(schoolYear?: string): Promise<Badge[]>;
-  /** Badge ranking (highest score first), optionally narrowed to one section
-   *  or a specific school year (defaults to the current year). */
-  badgeLeaderboard(topN?: number, section?: string, schoolYear?: string): Promise<BadgeLeaderboardRow[]>;
+  /** All stored badges, optionally filtered to one school year and/or an
+   *  earned-date range (inclusive YYYY-MM-DD; '' = no filter). */
+  listBadges(schoolYear?: string, from?: string, to?: string): Promise<Badge[]>;
+  /** Badge ranking (highest score first), optionally narrowed to one section,
+   *  a specific school year (defaults to the current year), or an earned-date
+   *  range (inclusive YYYY-MM-DD; '' = no filter). */
+  badgeLeaderboard(topN?: number, section?: string, schoolYear?: string, from?: string, to?: string): Promise<BadgeLeaderboardRow[]>;
   /** A student's recorded excused days. */
   listExcuses(studentId: number): Promise<Excuse[]>;
   /** Records an excused day (self-heals that student's badges). */
@@ -1029,7 +1193,23 @@ export interface TapinApi {
   /** Active announcements ordered for the kiosk carousel (sort_order asc). */
   listActiveAnnouncements(): Promise<Announcement[]>;
 
+  // ---- Visitors (walk-in QR registration & IN/OUT logging) ----------------
+  /** All registered visitors, newest first, optionally narrowed by name/phone. */
+  listVisitors(search?: string): Promise<Visitor[]>;
+  /** Registers a walk-in visitor, generates their VP QR, and returns the row. */
+  createVisitor(input: VisitorInput): Promise<Visitor>;
+  /** Updates a visitor's profile (name/contact/purpose/host/ID); block via is_active. */
+  updateVisitor(id: number, patch: Partial<VisitorInput & { is_active?: boolean }>): Promise<Visitor>;
+  /** Permanently removes a visitor and their logs. */
+  deleteVisitor(id: number): Promise<void>;
+  /** One visitor's IN/OUT history, newest first. */
+  listVisitorLogs(visitorId: number): Promise<VisitorLogRow[]>;
+  /** All visitors' IN/OUT logs, newest first, optional inclusive date range. */
+  listAllVisitorLogs(filter?: { from?: string; to?: string }): Promise<VisitorLogRow[]>;
+
   getReport(query: ReportQuery): Promise<ReportData>;
+  /** One summary stat-card's student-level breakdown (e.g. who is at-risk). */
+  getReportDrilldown(query: ReportDrilldownQuery): Promise<ReportDrilldownResult>;
   /** Generates a PDF of the given report (main-process hidden-window print). */
   exportReportPdf(report: ReportData): Promise<ExportResult>;
   /** Exports a styled .xlsx of the given report data. */

@@ -30,16 +30,33 @@ export interface CachedStudent {
   is_active: boolean;
 }
 
+/** Minimal visitor snapshot used while the DB is offline. Compatible with the
+ *  Visitor interface (created_at/updated_at are empty when from cache). */
+export interface CachedVisitor {
+  id: number;
+  full_name: string;
+  contact_phone: string;
+  purpose: string;
+  host_office: string;
+  id_presented: string;
+  qr_hash_payload: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 /** A scan accepted while offline, persisted for replay into MySQL. */
 export interface OfflineScanEvent {
   id: string;
-  kind: 'scan';
+  kind: 'scan' | 'visitor_scan';
   queuedAt: string;
   studentId: number;
-  studentNo: string;
-  fullName: string;
-  gradeSection: string;
+  studentNo?: string;
+  fullName?: string;
+  gradeSection?: string;
   parentPhone: string | null;
+  /** Visitor id (for visitor_scan events). */
+  visitorId?: number;
   entryType: EntryType;
   scannedAt: string;
   source: ScanSource;
@@ -55,8 +72,11 @@ interface ScanStateEntry {
 
 interface PersistedState {
   students: CachedStudent[];
+  visitors: CachedVisitor[];
   /** Keyed by student id — mirrors the DB "latest scan today" used by toggle/debounce. */
   lastScan: Record<string, ScanStateEntry>;
+  /** Keyed by visitor id — mirrors visitor_logs toggle/debounce state. */
+  visitorLastScan: Record<string, ScanStateEntry>;
   savedAt: string;
 }
 
@@ -76,7 +96,7 @@ function stateFile(): string {
 
 // ---- In-memory state + queue lock -------------------------------------------
 
-let state: PersistedState = { students: [], lastScan: {}, savedAt: '' };
+let state: PersistedState = { students: [], visitors: [], lastScan: {}, visitorLastScan: {}, savedAt: '' };
 
 /** Serializes file operations so appends never interleave with drain rewrites. */
 let queueLock: Promise<unknown> = Promise.resolve();
@@ -126,9 +146,49 @@ export async function refreshOfflineCache(): Promise<void> {
     for (const r of rows) {
       lastScan[String(r.student_id)] = { type: r.entry_type, time: new Date(r.scanned_at).getTime() };
     }
+    // Also cache visitors + today's visitor_logs for offline VP scans. The
+    // visitors tables may not exist yet while the boot-time schema migration
+    // is still applying on an upgraded install — skip them (soft warning)
+    // instead of aborting the whole cache, and let the next refresh (the
+    // periodic sync below) pick them up once the tables are created.
+    let visitors: CachedVisitor[] = [];
+    let visitorLastScan: Record<string, ScanStateEntry> = {};
+    try {
+      const vRows = await db.query<CachedVisitor[]>(
+        'SELECT id, full_name, contact_phone, purpose, host_office, id_presented, qr_hash_payload, is_active, created_at, updated_at FROM visitors',
+      );
+      const vScans = await db.query<{ visitor_id: number; entry_type: EntryType; scanned_at: string }[]>(
+        `SELECT visitor_id, entry_type, scanned_at
+         FROM visitor_logs
+         WHERE scanned_at >= CURDATE()
+           AND (visitor_id, scanned_at) IN (
+             SELECT visitor_id, MAX(scanned_at)
+             FROM visitor_logs WHERE scanned_at >= CURDATE()
+             GROUP BY visitor_id
+           )`,
+      );
+      const vLastScan: Record<string, ScanStateEntry> = {};
+      for (const r of vScans) {
+        vLastScan[String(r.visitor_id)] = { type: r.entry_type, time: new Date(r.scanned_at).getTime() };
+      }
+      visitors = vRows.map((v) => ({
+        ...v,
+        contact_phone: v.contact_phone || '',
+        purpose: v.purpose || '',
+        host_office: v.host_office || '',
+        id_presented: v.id_presented || '',
+        created_at: v.created_at || '',
+        updated_at: v.updated_at || '',
+      }));
+      visitorLastScan = vLastScan;
+    } catch (err) {
+      console.warn('[tapin] visitor cache skipped (visitors tables not ready yet?):', (err as Error).message);
+    }
     state = {
       students: students.map(normalizeStudent),
+      visitors,
       lastScan,
+      visitorLastScan,
       savedAt: new Date().toISOString(),
     };
     await persistState();
@@ -155,12 +215,24 @@ export function getCachedStudentByGuardianPayload(payload: string): CachedStuden
   return state.students.find((s) => s.guardian_qr_hash_payload === payload);
 }
 
+/** Matches a visitor VP payload against the cached snapshot. */
+export function getCachedVisitorByPayload(payload: string): CachedVisitor | undefined {
+  return state.visitors.find((v) => v.qr_hash_payload === payload);
+}
+
 /** Upserts a freshly seen student so the snapshot stays current for offline scans. */
 export function upsertCachedStudent(student: CachedStudent): void {
   const s = normalizeStudent(student);
   const i = state.students.findIndex((x) => x.id === s.id);
   if (i >= 0) state.students[i] = s;
   else state.students.push(s);
+}
+
+/** Upserts a freshly seen visitor so the snapshot covers offline VP scans. */
+export function upsertCachedVisitor(visitor: CachedVisitor): void {
+  const i = state.visitors.findIndex((v) => v.id === visitor.id);
+  if (i >= 0) state.visitors[i] = visitor;
+  else state.visitors.push(visitor);
 }
 
 /** Last scan for a student on TODAY only (mirrors the DB `scanned_at >= CURDATE()`). */
@@ -170,8 +242,20 @@ export function getLastScanToday(studentId: number): ScanStateEntry | undefined 
   return new Date(entry.time).toDateString() === new Date().toDateString() ? entry : undefined;
 }
 
+/** Last visitor scan today (mirrors visitor_logs toggle/debounce). */
+export function getVisitorLastScanToday(visitorId: number): ScanStateEntry | undefined {
+  const entry = state.visitorLastScan[String(visitorId)];
+  if (!entry) return undefined;
+  return new Date(entry.time).toDateString() === new Date().toDateString() ? entry : undefined;
+}
+
 export function recordScan(studentId: number, entryType: EntryType, timeMs: number): void {
   state.lastScan[String(studentId)] = { type: entryType, time: timeMs };
+  scheduleStatePersist();
+}
+
+export function recordVisitorScan(visitorId: number, entryType: EntryType, timeMs: number): void {
+  state.visitorLastScan[String(visitorId)] = { type: entryType, time: timeMs };
   scheduleStatePersist();
 }
 
@@ -201,7 +285,14 @@ async function loadState(): Promise<void> {
     const raw = await fs.readFile(stateFile(), 'utf8');
     const parsed = JSON.parse(raw) as PersistedState;
     if (parsed && Array.isArray(parsed.students) && parsed.lastScan) {
-      state = { students: parsed.students.map(normalizeStudent), lastScan: parsed.lastScan, savedAt: parsed.savedAt };
+      state = {
+        students: parsed.students.map(normalizeStudent),
+        // Older state files predate visitors — default to empty.
+        visitors: parsed.visitors ?? [],
+        lastScan: parsed.lastScan,
+        visitorLastScan: parsed.visitorLastScan ?? {},
+        savedAt: parsed.savedAt,
+      };
     }
   } catch {
     // No state file yet — start empty (offline scans are unrecognized until the
@@ -219,6 +310,21 @@ export function enqueueScanEvent(
       ...event,
       id: randomUUID(),
       kind: 'scan',
+      queuedAt: new Date().toISOString(),
+    };
+    await fs.mkdir(queueDir(), { recursive: true });
+    await fs.appendFile(eventsFile(), JSON.stringify(full) + '\n', 'utf8');
+  });
+}
+
+export function enqueueVisitorScanEvent(
+  event: Omit<OfflineScanEvent, 'id' | 'kind' | 'queuedAt'>,
+): Promise<void> {
+  return withLock(async () => {
+    const full: OfflineScanEvent = {
+      ...event,
+      id: randomUUID(),
+      kind: 'visitor_scan',
       queuedAt: new Date().toISOString(),
     };
     await fs.mkdir(queueDir(), { recursive: true });
@@ -246,7 +352,7 @@ async function readScanEvents(): Promise<OfflineScanEvent[]> {
       if (!l) continue;
       try {
         const ev = JSON.parse(l) as OfflineScanEvent;
-        if (ev && ev.kind === 'scan') events.push(ev);
+        if (ev && (ev.kind === 'scan' || ev.kind === 'visitor_scan')) events.push(ev);
       } catch {
         // Skip corrupt lines rather than blocking the whole queue.
       }
@@ -274,41 +380,60 @@ export function drainOfflineQueue(): Promise<number> {
 
     for (const ev of events) {
       try {
-        const [exists] = await db.query<{ id: number }[]>(
-          'SELECT id FROM students WHERE id = ?',
-          [ev.studentId],
-        );
-        if (!exists) {
-          // Student was deleted while the DB was down — drop the event.
-          done.add(ev.id);
-          console.warn('[tapin] dropped offline scan for missing student', ev.studentId);
-          continue;
-        }
-        const insert = await db.execute(
-          'INSERT INTO attendance_logs (student_id, entry_type, source, scanned_at) VALUES (?, ?, ?, ?)',
-          [ev.studentId, ev.entryType, ev.source, ev.scannedAt],
-        );
-        if (ev.smsQueued && ev.parentPhone) {
-          const message = buildSmsMessage(resolveTemplate(settings), {
-            fullName: ev.fullName,
-            gradeSection: ev.gradeSection,
-            entryType: ev.entryType,
-            flag: ev.flag,
-            scannedAt: new Date(ev.scannedAt),
-            school: settings.school_name,
-          });
-          await db.execute(
-            "INSERT INTO sms_logs (attendance_id, parent_phone, message, status) VALUES (?, ?, ?, 'PENDING')",
-            [insert.insertId, ev.parentPhone, message],
+        if (ev.kind === 'visitor_scan') {
+          const [visitor] = await db.query<{ id: number }[]>(
+            'SELECT id FROM visitors WHERE id = ?',
+            [ev.visitorId],
           );
+          if (!visitor) {
+            done.add(ev.id);
+            console.warn('[tapin] dropped offline visitor scan for missing visitor', ev.visitorId);
+            continue;
+          }
+          await db.execute(
+            'INSERT INTO visitor_logs (visitor_id, entry_type, source, scanned_at) VALUES (?, ?, ?, ?)',
+            [ev.visitorId, ev.entryType, ev.source, ev.scannedAt],
+          );
+          done.add(ev.id);
+          replayed++;
+          recordVisitorScan(ev.visitorId!, ev.entryType, new Date(ev.scannedAt).getTime());
+        } else {
+          const [exists] = await db.query<{ id: number }[]>(
+            'SELECT id FROM students WHERE id = ?',
+            [ev.studentId],
+          );
+          if (!exists) {
+            // Student was deleted while the DB was down — drop the event.
+            done.add(ev.id);
+            console.warn('[tapin] dropped offline scan for missing student', ev.studentId);
+            continue;
+          }
+          const insert = await db.execute(
+            'INSERT INTO attendance_logs (student_id, entry_type, source, scanned_at) VALUES (?, ?, ?, ?)',
+            [ev.studentId, ev.entryType, ev.source, ev.scannedAt],
+          );
+          if (ev.smsQueued && ev.parentPhone) {
+            const message = buildSmsMessage(resolveTemplate(settings), {
+              fullName: ev.fullName ?? '',
+              gradeSection: ev.gradeSection ?? '',
+              entryType: ev.entryType,
+              flag: ev.flag,
+              scannedAt: new Date(ev.scannedAt),
+              school: settings.school_name,
+            });
+            await db.execute(
+              "INSERT INTO sms_logs (attendance_id, parent_phone, message, status) VALUES (?, ?, ?, 'PENDING')",
+              [insert.insertId, ev.parentPhone, message],
+            );
+          }
+          done.add(ev.id);
+          replayed++;
+          // Reflect the replayed scan in the offline snapshot: the pre-drain
+          // cache refresh rebuilt lastScan from MySQL *before* these queued
+          // events existed, so without this a subsequent DB drop would toggle
+          // these students incorrectly.
+          recordScan(ev.studentId, ev.entryType, new Date(ev.scannedAt).getTime());
         }
-        done.add(ev.id);
-        replayed++;
-        // Reflect the replayed scan in the offline snapshot: the pre-drain
-        // cache refresh rebuilt lastScan from MySQL *before* these queued
-        // events existed, so without this a subsequent DB drop would toggle
-        // these students incorrectly.
-        recordScan(ev.studentId, ev.entryType, new Date(ev.scannedAt).getTime());
       } catch (err) {
         // Transient failure — keep this event (and the rest) for next drain.
         console.error('[tapin] offline replay failed, will retry:', err);
@@ -353,10 +478,12 @@ export function startOfflineService(h: { onSynced: () => void }): void {
     .then(() => drainOfflineQueue())
     .then(() => hooks.onSynced());
   db.on('status', onDbStatus);
-  // Periodic safety net in case a replay was missed (e.g. failed mid-drain).
+  // Periodic safety net: keeps the offline snapshot fresh (so a cache refresh
+  // that raced the boot schema migration self-heals, e.g. visitors tables) and
+  // replays any queue item that was missed (e.g. failed mid-drain).
   syncTimer = setInterval(() => {
     if (db.isOnline()) {
-      void drainOfflineQueue().then(() => hooks.onSynced());
+      void refreshOfflineCache().then(() => drainOfflineQueue()).then(() => hooks.onSynced());
     }
   }, 30000);
 }

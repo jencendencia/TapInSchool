@@ -14,12 +14,17 @@ import type {
   Excuse,
   ExcuseCategory,
   ExportResult,
+  Guardian,
+  GuardianInput,
+  GuardianWriteResult,
   ImportResult,
   LicenseStatus,
   LogFilter,
   LoginResult,
   OverviewStats,
   ReportData,
+  ReportDrilldownQuery,
+  ReportDrilldownResult,
   ReportQuery,
   ScanMode,
   ScanResult,
@@ -39,6 +44,9 @@ import type {
   UpdateStatus,
   User,
   UserInput,
+  Visitor,
+  VisitorInput,
+  VisitorLogRow,
 } from '../shared/types';
 
 function on<T>(channel: string, cb: (data: T) => void): () => void {
@@ -82,6 +90,16 @@ const api: TapinApi = {
   importStudentsCsv: (csv: string) => ipcRenderer.invoke('tapin:importStudentsCsv', csv) as Promise<ImportResult>,
   seedDemoData: () => ipcRenderer.invoke('tapin:seedDemoData') as Promise<ImportResult>,
 
+  listGuardians: (search?: string) =>
+    ipcRenderer.invoke('tapin:listGuardians', search) as Promise<Guardian[]>,
+  findGuardiansByName: (name: string) =>
+    ipcRenderer.invoke('tapin:findGuardiansByName', name) as Promise<Guardian[]>,
+  createGuardian: (input: GuardianInput, opts?: { allowSameName?: boolean }) =>
+    ipcRenderer.invoke('tapin:createGuardian', input, opts) as Promise<GuardianWriteResult>,
+  updateGuardian: (id: number, patch: Partial<GuardianInput & { is_active?: boolean }>, opts?: { allowSameName?: boolean }) =>
+    ipcRenderer.invoke('tapin:updateGuardian', id, patch, opts) as Promise<GuardianWriteResult>,
+  deleteGuardian: (id: number) => ipcRenderer.invoke('tapin:deleteGuardian', id) as Promise<void>,
+
   listLogs: (filter?: LogFilter) => ipcRenderer.invoke('tapin:listLogs', filter) as Promise<{ rows: import('../shared/types').AttendanceLogRow[]; total: number }>,
   exportLogsCsv: (filter?: LogFilter) => ipcRenderer.invoke('tapin:exportLogsCsv', filter) as Promise<string>,
 
@@ -112,10 +130,10 @@ setCurrentSchoolYear: (name: string) => ipcRenderer.invoke('tapin:setCurrentScho
 
   getStudentBadges: (studentId: number) =>
     ipcRenderer.invoke('tapin:getStudentBadges', studentId) as Promise<StudentBadgeSummary>,
-  listBadges: (schoolYear?: string) =>
-    ipcRenderer.invoke('tapin:listBadges', schoolYear) as Promise<Badge[]>,
-  badgeLeaderboard: (topN = 10, section?: string, schoolYear?: string) =>
-    ipcRenderer.invoke('tapin:badgeLeaderboard', topN, section, schoolYear) as Promise<BadgeLeaderboardRow[]>,
+  listBadges: (schoolYear?: string, from?: string, to?: string) =>
+    ipcRenderer.invoke('tapin:listBadges', schoolYear, from, to) as Promise<Badge[]>,
+  badgeLeaderboard: (topN = 10, section?: string, schoolYear?: string, from?: string, to?: string) =>
+    ipcRenderer.invoke('tapin:badgeLeaderboard', topN, section, schoolYear, from, to) as Promise<BadgeLeaderboardRow[]>,
   listExcuses: (studentId: number) =>
     ipcRenderer.invoke('tapin:listExcuses', studentId) as Promise<Excuse[]>,
   addExcuse: (studentId: number, excuseDate: string, category: ExcuseCategory, note?: string) =>
@@ -132,7 +150,21 @@ setCurrentSchoolYear: (name: string) => ipcRenderer.invoke('tapin:setCurrentScho
   listActiveAnnouncements: () =>
     ipcRenderer.invoke('tapin:listActiveAnnouncements') as Promise<Announcement[]>,
 
+  listVisitors: (search?: string) =>
+    ipcRenderer.invoke('tapin:listVisitors', search) as Promise<Visitor[]>,
+  createVisitor: (input: VisitorInput) =>
+    ipcRenderer.invoke('tapin:createVisitor', input) as Promise<Visitor>,
+  updateVisitor: (id: number, patch: Partial<VisitorInput & { is_active?: boolean }>) =>
+    ipcRenderer.invoke('tapin:updateVisitor', id, patch) as Promise<Visitor>,
+  deleteVisitor: (id: number) => ipcRenderer.invoke('tapin:deleteVisitor', id) as Promise<void>,
+  listVisitorLogs: (visitorId: number) =>
+    ipcRenderer.invoke('tapin:listVisitorLogs', visitorId) as Promise<VisitorLogRow[]>,
+  listAllVisitorLogs: (filter?: { from?: string; to?: string }) =>
+    ipcRenderer.invoke('tapin:listAllVisitorLogs', filter) as Promise<VisitorLogRow[]>,
+
   getReport: (query: ReportQuery) => ipcRenderer.invoke('tapin:getReport', query) as Promise<ReportData>,
+  getReportDrilldown: (query: ReportDrilldownQuery) =>
+    ipcRenderer.invoke('tapin:getReportDrilldown', query) as Promise<ReportDrilldownResult>,
   exportReportPdf: (report: ReportData) =>
     ipcRenderer.invoke('tapin:exportReportPdf', report) as Promise<ExportResult>,
   exportReportXlsx: (report: ReportData) =>

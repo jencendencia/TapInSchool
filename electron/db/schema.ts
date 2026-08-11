@@ -28,6 +28,8 @@
 // scripts/init-db.mjs split the string on ';' and execute each chunk, so any
 // ';' inside a comment would break the statements (this bit us once with the
 // photo_url migration comment). Keep explanations here, in code comments.
+import { generateGuardianPayload } from '../services/qr';
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS students (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -198,6 +200,45 @@ FROM students s WHERE s.grade_section <> '';
 
 ALTER TABLE students MODIFY photo_url MEDIUMTEXT DEFAULT NULL;
 ALTER TABLE sms_logs MODIFY attendance_id BIGINT UNSIGNED NULL;
+
+CREATE TABLE IF NOT EXISTS visitors (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  full_name VARCHAR(120) NOT NULL,
+  contact_phone VARCHAR(20) NOT NULL DEFAULT '',
+  purpose VARCHAR(255) NOT NULL DEFAULT '',
+  host_office VARCHAR(120) NOT NULL DEFAULT '',
+  id_presented VARCHAR(255) NOT NULL DEFAULT '',
+  qr_hash_payload VARCHAR(64) NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_visitor_qr (qr_hash_payload),
+  KEY idx_visitors_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS guardians (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  full_name VARCHAR(120) NOT NULL,
+  mobile VARCHAR(20) NOT NULL DEFAULT '',
+  address VARCHAR(255) NOT NULL DEFAULT '',
+  qr_hash_payload VARCHAR(64) NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_guardian_qr (qr_hash_payload),
+  KEY idx_guardians_name (full_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS visitor_logs (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  visitor_id INT UNSIGNED NOT NULL,
+  entry_type ENUM('IN','OUT') NOT NULL,
+  source ENUM('SCANNER','WEBCAM','MANUAL') NOT NULL DEFAULT 'SCANNER',
+  scanned_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_vlog_visitor_date (visitor_id, scanned_at),
+  KEY idx_vlog_scanned_at (scanned_at),
+  CONSTRAINT fk_vlog_visitor FOREIGN KEY (visitor_id) REFERENCES visitors(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 `;
 
 export async function ensureSchema(query: (sql: string, params?: unknown[]) => Promise<unknown[]>): Promise<void> {
@@ -273,4 +314,64 @@ export async function ensureSchema(query: (sql: string, params?: unknown[]) => P
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'students' AND INDEX_NAME = 'uq_guardian_qr_payload'`,
   )) as { INDEX_NAME: string }[];
   if (guardianIdx.length) await query('ALTER TABLE students DROP INDEX uq_guardian_qr_payload');
+
+  // ---- Idempotent migration: guardians registry + students.guardian_id -----
+  // The guardians table is created in SCHEMA_SQL; here we add the nullable
+  // FK column to students (fresh installs get it the same way — the CREATE
+  // TABLE keeps the legacy columns and this ALTER runs right after). The
+  // backfill registers every existing guardian identity from the students'
+  // legacy snapshot columns and links each student to their row, so the new
+  // registry + dropdown are populated on upgrade.
+  const studCols2 = (await query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'students'`,
+  )) as { COLUMN_NAME: string }[];
+  const sNames2 = new Set(studCols2.map((c) => c.COLUMN_NAME));
+  if (!sNames2.has('guardian_id')) {
+    await query(
+      `ALTER TABLE students
+       ADD COLUMN guardian_id INT UNSIGNED DEFAULT NULL AFTER guardian_qr_hash_payload,
+       ADD CONSTRAINT fk_student_guardian FOREIGN KEY (guardian_id) REFERENCES guardians(id) ON DELETE SET NULL`,
+    );
+  } else {
+    const fk = (await query(
+      `SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS
+       WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'students' AND CONSTRAINT_NAME = 'fk_student_guardian'`,
+    )) as { CONSTRAINT_NAME: string }[];
+    if (!fk.length) {
+      await query(
+        'ALTER TABLE students ADD CONSTRAINT fk_student_guardian FOREIGN KEY (guardian_id) REFERENCES guardians(id) ON DELETE SET NULL',
+      );
+    }
+  }
+  // Backfill: one guardian row per existing (name + address) identity, reusing
+  // the ALREADY-STORED guardian QR payload so printed guardian QRs stay valid,
+  // then link every student to their row. Idempotent: INSERT IGNORE skips rows
+  // that already exist and the link UPDATE only touches unlinked students.
+  // First, any student whose guardian identity was recorded WITHOUT a QR payload
+  // (legacy rows / paths that skipped payload generation) gets the payload
+  // derived from the identity now — deterministic, so siblings sharing a
+  // guardian converge on ONE payload, and the kiosk guardian QR works for them.
+  const missingGuardianQr = (await query(
+    `SELECT id, guardian_name, guardian_address FROM students
+     WHERE guardian_name <> '' AND guardian_qr_hash_payload IS NULL`,
+  )) as { id: number; guardian_name: string; guardian_address: string }[];
+  for (const row of missingGuardianQr) {
+    await query('UPDATE students SET guardian_qr_hash_payload = ? WHERE id = ?', [
+      generateGuardianPayload(row.guardian_name, row.guardian_address),
+      row.id,
+    ]);
+  }
+  await query(
+    `INSERT IGNORE INTO guardians (full_name, mobile, address, qr_hash_payload)
+     SELECT s.guardian_name, MAX(s.parent_phone), s.guardian_address, s.guardian_qr_hash_payload
+     FROM students s
+     WHERE s.guardian_name <> '' AND s.guardian_qr_hash_payload IS NOT NULL
+     GROUP BY s.guardian_name, s.guardian_address, s.guardian_qr_hash_payload`,
+  );
+  await query(
+    `UPDATE students s JOIN guardians g ON g.qr_hash_payload = s.guardian_qr_hash_payload
+     SET s.guardian_id = g.id
+     WHERE s.guardian_id IS NULL AND s.guardian_qr_hash_payload IS NOT NULL`,
+  );
 }

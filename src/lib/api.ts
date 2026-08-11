@@ -15,6 +15,9 @@ import type {
   AnnouncementMediaType,
   AttendanceFlag,
   Gender,
+  Guardian,
+  GuardianInput,
+  GuardianWriteResult,
   Badge,
   BadgeCode,
   BadgeLeaderboardRow,
@@ -36,6 +39,9 @@ ImportResult,
   PerSectionRow,
   PerStudentRow,
   ReportData,
+  ReportDrilldownQuery,
+  ReportDrilldownResult,
+  ReportDrilldownRow,
   ReportQuery,
   ReportRegister,
   ReportTrends,
@@ -63,6 +69,9 @@ ImportResult,
   User,
   UserInput,
   UserRole,
+  Visitor,
+  VisitorInput,
+  VisitorLogRow,
 } from '../../shared/types';
 import { buildReportHtml } from '../../shared/report-html';
 import { compareGrades } from './sort';
@@ -119,6 +128,23 @@ export function mockGuardianPayload(guardianName: string, guardianAddress = ''):
     out += CHECK_ALPHABET[h % CHECK_ALPHABET.length];
   }
   return `GP-${new Date().getFullYear()}-${out}`;
+}
+
+/**
+ * Visitor QR payload (VP-<YEAR>-<id><check>) — mirrors electron/services/qr.ts
+ * generateVisitorPayload. Derived from the visitor's id so the same visitor
+ * always gets the same QR across visits.
+ */
+export function mockVisitorPayload(visitorId: number): string {
+  let hash = 0;
+  const input = `VISITOR::${visitorId}::${MOCK_SECRET}`;
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash * 31 + input.charCodeAt(i)) % 1000003;
+  }
+  const a = CHECK_ALPHABET[hash % CHECK_ALPHABET.length];
+  const b = CHECK_ALPHABET[Math.floor(hash / CHECK_ALPHABET.length) % CHECK_ALPHABET.length];
+  const c = CHECK_ALPHABET[Math.floor(hash / CHECK_ALPHABET.length / CHECK_ALPHABET.length) % CHECK_ALPHABET.length];
+  return `VP-${new Date().getFullYear()}-${visitorId}${a}${b}${c}`;
 }
 
 /** Coerces a raw gender value to 'male' | 'female' | '' (mirrors the
@@ -237,6 +263,13 @@ private sections: Section[] = [];
   private sectionIdSeq = 1;
   private schoolYearIdSeq = 1;
   private lastScanByStudent = new Map<number, { time: number; type: EntryType }>();
+  private visitors: Visitor[] = [];
+  private visitorLogs: { id: number; visitor_id: number; entry_type: EntryType; source: ScanSource; scanned_at: string }[] = [];
+  private visitorSeq = 1;
+  private guardians: Guardian[] = [];
+  private guardianSeq = 1;
+  private visitorLogSeq = 1;
+  private lastScanByVisitor = new Map<number, { time: number; type: EntryType }>();
   // Kiosk gate-direction mode (mirrors electron/services/scan-mode.ts).
   private scanMode: ScanMode = 'auto';
   private scanCbs = new Set<(r: ScanResult) => void>();
@@ -286,10 +319,36 @@ private sections: Section[] = [];
       guardian_name,
       guardian_address,
       guardian_qr_hash_payload: guardian_name ? mockGuardianPayload(guardian_name, guardian_address) : null,
+      guardian_id: null,
       photo_url: null,
       is_active: true,
       created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
     }));
+
+    // Demo guardians: registered from the demo students' guardian identities so
+    // the registry + student links match (Maria Dela Cruz covers Juan + Carlos
+    // — one shared guardian row, mirroring the shared guardian QR).
+    const guardianByIdentity = new Map<string, Guardian>();
+    for (const s of this.students) {
+      if (!s.guardian_name) continue;
+      const key = `${s.guardian_name}::${s.guardian_address}`;
+      let g = guardianByIdentity.get(key);
+      if (!g) {
+        g = {
+          id: this.guardianSeq++,
+          full_name: s.guardian_name,
+          mobile: s.parent_phone,
+          address: s.guardian_address,
+          qr_hash_payload: mockGuardianPayload(s.guardian_name, s.guardian_address),
+          is_active: true,
+          created_at: s.created_at,
+          updated_at: s.created_at,
+        };
+        this.guardians.push(g);
+        guardianByIdentity.set(key, g);
+      }
+      s.guardian_id = g.id;
+    }
 
     // Demo sections cover every section the demo students belong to (so the
     // registry matches the roster). First two have adviser emails; the rest
@@ -372,6 +431,48 @@ private sections: Section[] = [];
     this.enrollments = this.students
       .filter((s) => s.grade_section)
       .map((s) => ({ studentId: s.id, schoolYear: '2026 - 2027', gradeSection: s.grade_section }));
+
+    // Demo walk-in visitors: one mid-visit (IN today), one checked OUT, one
+    // inactive (blocked) — exercises the registry, visit logs, and the kiosk
+    // IN/OUT toggle for VP QR codes.
+    const demoVisitors: Array<[string, string, string, string, string, boolean]> = [
+      ['Ramon Bautista', '09175551234', 'Delivery — school supplies', 'Supplies Office', 'Driver\u2019s License N-12345678', true],
+      ['Alma Concepcion', '09176667788', 'Parent meeting', 'Principal\u2019s Office', 'School ID 2024-118', true],
+      ['Engr. Jose Lim', '09177889900', 'Facility inspection', 'Admin Office', 'PRC 123456', false],
+    ];
+    this.visitors = demoVisitors.map(([full_name, contact_phone, purpose, host_office, id_presented, is_active], i) => {
+      const id = this.visitorSeq++;
+      const created = new Date(Date.now() - (i + 1) * 86400000).toISOString();
+      return {
+        id,
+        full_name,
+        contact_phone,
+        purpose,
+        host_office,
+        id_presented,
+        qr_hash_payload: mockVisitorPayload(id),
+        is_active,
+        created_at: created,
+        updated_at: created,
+      };
+    });
+    // A couple of today's logs so the Visit Logs tab and the kiosk toggle demo
+    // have history to show.
+    const now = new Date();
+    const pushVLog = (visitorId: number, entry_type: EntryType, h: number, m: number) => {
+      const at = new Date(now);
+      at.setHours(h, m, (visitorId * 17) % 60, 0);
+      this.visitorLogs.push({
+        id: this.visitorLogSeq++,
+        visitor_id: visitorId,
+        entry_type,
+        source: 'SCANNER',
+        scanned_at: at.toISOString(),
+      });
+      this.lastScanByVisitor.set(visitorId, { time: at.getTime(), type: entry_type });
+    };
+    if (this.visitors[0]) pushVLog(this.visitors[0].id, 'IN', 9, 12);
+    if (this.visitors[1]) pushVLog(this.visitors[1].id, 'OUT', 10, 45);
 
     // Seed a week of history so the admin dashboard looks alive. Two demo
     // stories exercise the badge rules: Ana (2024-0318) missed a day inside
@@ -595,6 +696,63 @@ private sections: Section[] = [];
       (s) => s.qr_hash_payload === trimmed || s.student_no === trimmed,
     );
     if (!student) {
+      // Visitor QR (VP-…)? Walk-in gate pass — its own IN/OUT log + toggle,
+      // separate from student attendance (mirrors electron/services/visitors.ts).
+      if (trimmed.startsWith('VP-')) {
+        const visitor = this.visitors.find((v) => v.qr_hash_payload === trimmed);
+        if (!visitor) {
+          const r: ScanResult = {
+            kind: 'UNRECOGNIZED',
+            message: 'Unrecognized visitor QR code. Please register at the gate.',
+          };
+          this.scanCbs.forEach((cb) => cb(r));
+          return r;
+        }
+        if (!visitor.is_active) {
+          const r: ScanResult = {
+            kind: 'BLOCKED',
+            message: 'Visitor access restricted. Please contact the admin office.',
+            visitor,
+          };
+          this.scanCbs.forEach((cb) => cb(r));
+          return r;
+        }
+        const last = this.lastScanByVisitor.get(visitor.id);
+        const now = Date.now();
+        if (last && now - last.time < this.settings.debounce_seconds * 1000) {
+          const wait = Math.max(1, Math.ceil((this.settings.debounce_seconds * 1000 - (now - last.time)) / 1000));
+          const r: ScanResult = { kind: 'DUPLICATE', message: `QR already scanned — please wait ${wait}s.`, visitor };
+          this.scanCbs.forEach((cb) => cb(r));
+          return r;
+        }
+        const entryType: EntryType = last?.type === 'IN' ? 'OUT' : 'IN';
+        this.lastScanByVisitor.set(visitor.id, { time: now, type: entryType });
+        const at = new Date();
+        const vlog = {
+          id: this.visitorLogSeq++,
+          visitor_id: visitor.id,
+          entry_type: entryType,
+          source: _source,
+          scanned_at: at.toISOString(),
+        };
+        this.visitorLogs.push(vlog);
+        const r: ScanResult = {
+          kind: 'VISITOR',
+          message: entryType === 'IN' ? 'Visitor checked IN' : 'Visitor checked OUT',
+          visitor,
+          entryType,
+          log: {
+            id: vlog.id,
+            student_id: 0, // not a student
+            entry_type: entryType,
+            scanned_at: at.toISOString(),
+            source: _source,
+            flag: '',
+          },
+        };
+        this.scanCbs.forEach((cb) => cb(r));
+        return r;
+      }
       // Guardian QR (GP-…)? No attendance recorded — show the day report for
       // every child sharing this guardian identity.
       const guardians = this.students.filter((s) => s.guardian_qr_hash_payload === trimmed);
@@ -863,6 +1021,22 @@ private sections: Section[] = [];
   async createStudent(input: StudentInput): Promise<Student> {
     // Auto-generate the student number when the Add form leaves it blank.
     const studentNo = String(input.student_no ?? '').trim() || this.nextStudentNo();
+    // Guardian snapshot (mirrors ipc.ts): a linked guardian supplies the SMS
+    // number, name, address, and QR; legacy free-text fields are the fallback.
+    let guardianId: number | null = null;
+    let guardianName = String(input.guardian_name ?? '').trim();
+    let guardianAddress = String(input.guardian_address ?? '').trim();
+    let guardianPhone = input.parent_phone || '';
+    let guardianQr: string | null = guardianName ? mockGuardianPayload(guardianName, guardianAddress) : null;
+    if (input.guardian_id) {
+      const g = this.guardians.find((x) => x.id === input.guardian_id);
+      if (!g) throw new Error('Selected guardian no longer exists.');
+      guardianId = g.id;
+      guardianName = g.full_name;
+      guardianAddress = g.address;
+      guardianPhone = g.mobile;
+      guardianQr = g.qr_hash_payload;
+    }
     // students.grade_section is the CURRENT year's live section — a student
     // enrolled into a past year starts unassigned this year (mirrors ipc.ts).
     const year = (input.school_year || '').trim() || this.currentYearName();
@@ -874,13 +1048,12 @@ private sections: Section[] = [];
       full_name: input.full_name,
       gender: normalizeGender(input.gender),
       grade_section: isCurrent ? (input.grade_section || '') : '',
-      parent_phone: input.parent_phone || '',
+      parent_phone: guardianPhone,
       lrn: String(input.lrn ?? '').trim(),
-      guardian_name: String(input.guardian_name ?? '').trim(),
-      guardian_address: String(input.guardian_address ?? '').trim(),
-      guardian_qr_hash_payload: String(input.guardian_name ?? '').trim()
-        ? mockGuardianPayload(String(input.guardian_name ?? '').trim(), String(input.guardian_address ?? '').trim())
-        : null,
+      guardian_name: guardianName,
+      guardian_address: guardianAddress,
+      guardian_qr_hash_payload: guardianQr,
+      guardian_id: guardianId,
       photo_url: input.photo_url ?? null,
       is_active: input.is_active ?? true,
       created_at: new Date().toISOString(),
@@ -899,10 +1072,34 @@ private sections: Section[] = [];
     // school_year is an enrollment hint, not a student column — keep it off the row.
     const { school_year, ...studentFields } = input;
     const prevSection = s.grade_section;
-    Object.assign(s, studentFields);
-    // Guardian QR lifecycle (mirrors ipc.ts): the payload hashes the guardian
-    // identity, so editing name/address re-issues it; clearing the name removes it.
-    if ('guardian_name' in input || 'guardian_address' in input) {
+    // guardian_id is handled explicitly below (snapshot derivation) — keep it
+    // out of the blanket merge so legacy fields can't fight the registry link.
+    const { guardian_id, ...restFields } = studentFields;
+    Object.assign(s, restFields);
+    // Guardian link lifecycle (mirrors ipc.ts): linking a guardian copies its
+    // identity onto the student; clearing the link (guardian_id: null) also
+    // clears the SMS number + guardian QR.
+    if ('guardian_id' in input) {
+      const gid = input.guardian_id ? Number(input.guardian_id) : null;
+      if (gid && Number.isInteger(gid)) {
+        const g = this.guardians.find((x) => x.id === gid);
+        if (!g) throw new Error('Selected guardian no longer exists.');
+        s.guardian_id = g.id;
+        s.parent_phone = g.mobile;
+        s.guardian_name = g.full_name;
+        s.guardian_address = g.address;
+        s.guardian_qr_hash_payload = g.qr_hash_payload;
+      } else {
+        s.guardian_id = null;
+        s.parent_phone = '';
+        s.guardian_name = '';
+        s.guardian_address = '';
+        s.guardian_qr_hash_payload = null;
+      }
+    } else if ('guardian_name' in input || 'guardian_address' in input) {
+      // Legacy Guardian QR lifecycle (mirrors ipc.ts): the payload hashes the
+      // guardian identity, so editing name/address re-issues it; clearing the
+      // name removes it.
       const name = String(input.guardian_name ?? s.guardian_name ?? '').trim();
       const address = String(input.guardian_address ?? s.guardian_address ?? '').trim();
       if (name) s.guardian_qr_hash_payload = mockGuardianPayload(name, address);
@@ -931,6 +1128,98 @@ private sections: Section[] = [];
 
   async generateQrPayload(studentNo: string): Promise<string> {
     return mockPayload(studentNo);
+  }
+
+  // ---- Guardians (registry + duplicate-name registration flow) -------------
+  async listGuardians(search?: string): Promise<Guardian[]> {
+    const list = [...this.guardians];
+    if (search) {
+      const q = search.toLowerCase();
+      return list.filter(
+        (g) => g.full_name.toLowerCase().includes(q) || g.mobile.includes(q) || g.address.toLowerCase().includes(q),
+      );
+    }
+    return list.sort((a, b) => a.full_name.localeCompare(b.full_name));
+  }
+
+  async findGuardiansByName(name: string): Promise<Guardian[]> {
+    const n = String(name ?? '').trim().toLowerCase();
+    return this.guardians.filter((g) => g.full_name.trim().toLowerCase() === n);
+  }
+
+  async createGuardian(input: GuardianInput, opts?: { allowSameName?: boolean }): Promise<GuardianWriteResult> {
+    const fullName = String(input.full_name ?? '').trim();
+    if (!fullName) throw new Error('Guardian name is required.');
+    const mobile = String(input.mobile ?? '').trim();
+    const address = String(input.address ?? '').trim();
+    if (!opts?.allowSameName) {
+      const existing = this.guardians.find((g) => g.full_name.trim().toLowerCase() === fullName.toLowerCase());
+      if (existing) return { outcome: 'duplicate', existing: { ...existing } };
+    }
+    const payload = mockGuardianPayload(fullName, address);
+    const sameIdentity = this.guardians.find((g) => g.qr_hash_payload === payload);
+    if (sameIdentity) return { outcome: 'duplicate', existing: { ...sameIdentity } };
+    const g: Guardian = {
+      id: this.guardianSeq++,
+      full_name: fullName,
+      mobile,
+      address,
+      qr_hash_payload: payload,
+      is_active: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    this.guardians.push(g);
+    return { outcome: 'created', guardian: { ...g } };
+  }
+
+  async updateGuardian(
+    id: number,
+    patch: Partial<GuardianInput & { is_active?: boolean }>,
+    opts?: { allowSameName?: boolean },
+  ): Promise<GuardianWriteResult> {
+    const g = this.guardians.find((x) => x.id === id);
+    if (!g) throw new Error('Guardian not found.');
+    const nextName = patch.full_name !== undefined ? String(patch.full_name).trim() : g.full_name;
+    const nextMobile = patch.mobile !== undefined ? String(patch.mobile).trim() : g.mobile;
+    const nextAddress = patch.address !== undefined ? String(patch.address).trim() : g.address;
+    const nextActive = patch.is_active !== undefined ? patch.is_active : g.is_active;
+    if (!nextName) throw new Error('Guardian name is required.');
+    // Only prompt when the name actually changes — editing a same-named
+    // guardian's mobile/address alone must not re-trigger the duplicate check.
+    if (!opts?.allowSameName && nextName.trim().toLowerCase() !== g.full_name.trim().toLowerCase()) {
+      const other = this.guardians.find(
+        (x) => x.id !== id && x.full_name.trim().toLowerCase() === nextName.toLowerCase(),
+      );
+      if (other) return { outcome: 'duplicate', existing: { ...other } };
+    }
+    const payload = mockGuardianPayload(nextName, nextAddress);
+    const sameIdentity = this.guardians.find((x) => x.id !== id && x.qr_hash_payload === payload);
+    if (sameIdentity) return { outcome: 'duplicate', existing: { ...sameIdentity } };
+    g.full_name = nextName;
+    g.mobile = nextMobile;
+    g.address = nextAddress;
+    g.qr_hash_payload = payload;
+    g.is_active = nextActive;
+    g.updated_at = new Date().toISOString();
+    // Re-sync the denormalized snapshot onto every linked student.
+    for (const s of this.students) {
+      if (s.guardian_id === id) {
+        s.parent_phone = g.mobile;
+        s.guardian_name = g.full_name;
+        s.guardian_address = g.address;
+        s.guardian_qr_hash_payload = g.qr_hash_payload;
+      }
+    }
+    return { outcome: 'updated', guardian: { ...g } };
+  }
+
+  async deleteGuardian(id: number): Promise<void> {
+    this.guardians = this.guardians.filter((g) => g.id !== id);
+    // Unlink students — their saved snapshot stays (mirrors the backend).
+    for (const s of this.students) {
+      if (s.guardian_id === id) s.guardian_id = null;
+    }
   }
 
   async importStudentsCsv(csv: string): Promise<ImportResult> {
@@ -962,6 +1251,25 @@ private sections: Section[] = [];
         result.skipped++;
         continue;
       }
+      // Rows that name a guardian AUTO-REGISTER it (find-or-create by name +
+      // address) and link the student — bulk import runs no duplicate prompt.
+      const gName = String(guardianName ?? '').trim();
+      const gAddress = String(guardianAddress ?? '').trim();
+      let gid: number | null = null;
+      if (gName) {
+        let g = this.guardians.find(
+          (x) =>
+            x.full_name.trim().toLowerCase() === gName.toLowerCase() &&
+            x.address.trim().toLowerCase() === gAddress.toLowerCase(),
+        );
+        if (!g) {
+          const res = await this.createGuardian({ full_name: gName, mobile: phone ?? '', address: gAddress });
+          if (res.outcome === 'created') g = res.guardian;
+          else if (res.outcome === 'duplicate') g = res.existing;
+          else throw new Error('Unexpected guardian write outcome.');
+        }
+        gid = g.id;
+      }
       await this.createStudent({
         student_no: studentNo,
         full_name: fullName,
@@ -971,6 +1279,7 @@ private sections: Section[] = [];
         lrn: lrn ?? '',
         guardian_name: guardianName ?? '',
         guardian_address: guardianAddress ?? '',
+        guardian_id: gid,
       });
       result.added++;
     }
@@ -1023,6 +1332,9 @@ private sections: Section[] = [];
       const q = filter.search.toLowerCase();
       rows = rows.filter((r) => (r.full_name ?? '').toLowerCase().includes(q) || r.parent_phone.includes(q));
     }
+    // Created-date range (inclusive YYYY-MM-DD) — mirrors real listSms.
+    if (filter.from) rows = rows.filter((r) => r.created_at.slice(0, 10) >= filter.from!);
+    if (filter.to) rows = rows.filter((r) => r.created_at.slice(0, 10) <= filter.to!);
     // Newest first (the # column is the record id) — mirrors real listSms.
     rows.sort((a, b) => b.id - a.id);
     const total = rows.length;
@@ -1191,13 +1503,11 @@ async deleteSchoolYear(name: string): Promise<void> {
   // ---- Announcements (kiosk idle slideshow) --------------------------------
   private toAnnouncement(input: AnnouncementInput): Announcement {
     const media = input.media ?? null;
-    const mediaType: AnnouncementMediaType = media
-      ? media.startsWith('data:video/')
-        ? 'video'
-        : media.startsWith('data:image/')
-          ? 'image'
-          : 'none'
-      : input.media_type ?? 'none';
+    const mediaType: AnnouncementMediaType = media?.startsWith('data:video/')
+      ? 'video'
+      : media?.startsWith('data:image/')
+        ? 'image'
+        : input.media_type ?? 'none';
     return {
       id: this.announcementIdSeq++,
       title: input.title || '',
@@ -1237,12 +1547,14 @@ async deleteSchoolYear(name: string): Promise<void> {
     if ('media' in input) {
       const media = input.media ?? null;
       ann.media_url = media;
+      // A data URI is a fresh upload; anything else (an existing media URL)
+      // keeps the caller's stated media_type (mirrors the real backend).
       ann.media_type = media
         ? media.startsWith('data:video/')
           ? 'video'
           : media.startsWith('data:image/')
             ? 'image'
-            : 'none'
+            : input.media_type ?? 'none'
         : 'none';
     }
     ann.updated_at = new Date().toISOString();
@@ -1251,6 +1563,92 @@ async deleteSchoolYear(name: string): Promise<void> {
 
   async deleteAnnouncement(id: number): Promise<void> {
     this.announcements = this.announcements.filter((a) => a.id !== id);
+  }
+
+  // ---- Visitors (walk-in QR registration & IN/OUT logging) -----------------
+  /** Joins a stored visitor log with the visitor's CURRENT profile (mirrors
+   *  the backend's SQL JOIN — edits to name/purpose/host show up in history). */
+  private toVisitorLogRow(l: {
+    id: number;
+    visitor_id: number;
+    entry_type: EntryType;
+    source: ScanSource;
+    scanned_at: string;
+  }): VisitorLogRow {
+    const v = this.visitors.find((x) => x.id === l.visitor_id);
+    return {
+      id: l.id,
+      visitor_id: l.visitor_id,
+      full_name: v?.full_name ?? 'Unknown visitor',
+      contact_phone: v?.contact_phone ?? '',
+      purpose: v?.purpose ?? '',
+      host_office: v?.host_office ?? '',
+      entry_type: l.entry_type,
+      source: l.source,
+      scanned_at: l.scanned_at,
+    };
+  }
+
+  async listVisitors(search?: string): Promise<Visitor[]> {
+    let list = [...this.visitors];
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter((v) => v.full_name.toLowerCase().includes(q) || v.contact_phone.includes(q));
+    }
+    return list.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  }
+
+  async createVisitor(input: VisitorInput): Promise<Visitor> {
+    const fullName = String(input.full_name ?? '').trim();
+    if (!fullName) throw new Error('Visitor name is required.');
+    const id = this.visitorSeq++;
+    const visitor: Visitor = {
+      id,
+      full_name: fullName,
+      contact_phone: String(input.contact_phone ?? '').trim(),
+      purpose: String(input.purpose ?? '').trim(),
+      host_office: String(input.host_office ?? '').trim(),
+      id_presented: String(input.id_presented ?? '').trim(),
+      qr_hash_payload: mockVisitorPayload(id),
+      is_active: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    this.visitors.push(visitor);
+    return { ...visitor };
+  }
+
+  async updateVisitor(id: number, patch: Partial<VisitorInput & { is_active?: boolean }>): Promise<Visitor> {
+    const v = this.visitors.find((x) => x.id === id);
+    if (!v) throw new Error('Visitor not found.');
+    if ('full_name' in patch && patch.full_name !== undefined) v.full_name = String(patch.full_name).trim();
+    if ('contact_phone' in patch && patch.contact_phone !== undefined) v.contact_phone = String(patch.contact_phone).trim();
+    if ('purpose' in patch && patch.purpose !== undefined) v.purpose = String(patch.purpose).trim();
+    if ('host_office' in patch && patch.host_office !== undefined) v.host_office = String(patch.host_office).trim();
+    if ('id_presented' in patch && patch.id_presented !== undefined) v.id_presented = String(patch.id_presented).trim();
+    if ('is_active' in patch && patch.is_active !== undefined) v.is_active = patch.is_active;
+    v.updated_at = new Date().toISOString();
+    return { ...v };
+  }
+
+  async deleteVisitor(id: number): Promise<void> {
+    this.visitors = this.visitors.filter((v) => v.id !== id);
+    this.visitorLogs = this.visitorLogs.filter((l) => l.visitor_id !== id);
+    this.lastScanByVisitor.delete(id);
+  }
+
+  async listVisitorLogs(visitorId: number): Promise<VisitorLogRow[]> {
+    return this.visitorLogs
+      .filter((l) => l.visitor_id === visitorId)
+      .map((l) => this.toVisitorLogRow(l))
+      .sort((a, b) => (a.scanned_at < b.scanned_at ? 1 : -1));
+  }
+
+  async listAllVisitorLogs(filter?: { from?: string; to?: string }): Promise<VisitorLogRow[]> {
+    let rows = this.visitorLogs;
+    if (filter?.from) rows = rows.filter((r) => r.scanned_at.slice(0, 10) >= filter.from!);
+    if (filter?.to) rows = rows.filter((r) => r.scanned_at.slice(0, 10) <= filter.to!);
+    return rows.map((l) => this.toVisitorLogRow(l)).sort((a, b) => (a.scanned_at < b.scanned_at ? 1 : -1));
   }
 
   // ---- Badges & excused days (attendance recognition) -----------------------
@@ -1359,12 +1757,17 @@ async deleteSchoolYear(name: string): Promise<void> {
     return this.mockBadgeSummary(Number(studentId));
   }
 
-  async listBadges(schoolYear?: string): Promise<Badge[]> {
+  async listBadges(schoolYear?: string, from?: string, to?: string): Promise<Badge[]> {
     const year = schoolYear || this.currentYearName();
-    return [...this.badges].filter((b) => b.schoolYear === year);
+    return [...this.badges].filter((b) => {
+      if (b.schoolYear !== year) return false;
+      if (from && b.earnedAt.slice(0, 10) < from) return false;
+      if (to && b.earnedAt.slice(0, 10) > to) return false;
+      return true;
+    });
   }
 
-  async badgeLeaderboard(topN = 10, section?: string, schoolYear?: string): Promise<BadgeLeaderboardRow[]> {
+  async badgeLeaderboard(topN = 10, section?: string, schoolYear?: string, from?: string, to?: string): Promise<BadgeLeaderboardRow[]> {
     const year = schoolYear || this.currentYearName();
     // Sections resolve through the selected school year's enrollments, falling
     // back to the live section — mirrors electron/services/badges.ts.
@@ -1375,6 +1778,9 @@ async deleteSchoolYear(name: string): Promise<void> {
     const counts = new Map<number, { badgeCount: number; att: number; punct: number; score: number }>();
     for (const b of this.badges) {
       if (b.schoolYear !== year) continue;
+      // Optional earned-date range (inclusive YYYY-MM-DD) — mirrors the backend.
+      if (from && b.earnedAt.slice(0, 10) < from) continue;
+      if (to && b.earnedAt.slice(0, 10) > to) continue;
       const info = BADGE_INFO[b.badgeCode];
       const c = counts.get(b.studentId) ?? { badgeCount: 0, att: 0, punct: 0, score: 0 };
       c.badgeCount++;
@@ -1882,6 +2288,134 @@ async deleteSchoolYear(name: string): Promise<void> {
       smsAudit,
       trends,
     };
+  }
+
+  /** One summary stat card's student-level breakdown (mirrors the backend). */
+  async getReportDrilldown(query: ReportDrilldownQuery): Promise<ReportDrilldownResult> {
+    const metric = query.metric;
+    const section = (query.section ?? '').trim();
+    const maskPhones = !!query.maskPhones;
+    const schoolYear = (query.schoolYear ?? '').trim();
+    const { from, to } = query;
+    const yearSection = new Map(
+      this.enrollments
+        .filter((e) => e.schoolYear === schoolYear && e.gradeSection)
+        .map((e) => [e.studentId, e.gradeSection]),
+    );
+    const secOf = (s: Student) => yearSection.get(s.id) ?? s.grade_section;
+    const dayOf = (iso: string) => iso.slice(0, 10);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const hm = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const phone = (p: string) => (maskPhones ? mockMaskPhone(p) : p);
+    const flag = (l: AttendanceLogRow) => this.flagFor(l.entry_type, new Date(l.scanned_at));
+    const parseT = (raw: string) => {
+      const [h, m] = String(raw || '').split(':').map(Number);
+      return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
+    };
+    const grace = Math.max(0, Number(this.settings.bell_grace_minutes) || 0);
+    const lateMins = this.settings.bell_time_in ? parseT(this.settings.bell_time_in)! + grace : null;
+
+    const logs = this.logs.filter((l) => dayOf(l.scanned_at) >= from && dayOf(l.scanned_at) <= to);
+    const active = this.students.filter((s) => s.is_active && (!section || secOf(s) === section));
+    const schoolDayList = [...new Set(logs.map((l) => dayOf(l.scanned_at)))];
+    const schoolDays = schoolDayList.length;
+    const toRow = (
+      s: Student,
+      value: number,
+      value2?: number,
+      value3?: number,
+      time?: string,
+    ): ReportDrilldownRow => ({
+      studentId: s.id,
+      studentNo: s.student_no,
+      fullName: s.full_name,
+      gradeSection: secOf(s),
+      parentPhone: phone(s.parent_phone),
+      value,
+      value2,
+      value3,
+      time,
+    });
+    const byName = (a: ReportDrilldownRow, b: ReportDrilldownRow) =>
+      compareGrades(a.gradeSection, b.gradeSection) || a.fullName.localeCompare(b.fullName);
+
+    let rows: ReportDrilldownRow[] = [];
+    if (metric === 'scans' || metric === 'in' || metric === 'out' || metric === 'late' || metric === 'early' || metric === 'onTime') {
+      const per = new Map<
+        number,
+        { ins: number; outs: number; late: number; early: number; onTime: number; lateMins: number; lastIn: Date | null; lastOut: Date | null }
+      >();
+      for (const l of logs) {
+        if (!active.some((s) => s.id === l.student_id)) continue;
+        const at = new Date(l.scanned_at);
+        const cur = per.get(l.student_id) ?? { ins: 0, outs: 0, late: 0, early: 0, onTime: 0, lateMins: 0, lastIn: null as Date | null, lastOut: null as Date | null };
+        if (l.entry_type === 'IN') {
+          cur.ins++;
+          if (flag(l) === 'LATE') {
+            cur.late++;
+            cur.lateMins += Math.max(0, at.getHours() * 60 + at.getMinutes() - (lateMins ?? 0));
+          } else cur.onTime++;
+          if (!cur.lastIn || at > cur.lastIn) cur.lastIn = at;
+        } else {
+          cur.outs++;
+          if (flag(l) === 'EARLY') cur.early++;
+          if (!cur.lastOut || at > cur.lastOut) cur.lastOut = at;
+        }
+        per.set(l.student_id, cur);
+      }
+      for (const s of active) {
+        const c = per.get(s.id);
+        if (!c) continue;
+        if (metric === 'scans') rows.push(toRow(s, c.ins + c.outs, c.ins, c.outs));
+        else if (metric === 'in') rows.push(toRow(s, c.ins, undefined, undefined, c.lastIn ? hm(c.lastIn) : undefined));
+        else if (metric === 'out') rows.push(toRow(s, c.outs, undefined, undefined, c.lastOut ? hm(c.lastOut) : undefined));
+        else if (metric === 'late') rows.push(toRow(s, c.late, c.lateMins));
+        else if (metric === 'early') rows.push(toRow(s, c.early));
+        else rows.push(toRow(s, c.onTime));
+      }
+      if (metric === 'in' || metric === 'out') rows.sort((a, b) => (b.time ?? '').localeCompare(a.time ?? ''));
+      else rows.sort((a, b) => b.value - a.value || byName(a, b));
+    } else if (metric === 'absent') {
+      for (const s of active) {
+        const absentDays = schoolDayList.filter(
+          (d) => !logs.some((l) => l.student_id === s.id && dayOf(l.scanned_at) === d),
+        ).length;
+        if (absentDays > 0) rows.push(toRow(s, absentDays));
+      }
+      rows.sort((a, b) => b.value - a.value || byName(a, b));
+    } else if (metric === 'present' || metric === 'attendance' || metric === 'atRisk') {
+      for (const s of active) {
+        const presentDays = new Set(logs.filter((l) => l.student_id === s.id).map((l) => dayOf(l.scanned_at))).size;
+        const rate = schoolDays > 0 ? Math.round((presentDays / schoolDays) * 1000) / 10 : undefined;
+        if (metric === 'present') {
+          if (presentDays > 0) rows.push(toRow(s, presentDays, rate));
+        } else if (metric === 'attendance') {
+          rows.push(toRow(s, presentDays, schoolDays - presentDays, rate));
+        } else if (rate !== undefined && rate < 80) {
+          rows.push(toRow(s, rate, schoolDays - presentDays));
+        }
+      }
+      if (metric === 'atRisk') rows.sort((a, b) => a.value - b.value || (b.value2 ?? 0) - (a.value2 ?? 0));
+      else if (metric === 'attendance') rows.sort((a, b) => (b.value3 ?? -1) - (a.value3 ?? -1));
+      else rows.sort((a, b) => (b.value2 ?? 0) - (a.value2 ?? 0) || byName(a, b));
+    } else if (metric === 'sms') {
+      const smsInRange = this.sms.filter((s) => dayOf(s.created_at) >= from && dayOf(s.created_at) <= to);
+      const smsForStudent = new Map<number, number>();
+      for (const sm of smsInRange) {
+        const linked = sm.attendance_id != null ? this.logs.find((l) => l.id === sm.attendance_id) : undefined;
+        const sid = linked
+          ? linked.student_id
+          : this.students.find((s) => s.is_active && s.parent_phone && s.parent_phone === sm.parent_phone)?.id;
+        if (sid) smsForStudent.set(sid, (smsForStudent.get(sid) ?? 0) + 1);
+      }
+      for (const s of active) {
+        const c = smsForStudent.get(s.id);
+        if (c) rows.push(toRow(s, c));
+      }
+      rows.sort((a, b) => b.value - a.value || byName(a, b));
+    }
+
+    return { metric, from, to, rows };
   }
 
   async exportReportPdf(report: ReportData): Promise<ExportResult> {

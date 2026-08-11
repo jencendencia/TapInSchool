@@ -16,15 +16,19 @@ import { ReportsPage } from './Reports';
 import { BadgesPage } from './Badges';
 import { AnnouncementsPage } from './Announcements';
 import { UsersPage } from './Users';
+import { VisitorsPage } from './Visitors';
+import { GuardiansPage } from './Guardians';
 import { Modal, SchoolLogo } from '../../components/shared';
 
-type Tab = 'overview' | 'students' | 'sections' | 'logs' | 'reports' | 'badges' | 'sms' | 'announcements' | 'users' | 'settings';
+type Tab = 'overview' | 'students' | 'sections' | 'logs' | 'reports' | 'badges' | 'sms' | 'announcements' | 'visitors' | 'guardians' | 'users' | 'settings';
 
 const NAV: { id: Tab; label: string; icon: string }[] = [
   { id: 'overview', label: 'Overview', icon: '📊' },
   { id: 'students', label: 'Students', icon: '🧑‍🎓' },
   { id: 'sections', label: 'Sections', icon: '🧑‍🏫' },
   { id: 'logs', label: 'Attendance Logs', icon: '🕐' },
+  { id: 'visitors', label: 'Visitors', icon: '🧑‍🤝‍🧑' },
+  { id: 'guardians', label: 'Guardians', icon: '👪' },
   { id: 'reports', label: 'Reports', icon: '📄' },
   { id: 'badges', label: 'Badges & Ranking', icon: '🏅' },
   { id: 'sms', label: 'SMS Outbox', icon: '✉' },
@@ -91,6 +95,8 @@ export function AdminDashboard({ onLogout }: { onLogout: () => void }) {
           {tab === 'students' && <StudentsPage />}
           {tab === 'sections' && <SectionsPage />}
           {tab === 'logs' && <LogsPage />}
+          {tab === 'visitors' && <VisitorsPage />}
+          {tab === 'guardians' && <GuardiansPage />}
           {tab === 'reports' && <ReportsPage />}
           {tab === 'badges' && <BadgesPage />}
 {tab === 'sms' && <SmsOutboxPage />}

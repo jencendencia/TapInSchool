@@ -10,6 +10,7 @@ import { Modal, Spinner, Toast } from '../../components/shared';
 type ModalState =
   | { type: 'add' }
   | { type: 'edit'; announcement: Announcement }
+  | { type: 'delete'; announcement: Announcement }
   | null;
 
 const EMPTY_FORM: AnnouncementInput = {
@@ -105,7 +106,7 @@ function AnnouncementForm({
           {preview ? (
             <div className="ann-preview">
               {isVideo ? (
-                <video src={preview} controls muted playsInline className="ann-preview-media" />
+                <video src={preview} controls playsInline className="ann-preview-media" />
               ) : (
                 <img src={preview} alt="Announcement preview" className="ann-preview-media" />
               )}
@@ -187,7 +188,11 @@ setIdleMin(sRes.value.announcements_idle_minutes || 1);
         await api.updateAnnouncement(modal.announcement.id, input);
         notify('Announcement updated');
       } else {
-        await api.createAnnouncement(input);
+        // New announcements go to the END of the carousel: an explicit
+        // sort_order (max + 1) so earlier reorders are not undone by the
+        // default id tie-break (fresh rows all start at sort_order 0).
+        const nextOrder = (list?.length ? Math.max(0, ...list.map((a) => a.sort_order)) : -1) + 1;
+        await api.createAnnouncement({ ...input, sort_order: nextOrder });
         notify('Announcement added');
       }
       setModal(null);
@@ -198,10 +203,29 @@ setIdleMin(sRes.value.announcements_idle_minutes || 1);
   };
 
   const removeAnnouncement = async (a: Announcement) => {
-    if (!window.confirm(`Delete announcement "${a.title || '(untitled)'}"?`)) return;
     try {
       await api.deleteAnnouncement(a.id);
       notify('Announcement deleted');
+      setModal(null);
+      load();
+    } catch (err) {
+      notify(`Error: ${(err as Error).message}`, 'error');
+    }
+  };
+
+  // Reorder by rewriting a sequential sort_order (0, 1, 2, …) across the list
+  // and swapping the two affected rows. The stored values are not guaranteed
+  // distinct — every new announcement starts at sort_order 0 — so a plain
+  // value swap between equal numbers would be a no-op; rewriting the whole
+  // list both normalizes the ordering and applies the move in one step.
+  const moveAnnouncement = async (index: number, dir: -1 | 1) => {
+    const target = index + dir;
+    if (!list || target < 0 || target >= list.length) return;
+    const ids = list.map((a) => a.id);
+    [ids[index], ids[target]] = [ids[target], ids[index]];
+    try {
+      await Promise.all(ids.map((id, i) => api.updateAnnouncement(id, { sort_order: i })));
+      notify('Announcement reordered');
       load();
     } catch (err) {
       notify(`Error: ${(err as Error).message}`, 'error');
@@ -312,7 +336,7 @@ const saveSlideSeconds = async () => {
             </tr>
           </thead>
           <tbody>
-            {list.map((a) => (
+            {list.map((a, idx) => (
               <tr key={a.id}>
                 <td className="ann-title">{a.title || '(untitled)'}</td>
                 <td className="ann-msg">{a.content_text || '—'}</td>
@@ -332,11 +356,17 @@ const saveSlideSeconds = async () => {
                 </td>
                 <td>
                   <div className="row-actions">
+                    <button className="btn-icon" title="Move up" disabled={idx === 0} onClick={() => void moveAnnouncement(idx, -1)}>
+                      ↑
+                    </button>
+                    <button className="btn-icon" title="Move down" disabled={idx === list.length - 1} onClick={() => void moveAnnouncement(idx, 1)}>
+                      ↓
+                    </button>
                     <button className="btn-icon" title={a.is_active ? 'Hide' : 'Show'} onClick={() => void toggleActive(a)}>
                       {a.is_active ? '🙈' : '👁'}
                     </button>
                     <button className="btn-icon" title="Edit" onClick={() => setModal({ type: 'edit', announcement: a })}>✎</button>
-                    <button className="btn-icon danger" title="Delete" onClick={() => void removeAnnouncement(a)}>🗑</button>
+                    <button className="btn-icon danger" title="Delete" onClick={() => setModal({ type: 'delete', announcement: a })}>🗑</button>
                   </div>
                 </td>
               </tr>
@@ -372,6 +402,18 @@ const saveSlideSeconds = async () => {
             onSave={(i) => void saveAnnouncement(i)}
             onCancel={() => setModal(null)}
           />
+        </Modal>
+      )}
+      {modal?.type === 'delete' && (
+        <Modal title="Delete announcement" closeOnOverlay={false} onClose={() => setModal(null)}>
+          <p className="text-dim" style={{ marginBottom: 18 }}>
+            Are you sure you want to delete <strong style={{ color: 'var(--text)' }}>"{modal.announcement.title || '(untitled)'}"</strong>?
+            This will remove it from the kiosk idle slideshow and cannot be undone.
+          </p>
+          <div className="form-actions">
+            <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+            <button className="btn-danger" onClick={() => void removeAnnouncement(modal.announcement)}>Delete announcement</button>
+          </div>
         </Modal>
       )}
 

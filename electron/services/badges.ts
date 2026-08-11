@@ -384,12 +384,30 @@ export async function recomputeAllBadges(): Promise<number> {
 }
 
 // ---- Reads / writes for the admin + leaderboard ----------------------------
-export async function listBadges(schoolYear?: string): Promise<Badge[]> {
+export async function listBadges(schoolYear?: string, from?: string, to?: string): Promise<Badge[]> {
   await ensureBadgeTables();
   const year = schoolYear ?? (await currentSchoolYearName());
+  const fromF = (from ?? '').trim();
+  const toF = (to ?? '').trim();
+  // Optional earned-date range (inclusive YYYY-MM-DD; empty = no filter). The
+  // clauses are built conditionally because MySQL coerces '' into a DATE for
+  // `DATE(earned_at) >= ?` and would error on an empty string, even under an
+  // `? = '' OR …` guard.
+  const dateFilters: string[] = [];
+  const params: unknown[] = [year];
+  if (fromF) {
+    dateFilters.push('DATE(earned_at) >= ?');
+    params.push(fromF);
+  }
+  if (toF) {
+    dateFilters.push('DATE(earned_at) <= ?');
+    params.push(toF);
+  }
   const rows = await db.query<BadgeRow[]>(
-    'SELECT * FROM student_badges WHERE school_year = ? ORDER BY week_start DESC, badge_code',
-    [year],
+    `SELECT * FROM student_badges WHERE school_year = ?
+     ${dateFilters.length ? `AND ${dateFilters.join(' AND ')}` : ''}
+     ORDER BY week_start DESC, badge_code`,
+    params,
   );
   return rows.map(toBadge);
 }
@@ -397,15 +415,39 @@ export async function listBadges(schoolYear?: string): Promise<Badge[]> {
 /** Ranking of badge-earning students (highest score first). Sections resolve
  *  through the selected school year's enrollments (falling back to the live
  *  section) so past-year rankings match how that year's classes were grouped. */
-export async function badgeLeaderboard(topN = 10, section?: string, schoolYear?: string): Promise<BadgeLeaderboardRow[]> {
+export async function badgeLeaderboard(
+  topN = 10,
+  section?: string,
+  schoolYear?: string,
+  from?: string,
+  to?: string,
+): Promise<BadgeLeaderboardRow[]> {
   await ensureBadgeTables();
   const year = schoolYear ?? (await currentSchoolYearName());
   const sectionFilter = (section ?? '').trim();
+  const fromF = (from ?? '').trim();
+  const toF = (to ?? '').trim();
   // Points live in BADGE_INFO (shared/types.ts) — generate the SQL CASE from
   // it so the leaderboard score can never drift from the badge catalog.
   const scoreCase = (Object.keys(BADGE_INFO) as BadgeCode[])
     .map((code) => `WHEN '${code}' THEN ${BADGE_INFO[code].points}`)
     .join(' ');
+  // The optional earned-date range narrows WHICH badges count (and therefore
+  // the ranking + score); it lives in the JOIN so students with no badges in
+  // the range simply drop out via HAVING. Clauses are appended conditionally
+  // (MySQL can't coerce '' into a DATE for the comparisons, see listBadges).
+  const badgeJoins: string[] = [];
+  const params: unknown[] = [year, year];
+  if (fromF) {
+    badgeJoins.push('DATE(b.earned_at) >= ?');
+    params.push(fromF);
+  }
+  if (toF) {
+    badgeJoins.push('DATE(b.earned_at) <= ?');
+    params.push(toF);
+  }
+  const badgeJoinSql = badgeJoins.length ? `AND ${badgeJoins.join(' AND ')}` : '';
+  params.push(sectionFilter, sectionFilter, Math.max(1, Number(topN) || 10));
   return db.query<BadgeLeaderboardRow[]>(
     `SELECT s.id studentId,
             COALESCE(e.grade_section, s.grade_section) gradeSection,
@@ -418,13 +460,14 @@ export async function badgeLeaderboard(topN = 10, section?: string, schoolYear?:
      FROM students s
      LEFT JOIN enrollments e ON e.student_id = s.id AND e.school_year = ?
      LEFT JOIN student_badges b ON b.student_id = s.id AND b.school_year = ?
+       ${badgeJoinSql}
      WHERE s.is_active = 1
        AND (? = '' OR COALESCE(e.grade_section, s.grade_section) = ?)
      GROUP BY s.id, s.full_name, s.grade_section, s.student_no, e.grade_section
      HAVING badgeCount > 0
      ORDER BY score DESC, badgeCount DESC, s.full_name ASC
      LIMIT ?`,
-    [year, year, sectionFilter, sectionFilter, Math.max(1, Number(topN) || 10)],
+    params,
   );
 }
 

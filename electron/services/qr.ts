@@ -56,6 +56,16 @@ export function generateGuardianPayload(
   return `GP-${year}-${checkCode(`${identity}::${secret}`, 6)}`;
 }
 
+/**
+ * Visitor QR payload (VP-<YEAR>-<id><check>). Distinct prefix from CP
+ * (student) and GP (guardian) so codes never collide. Derived from the
+ * visitor's DB id so the same visitor always gets the same QR across visits.
+ */
+export function generateVisitorPayload(visitorId: number, secret: string = getQrSecret()): string {
+  const year = new Date().getFullYear();
+  return `VP-${year}-${visitorId}${checkCode(`VISITOR::${visitorId}::${secret}`)}`;
+}
+
 export function maskPhone(phone: string): string {
   const digits = phone.replace(/\D/g, '');
   if (digits.length < 7) return phone;

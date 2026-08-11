@@ -3,12 +3,15 @@
 // absentee list, tardiness, SMS audit and trends — each exportable as PDF,
 // styled Excel, or emailed as a PDF attachment.
 import { useCallback, useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
 import type {
   AdviserSendResult,
   ExportResult,
   GateHourTrend,
   RegisterRow,
   ReportData,
+  ReportDrilldownMetric,
+  ReportDrilldownRow,
   ReportType,
   Student,
 } from '../../../shared/types';
@@ -51,12 +54,38 @@ function pct(v: number | null): string {
   return v === null ? '—' : `${v.toFixed(1)}%`;
 }
 
-function StatCard({ label, value, accent, hint }: { label: string; value: number | string; accent: string; hint?: string }) {
-  return (
-    <div className="stat-card" title={hint}>
+function StatCard({
+  label,
+  value,
+  accent,
+  hint,
+  onClick,
+}: {
+  label: string;
+  value: number | string;
+  accent: string;
+  hint?: string;
+  /** When set, the card becomes a button that opens the metric's drilldown. */
+  onClick?: () => void;
+}) {
+  const body = (
+    <>
       <div className="stat-label text-dim">{label}</div>
       <div className="stat-value" style={{ color: accent }}>{value}</div>
-    </div>
+      {onClick && <div className="stat-view">View students ↗</div>}
+    </>
+  );
+  if (!onClick) {
+    return (
+      <div className="stat-card" title={hint}>
+        {body}
+      </div>
+    );
+  }
+  return (
+    <button className="stat-card stat-card-clickable" title={hint} onClick={onClick}>
+      {body}
+    </button>
   );
 }
 
@@ -70,26 +99,163 @@ function RateBar({ rate }: { rate: number | null }) {
   );
 }
 
+// ---- Summary-card drilldowns (click a stat card → who is behind it?) --------
+
+const DRILL_META: Record<ReportDrilldownMetric, { title: string; subtitle: string }> = {
+  scans: { title: 'All scans by student', subtitle: 'Scan totals per student — IN / OUT breakdown' },
+  in: { title: 'Checked-in students', subtitle: 'Students with at least one IN scan' },
+  out: { title: 'Checked-out students', subtitle: 'Students with at least one OUT scan' },
+  late: { title: 'Late arrivals', subtitle: 'Students with flagged-late IN scans (after the late cutoff)' },
+  early: { title: 'Early departures', subtitle: 'Students with flagged-early OUT scans (before dismissal)' },
+  absent: { title: 'Absent students', subtitle: 'Active students with zero scans on school days in the range' },
+  present: { title: 'Students present', subtitle: 'Students with at least one scan in the range' },
+  sms: { title: 'Students with SMS alerts', subtitle: 'Parent-alert texts sent per student in the range' },
+  attendance: { title: 'Attendance rate per student', subtitle: 'Present vs absent school days — the rate denominator is school days in range' },
+  onTime: { title: 'On-time arrivals', subtitle: 'Students with at least one IN scan at/before the late cutoff' },
+  atRisk: { title: 'At-risk students (<80%)', subtitle: 'Active students below the DepEd 80% attendance threshold, worst first' },
+  ada: { title: 'Average daily attendance — day by day', subtitle: 'Per-day presence driving the ADA figure' },
+};
+
+/** Column spec per metric — the backend fills value/value2/value3/time and the
+ *  UI decides what each column means, so semantics live in exactly one place. */
+const DRILL_COLUMNS: Record<
+  ReportDrilldownMetric,
+  { label: string; className?: string; render: (r: ReportDrilldownRow) => ReactNode }[]
+> = {
+  scans: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'IN', className: 'num', render: (r) => <span style={{ color: '#34D399' }}>{r.value2}</span> },
+    { label: 'OUT', className: 'num', render: (r) => <span style={{ color: '#A5B4FC' }}>{r.value3}</span> },
+    { label: 'Total', className: 'num', render: (r) => <b>{r.value}</b> },
+  ],
+  in: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'IN scans', className: 'num', render: (r) => <span style={{ color: '#34D399' }}>{r.value}</span> },
+    { label: 'Last IN', className: 'mono', render: (r) => r.time ?? '—' },
+  ],
+  out: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'OUT scans', className: 'num', render: (r) => <span style={{ color: '#A5B4FC' }}>{r.value}</span> },
+    { label: 'Last OUT', className: 'mono', render: (r) => r.time ?? '—' },
+  ],
+  late: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'Times late', className: 'num', render: (r) => <span style={{ color: '#F59E0B' }}>{r.value}</span> },
+    { label: 'Min late', className: 'num', render: (r) => r.value2 ?? 0 },
+    { label: 'Phone', className: 'mono', render: (r) => r.parentPhone || '—' },
+  ],
+  early: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'Times early', className: 'num', render: (r) => <span style={{ color: '#38BDF8' }}>{r.value}</span> },
+    { label: 'Phone', className: 'mono', render: (r) => r.parentPhone || '—' },
+  ],
+  absent: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'Days absent', className: 'num', render: (r) => <span style={{ color: '#F43F5E' }}>{r.value}</span> },
+    { label: 'Phone', className: 'mono', render: (r) => r.parentPhone || '—' },
+  ],
+  present: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'Present days', className: 'num', render: (r) => <span style={{ color: '#34D399' }}>{r.value}</span> },
+    { label: 'Rate', render: (r) => (r.value2 === undefined ? '—' : <RateBar rate={r.value2} />) },
+  ],
+  sms: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'SMS alerts', className: 'num', render: (r) => <span style={{ color: '#A5B4FC' }}>{r.value}</span> },
+    { label: 'Phone', className: 'mono', render: (r) => r.parentPhone || '—' },
+  ],
+  attendance: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'Present', className: 'num', render: (r) => <span style={{ color: '#34D399' }}>{r.value}</span> },
+    { label: 'Absent', className: 'num', render: (r) => <span style={{ color: '#FB7185' }}>{r.value2}</span> },
+    { label: 'Rate', render: (r) => (r.value3 === undefined ? '—' : <RateBar rate={r.value3} />) },
+  ],
+  onTime: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'On-time IN', className: 'num', render: (r) => <span style={{ color: '#A3E635' }}>{r.value}</span> },
+  ],
+  atRisk: [
+    { label: 'Student', render: (r) => <StudentCell row={r} /> },
+    { label: 'Section', render: (r) => r.gradeSection || '—' },
+    { label: 'Rate', className: 'num', render: (r) => <span style={{ color: '#FB7185' }}>{pct(r.value)}</span> },
+    { label: 'Absent days', className: 'num', render: (r) => r.value2 ?? 0 },
+    { label: 'Phone', className: 'mono', render: (r) => r.parentPhone || '—' },
+  ],
+  ada: [],
+};
+
+function StudentCell({ row }: { row: ReportDrilldownRow }) {
+  return (
+    <>
+      <div className="reg-name">{row.fullName}</div>
+      <div className="reg-sub mono">{row.studentNo}</div>
+    </>
+  );
+}
+
+/** Per-day presence table behind the "Avg daily attendance" card. */
+function DailyDrillTable({ report }: { report: ReportData }) {
+  const s = report.summary;
+  return (
+    <div className="table-wrap">
+      <table className="table">
+        <thead>
+          <tr><th>Day</th><th>Scans</th><th>IN</th><th>OUT</th><th>Present</th><th>Absent</th><th>Day rate</th></tr>
+        </thead>
+        <tbody>
+          {report.daily.map((d) => {
+            const rate = d.scans > 0 && s.activeStudents > 0 ? (d.present / s.activeStudents) * 100 : null;
+            return (
+              <tr key={d.day}>
+                <td className="mono">{d.day}</td>
+                <td className="num">{d.scans}</td>
+                <td className="num" style={{ color: '#34D399' }}>{d.in}</td>
+                <td className="num" style={{ color: '#A5B4FC' }}>{d.out}</td>
+                <td className="num">{d.present}</td>
+                <td className="num" style={{ color: '#FB7185' }}>{d.absent}</td>
+                <td>{rate === null ? '—' : pct(rate)}</td>
+              </tr>
+            );
+          })}
+          {report.daily.length === 0 && (
+            <tr><td colSpan={7} className="empty-cell">No data in the selected range.</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ---- Per-type views --------------------------------------------------------
 
-function SummaryView({ report }: { report: ReportData }) {
+function SummaryView({ report, onCardClick }: { report: ReportData; onCardClick: (m: ReportDrilldownMetric) => void }) {
   const s = report.summary;
   return (
     <>
       <div className="stat-grid">
-        <StatCard label="Scans" value={s.scans} accent="#E2E8F0" />
-        <StatCard label="Checked IN" value={s.in} accent="#10B981" />
-        <StatCard label="Checked OUT" value={s.out} accent="#6366F1" />
-        <StatCard label="Late arrivals" value={s.late} accent="#F59E0B" />
-        <StatCard label="Early departures" value={s.early} accent="#38BDF8" />
-        <StatCard label="Absent (records)" value={s.absent} accent="#F43F5E" />
-        <StatCard label="Students present" value={s.present} accent="#34D399" />
-        <StatCard label="SMS sent" value={s.smsSent} accent="#A5B4FC" />
-        <StatCard label="Attendance rate" value={pct(s.attendanceRate)} accent="#34D399" hint="Σ daily present ÷ (active students × school days)" />
-        <StatCard label="Avg daily attendance" value={s.ada === null ? '—' : s.ada.toFixed(1)} accent="#2DD4BF" />
-        <StatCard label="On-time IN" value={`${s.onTime} (${pct(s.onTimePct)})`} accent="#A3E635" />
-        <StatCard label="Late IN" value={`${s.late} (${pct(s.latePct)})`} accent="#F59E0B" hint="% of IN scans after the late cutoff" />
-        <StatCard label="At-risk (<80%)" value={s.atRiskCount} accent={s.atRiskCount > 0 ? '#FB7185' : '#A5B4FC'} hint="Active students below the 80% attendance threshold" />
+        <StatCard label="Scans" value={s.scans} accent="#E2E8F0" onClick={() => onCardClick('scans')} />
+        <StatCard label="Checked IN" value={s.in} accent="#10B981" onClick={() => onCardClick('in')} />
+        <StatCard label="Checked OUT" value={s.out} accent="#6366F1" onClick={() => onCardClick('out')} />
+        <StatCard label="Late arrivals" value={s.late} accent="#F59E0B" onClick={() => onCardClick('late')} />
+        <StatCard label="Early departures" value={s.early} accent="#38BDF8" onClick={() => onCardClick('early')} />
+        <StatCard label="Absent (records)" value={s.absent} accent="#F43F5E" onClick={() => onCardClick('absent')} />
+        <StatCard label="Students present" value={s.present} accent="#34D399" onClick={() => onCardClick('present')} />
+        <StatCard label="SMS sent" value={s.smsSent} accent="#A5B4FC" onClick={() => onCardClick('sms')} />
+        <StatCard label="Attendance rate" value={pct(s.attendanceRate)} accent="#34D399" hint="Σ daily present ÷ (active students × school days)" onClick={() => onCardClick('attendance')} />
+        <StatCard label="Avg daily attendance" value={s.ada === null ? '—' : s.ada.toFixed(1)} accent="#2DD4BF" onClick={() => onCardClick('ada')} />
+        <StatCard label="On-time IN" value={`${s.onTime} (${pct(s.onTimePct)})`} accent="#A3E635" onClick={() => onCardClick('onTime')} />
+        <StatCard label="Late IN" value={`${s.late} (${pct(s.latePct)})`} accent="#F59E0B" hint="% of IN scans after the late cutoff" onClick={() => onCardClick('late')} />
+        <StatCard label="At-risk (<80%)" value={s.atRiskCount} accent={s.atRiskCount > 0 ? '#FB7185' : '#A5B4FC'} hint="Active students below the 80% attendance threshold" onClick={() => onCardClick('atRisk')} />
       </div>
       <p className="field-hint" style={{ marginTop: 8 }}>
         {s.schoolDays} school day{s.schoolDays === 1 ? '' : 's'} (gate used) · {s.activeStudents} active student{s.activeStudents === 1 ? '' : 's'} — denominators for the rates above.
@@ -579,6 +745,29 @@ export function ReportsPage() {
   const [toast, setToast] = useState<{ message: string; tone: 'success' | 'error' } | null>(null);
   const [sendResult, setSendResult] = useState<AdviserSendResult | null>(null);
 
+  // Summary stat-card drilldown (click a card → who is behind this number?).
+  const [drill, setDrill] = useState<ReportDrilldownMetric | null>(null);
+  const [drillRows, setDrillRows] = useState<ReportDrilldownRow[] | null>(null);
+  const [drillLoading, setDrillLoading] = useState(false);
+  const [drillError, setDrillError] = useState<string | null>(null);
+
+  const openDrilldown = useCallback(
+    (metric: ReportDrilldownMetric) => {
+      setDrill(metric);
+      setDrillRows(null);
+      setDrillError(null);
+      // The ADA card reads straight from the already-loaded daily table.
+      if (metric === 'ada') return;
+      setDrillLoading(true);
+      api
+        .getReportDrilldown({ metric, from, to, section, schoolYear: year, maskPhones })
+        .then((r) => setDrillRows(r.rows))
+        .catch((err) => setDrillError((err as Error).message || 'Could not load the details.'))
+        .finally(() => setDrillLoading(false));
+    },
+    [from, to, section, year, maskPhones],
+  );
+
   // Student picker for the 'student' record report — all students, with their
   // section resolved from the selected school year's enrollments (falling back
   // to the live section, same as the report loader).
@@ -768,7 +957,7 @@ export function ReportsPage() {
 
       {report && s && (
         <div className={loading ? 'report-loading' : undefined}>
-          {type === 'summary' && <SummaryView report={report} />}
+          {type === 'summary' && <SummaryView report={report} onCardClick={openDrilldown} />}
           {type === 'register' && <RegisterView report={report} />}
           {type === 'per-student' && <PerStudentView report={report} />}
           {type === 'per-section' && <PerSectionView report={report} />}
@@ -778,6 +967,54 @@ export function ReportsPage() {
           {type === 'sms-audit' && <SmsAuditView report={report} />}
           {type === 'trends' && <TrendsView report={report} />}
         </div>
+      )}
+
+      {drill && report && (
+        <Modal title={DRILL_META[drill].title} onClose={() => setDrill(null)} wide>
+          <p className="text-dim" style={{ marginTop: 0 }}>
+            {DRILL_META[drill].subtitle} · {report.from} → {report.to}
+            {section ? ` · ${section}` : ''}
+            {year ? ` · ${year}` : ''}
+          </p>
+          {drill === 'ada' ? (
+            <DailyDrillTable report={report} />
+          ) : drillLoading ? (
+            <Spinner label="Loading…" />
+          ) : drillError ? (
+            <div className="report-error">⚠ {drillError}</div>
+          ) : drillRows && drillRows.length === 0 ? (
+            <div className="report-empty">
+              No students for this metric in the selected range.{' '}
+              Try widening the date range or clearing the section filter.
+            </div>
+          ) : drillRows ? (
+            <>
+              <p className="field-hint" style={{ marginTop: 0, marginBottom: 10 }}>
+                {drillRows.length} student{drillRows.length === 1 ? '' : 's'}
+              </p>
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      {DRILL_COLUMNS[drill].map((c) => (
+                        <th key={c.label} className={c.className}>{c.label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {drillRows.map((r) => (
+                      <tr key={r.studentId}>
+                        {DRILL_COLUMNS[drill].map((c, i) => (
+                          <td key={i} className={c.className}>{c.render(r)}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+        </Modal>
       )}
 
       {sendResult && (

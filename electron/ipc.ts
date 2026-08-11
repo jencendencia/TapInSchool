@@ -30,7 +30,24 @@ import {
   removeExcuse,
 } from './services/badges';
 import { generateGuardianPayload, generatePayload } from './services/qr';
-import { getReportData } from './services/report';
+import {
+  createGuardian,
+  deleteGuardian,
+  findGuardianById,
+  findGuardiansByName,
+  findOrCreateGuardian,
+  listGuardians,
+  updateGuardian,
+} from './services/guardians';
+import {
+  createVisitor,
+  deleteVisitor,
+  listAllVisitorLogs,
+  listVisitorLogs,
+  listVisitors,
+  updateVisitor,
+} from './services/visitors';
+import { getReportData, getReportDrilldown } from './services/report';
 import { exportReportToPdf } from './services/report-pdf';
 import { buildReportWorkbook } from './services/report-export';
 import { sendAdviserReportEmails, sendReportEmail, sendTestEmail } from './services/report-email';
@@ -50,11 +67,16 @@ import type {
   Excuse,
   ExcuseCategory,
   ExportResult,
+  Guardian,
+  GuardianInput,
+  GuardianWriteResult,
   ImportResult,
   LogFilter,
   LoginResult,
   OverviewStats,
   ReportData,
+  ReportDrilldownQuery,
+  ReportDrilldownResult,
   ReportQuery,
   ScanMode,
   ScanResult,
@@ -72,6 +94,9 @@ import type {
   SystemStatus,
   User,
   UserInput,
+  Visitor,
+  VisitorInput,
+  VisitorLogRow,
 } from '../shared/types';
 
 interface ScannerHook {
@@ -318,13 +343,28 @@ export function registerIpc(scanner: ScannerHook): void {
     // Auto-generate the student number when the Add form leaves it blank.
     const studentNo = String(input.student_no ?? '').trim() || (await generateStudentNo());
     const payload = generatePayload(studentNo);
-    // A guardian QR is only issued once a guardian is named — it resolves to
-    // the day report(s) at the kiosk (never an attendance toggle). The payload
-    // hashes the guardian identity, so children sharing the same name +
-    // address share ONE guardian QR.
-    const guardianName = String(input.guardian_name ?? '').trim();
-    const guardianAddress = String(input.guardian_address ?? '').trim();
-    const guardianPayload = guardianName ? generateGuardianPayload(guardianName, guardianAddress) : null;
+    // Guardian snapshot: the new student form links a registered guardian (the
+    // dropdown). When present, the guardian's identity is copied onto the
+    // student (SMS number, name, address, QR); otherwise fall back to the
+    // legacy free-text fields (CSV import / older clients). The QR payload
+    // hashes the guardian identity, so children sharing a guardian share one QR.
+    let guardianId: number | null = null;
+    let guardianName = String(input.guardian_name ?? '').trim();
+    let guardianAddress = String(input.guardian_address ?? '').trim();
+    let guardianPhone = String(input.parent_phone ?? '').trim();
+    let guardianPayload: string | null = null;
+    if (input.guardian_id) {
+      const g = await findGuardianById(Number(input.guardian_id));
+      if (!g) throw new Error('Selected guardian no longer exists.');
+      guardianId = g.id;
+      guardianName = g.full_name;
+      guardianAddress = g.address;
+      guardianPhone = g.mobile;
+      guardianPayload = g.qr_hash_payload;
+    }
+    if (!guardianPayload && guardianName) {
+      guardianPayload = generateGuardianPayload(guardianName, guardianAddress);
+    }
     // students.grade_section is the CURRENT year's live section — a student
     // enrolled into a past year starts unassigned this year.
     const [cur] = await db.query<{ name: string }[]>(
@@ -337,20 +377,21 @@ export function registerIpc(scanner: ScannerHook): void {
     const liveSection = yearRow?.is_current ? String(input.grade_section ?? '').trim() : '';
     const res = await db.execute(
       `INSERT INTO students (student_no, qr_hash_payload, full_name, gender, grade_section, parent_phone,
-                             lrn, guardian_name, guardian_address, guardian_qr_hash_payload,
+                             lrn, guardian_name, guardian_address, guardian_qr_hash_payload, guardian_id,
                              photo_url, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         studentNo,
         payload,
         input.full_name,
         normalizeGender(input.gender),
         liveSection,
-        input.parent_phone || '',
+        guardianPhone,
         String(input.lrn ?? '').trim(),
         guardianName,
-        String(input.guardian_address ?? '').trim(),
+        guardianAddress,
         guardianPayload,
+        guardianId,
         input.photo_url || null,
         input.is_active ?? true,
       ],
@@ -368,6 +409,10 @@ export function registerIpc(scanner: ScannerHook): void {
     // Partial semantics: only the keys actually provided are updated, so a
     // caller like the Sections roster can safely send { grade_section: '' }
     // without wiping the student's other fields. Matches the mock's merge.
+    // When the form sends guardian_id, the guardian snapshot (phone/name/
+    // address/QR) is derived from the registry row — the legacy free-text
+    // fields are then ignored for that update.
+    const usesGuardianLink = 'guardian_id' in input;
     const sets: string[] = [];
     const params: unknown[] = [];
     const add = (col: string, key: keyof StudentInput, fallback: unknown) => {
@@ -378,20 +423,40 @@ export function registerIpc(scanner: ScannerHook): void {
     };
     add('student_no', 'student_no', '');
     add('full_name', 'full_name', '');
-    add('parent_phone', 'parent_phone', '');
     add('lrn', 'lrn', '');
-    add('guardian_name', 'guardian_name', '');
-    add('guardian_address', 'guardian_address', '');
     add('photo_url', 'photo_url', null);
     add('is_active', 'is_active', true);
+    // Legacy free-text guardian fields — skipped when the form sends
+    // guardian_id (the registry link wins and the snapshot is derived below).
+    if (!usesGuardianLink) {
+      add('parent_phone', 'parent_phone', '');
+      add('guardian_name', 'guardian_name', '');
+      add('guardian_address', 'guardian_address', '');
+    }
     if ('gender' in input) {
       sets.push('gender = ?');
       params.push(normalizeGender(input.gender));
     }
-    // Guardian QR lifecycle: the payload is a hash of the guardian identity
-    // (name + address), so changing either field re-issues the QR; clearing the
-    // name removes it. Children sharing the identity share the same QR.
-    if ('guardian_name' in input || 'guardian_address' in input) {
+    // Guardian link lifecycle: linking a guardian copies its identity onto the
+    // student; passing guardian_id: null clears the link (and with it the SMS
+    // number + guardian QR — no guardian, no alerts).
+    if (usesGuardianLink) {
+      const gid = input.guardian_id ? Number(input.guardian_id) : null;
+      if (gid && Number.isInteger(gid)) {
+        const g = await findGuardianById(gid);
+        if (!g) throw new Error('Selected guardian no longer exists.');
+        sets.push('guardian_id = ?', 'parent_phone = ?', 'guardian_name = ?', 'guardian_address = ?', 'guardian_qr_hash_payload = ?');
+        params.push(g.id, g.mobile, g.full_name, g.address, g.qr_hash_payload);
+      } else {
+        sets.push('guardian_id = NULL', 'parent_phone = ?', 'guardian_name = ?', 'guardian_address = ?', 'guardian_qr_hash_payload = NULL');
+        params.push('', '', '');
+      }
+    }
+    // Legacy Guardian QR lifecycle: the payload is a hash of the guardian
+    // identity (name + address), so changing either field re-issues the QR;
+    // clearing the name removes it. Children sharing the identity share the
+    // same QR. Skipped when the form used the registry dropdown instead.
+    if (!usesGuardianLink && ('guardian_name' in input || 'guardian_address' in input)) {
       const [existing] = await db.query<{ guardian_name: string; guardian_address: string }[]>(
         'SELECT guardian_name, guardian_address FROM students WHERE id = ?',
         [id],
@@ -445,6 +510,38 @@ export function registerIpc(scanner: ScannerHook): void {
 
   ipcMain.handle('tapin:generateQrPayload', (_e, studentNo: string): string => {
     return generatePayload(studentNo);
+  });
+
+  // ---- Guardians (registry + duplicate-name registration flow) -------------
+  ipcMain.handle('tapin:listGuardians', async (_e, search?: string): Promise<Guardian[]> => {
+    return listGuardians(search);
+  });
+
+  ipcMain.handle('tapin:findGuardiansByName', async (_e, name: string): Promise<Guardian[]> => {
+    return findGuardiansByName(name);
+  });
+
+  ipcMain.handle(
+    'tapin:createGuardian',
+    async (_e, input: GuardianInput, opts?: { allowSameName?: boolean }): Promise<GuardianWriteResult> => {
+      return createGuardian(input, opts);
+    },
+  );
+
+  ipcMain.handle(
+    'tapin:updateGuardian',
+    async (
+      _e,
+      id: number,
+      patch: Partial<GuardianInput & { is_active?: boolean }>,
+      opts?: { allowSameName?: boolean },
+    ): Promise<GuardianWriteResult> => {
+      return updateGuardian(id, patch, opts);
+    },
+  );
+
+  ipcMain.handle('tapin:deleteGuardian', async (_e, id: number): Promise<void> => {
+    return deleteGuardian(id);
   });
 
   // ---- Sections (registry wired to the Students page + report emailing) ----
@@ -668,9 +765,13 @@ export function registerIpc(scanner: ScannerHook): void {
         sets.push('sort_order = ?');
         params.push(input.sort_order ?? 0);
       }
-// Media replacement: persist the new file, drop the old one, update the URL.
-      if (input?.media) {
-        const dataUrl = String(input.media);
+// Media replacement: persist a NEWLY uploaded file (a data URI), drop the
+      // old one, and update the URL. The edit form sends back the existing
+      // media URL (tapin-media://…) unchanged when the admin didn't touch it —
+      // that is NOT a new upload, so it must not be re-persisted (saveMedia
+      // only accepts data URIs).
+      if (input?.media && typeof input.media === 'string' && input.media.startsWith('data:')) {
+        const dataUrl = input.media;
         const [old] = await db.query<AnnouncementRow[]>(
           'SELECT media_url FROM announcements WHERE id = ?',
           [id],
@@ -824,24 +925,36 @@ export function registerIpc(scanner: ScannerHook): void {
         const payload = generatePayload(studentNo);
         // Guardian QR is issued only when a guardian name is present (same rule
         // as the Add/Edit form); it hashes the guardian identity so shared
-        // guardians reuse one QR.
+        // guardians reuse one QR. Rows that name a guardian AUTO-REGISTER it
+        // in the guardians registry (find-or-create by name + address) and
+        // link the student — bulk import runs no duplicate-name prompt.
         const gName = String(guardianName ?? '').trim();
         const gAddress = String(guardianAddress ?? '').trim();
+        let guardianId: number | null = null;
+        let guardianPhone = parentPhone || '';
+        let guardianQr: string | null = gName ? generateGuardianPayload(gName, gAddress) : null;
+        if (gName) {
+          const g = await findOrCreateGuardian(gName, gAddress, parentPhone || '');
+          guardianId = g.id;
+          guardianPhone = g.mobile;
+          guardianQr = g.qr_hash_payload;
+        }
         const res = await db.execute(
           `INSERT INTO students (student_no, qr_hash_payload, full_name, gender, grade_section, parent_phone,
-                                 lrn, guardian_name, guardian_address, guardian_qr_hash_payload)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                 lrn, guardian_name, guardian_address, guardian_qr_hash_payload, guardian_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             studentNo,
             payload,
             fullName,
             normalizeGender(gender),
             gradeSection || '',
-            parentPhone || '',
+            guardianPhone,
             String(lrn ?? '').trim(),
             gName,
             gAddress,
-            gName ? generateGuardianPayload(gName, gAddress) : null,
+            guardianQr,
+            guardianId,
           ],
         );
         if (gradeSection) await syncEnrollment(res.insertId, gradeSection);
@@ -976,6 +1089,12 @@ export function registerIpc(scanner: ScannerHook): void {
   });
 
   // ---- SMS outbox ----------------------------------------------------------
+  // Resolves the Student name for messages without a linked scan (nightly
+  // absence alerts insert sms_logs rows with attendance_id = NULL): fall back
+  // to any active student whose phone matches the recipient. Used in both the
+  // row SELECT and the search WHERE so the two can never drift.
+  const studentNameFallback = `COALESCE(s.full_name,
+    (SELECT full_name FROM students WHERE parent_phone = sm.parent_phone AND is_active = 1 ORDER BY id LIMIT 1))`;
   ipcMain.handle('tapin:listSms', async (_e, filter: SmsFilter = {}): Promise<{ rows: SmsLogRow[]; total: number }> => {
     const where: string[] = [];
     const params: unknown[] = [];
@@ -985,8 +1104,18 @@ export function registerIpc(scanner: ScannerHook): void {
     }
     if (filter.search) {
       const like = `%${filter.search}%`;
-      where.push('(s.full_name LIKE ? OR sm.parent_phone LIKE ?)');
+      // Names resolve through the attendance join OR, for messages with no
+      // linked scan (nightly absence alerts), by the recipient phone number.
+      where.push(`(${studentNameFallback} LIKE ? OR sm.parent_phone LIKE ?)`);
       params.push(like, like);
+    }
+    if (filter.from) {
+      where.push('sm.created_at >= ?');
+      params.push(`${filter.from} 00:00:00`);
+    }
+    if (filter.to) {
+      where.push('sm.created_at <= ?');
+      params.push(`${filter.to} 23:59:59`);
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const limit = Math.min(filter.limit ?? 50, 500);
@@ -1000,7 +1129,8 @@ export function registerIpc(scanner: ScannerHook): void {
     const rows = await db.query<SmsLogRow[]>(
       `SELECT sm.id, sm.attendance_id, sm.parent_phone, sm.message, sm.status, sm.provider,
               sm.attempts, sm.error, sm.created_at, sm.sent_at,
-              s.full_name, a.entry_type, a.scanned_at
+              ${studentNameFallback} AS full_name,
+              a.entry_type, a.scanned_at
        FROM sms_logs sm
        LEFT JOIN attendance_logs a ON a.id = sm.attendance_id
        LEFT JOIN students s ON s.id = a.student_id
@@ -1035,6 +1165,10 @@ export function registerIpc(scanner: ScannerHook): void {
   // ---- Reports (PDF / Excel export) ----------------------------------------
   ipcMain.handle('tapin:getReport', async (_e, query: ReportQuery): Promise<ReportData> => {
     return getReportData(query);
+  });
+
+  ipcMain.handle('tapin:getReportDrilldown', async (_e, query: ReportDrilldownQuery): Promise<ReportDrilldownResult> => {
+    return getReportDrilldown(query);
   });
 
   async function pickSavePath(
@@ -1187,14 +1321,17 @@ const next = await settingsStore.update(patch);
     return evaluateStudentToday(Number(studentId));
   });
 
-  ipcMain.handle('tapin:listBadges', async (_e, schoolYear?: string): Promise<Badge[]> => {
-    return listBadges(schoolYear);
-  });
+  ipcMain.handle(
+    'tapin:listBadges',
+    async (_e, schoolYear?: string, from?: string, to?: string): Promise<Badge[]> => {
+      return listBadges(schoolYear, from, to);
+    },
+  );
 
   ipcMain.handle(
     'tapin:badgeLeaderboard',
-    async (_e, topN = 10, section?: string, schoolYear?: string): Promise<BadgeLeaderboardRow[]> => {
-      return badgeLeaderboard(topN, section, schoolYear);
+    async (_e, topN = 10, section?: string, schoolYear?: string, from?: string, to?: string): Promise<BadgeLeaderboardRow[]> => {
+      return badgeLeaderboard(topN, section, schoolYear, from, to);
     },
   );
 
@@ -1222,6 +1359,37 @@ const next = await settingsStore.update(patch);
     const studentId = await removeExcuse(Number(excuseId));
     if (studentId) await recomputeStudent(studentId);
   });
+
+  // ---- Visitors (walk-in QR registration & IN/OUT logging) -----------------
+  ipcMain.handle('tapin:listVisitors', async (_e, search?: string): Promise<Visitor[]> => {
+    return listVisitors(search);
+  });
+
+  ipcMain.handle('tapin:createVisitor', async (_e, input: VisitorInput): Promise<Visitor> => {
+    return createVisitor(input);
+  });
+
+  ipcMain.handle(
+    'tapin:updateVisitor',
+    async (_e, id: number, patch: Partial<VisitorInput & { is_active?: boolean }>): Promise<Visitor> => {
+      return updateVisitor(id, patch);
+    },
+  );
+
+  ipcMain.handle('tapin:deleteVisitor', async (_e, id: number): Promise<void> => {
+    return deleteVisitor(id);
+  });
+
+  ipcMain.handle('tapin:listVisitorLogs', async (_e, visitorId: number): Promise<VisitorLogRow[]> => {
+    return listVisitorLogs(visitorId);
+  });
+
+  ipcMain.handle(
+    'tapin:listAllVisitorLogs',
+    async (_e, filter?: { from?: string; to?: string }): Promise<VisitorLogRow[]> => {
+      return listAllVisitorLogs(filter);
+    },
+  );
 
   // ---- Auto-update (GitHub Releases) --------------------------------------
   ipcMain.handle('tapin:checkForUpdates', async (): Promise<{ success: boolean; message?: string }> => {
