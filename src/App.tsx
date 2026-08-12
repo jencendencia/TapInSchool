@@ -4,14 +4,24 @@ import { KioskScreen } from './screens/KioskScreen';
 import { AdminDashboard } from './screens/admin/AdminDashboard';
 import { LoginModal } from './components/LoginModal';
 import { ActivationScreen } from './components/ActivationScreen';
+import { ConnectDbDialog } from './components/ConnectDbDialog';
+
+// The Connect-to-database dialog reloads the window after a successful
+// reconnect. sessionStorage (cleared when the app closes) lets the admin stay
+// signed in across that reload instead of being dumped back to the kiosk.
+const SESSION_KEY = 'tapin:admin-mode';
 
 export default function App() {
-  const [mode, setMode] = useState<'kiosk' | 'admin'>('kiosk');
+  const [mode, setMode] = useState<'kiosk' | 'admin'>(() =>
+    sessionStorage.getItem(SESSION_KEY) === '1' ? 'admin' : 'kiosk',
+  );
   const [loginOpen, setLoginOpen] = useState(false);
-  const [adminAuthed, setAdminAuthed] = useState(false);
+  const [adminAuthed, setAdminAuthed] = useState(() => sessionStorage.getItem(SESSION_KEY) === '1');
   const [activated, setActivated] = useState<boolean | null>(null);
+  const [dbDialogOpen, setDbDialogOpen] = useState(false);
 
   const handleLogout = useCallback(() => {
+    sessionStorage.removeItem(SESSION_KEY);
     void api.logout();
     setAdminAuthed(false);
     setMode('kiosk');
@@ -30,6 +40,7 @@ export default function App() {
   }, [mode, adminAuthed, handleLogout]);
 
   const handleLoginSuccess = useCallback(() => {
+    sessionStorage.setItem(SESSION_KEY, '1');
     setAdminAuthed(true);
     setLoginOpen(false);
     setMode('admin');
@@ -56,11 +67,12 @@ export default function App() {
   return (
     <>
       {mode === 'kiosk' ? (
-        <KioskScreen onOpenAdmin={handleToggleAdmin} />
+        <KioskScreen onOpenAdmin={handleToggleAdmin} onOpenDbConnect={() => setDbDialogOpen(true)} />
       ) : (
-        <AdminDashboard onLogout={handleLogout} />
+        <AdminDashboard onLogout={handleLogout} onOpenDbConnect={() => setDbDialogOpen(true)} />
       )}
       {loginOpen && <LoginModal onSuccess={handleLoginSuccess} onCancel={() => setLoginOpen(false)} />}
+      {dbDialogOpen && <ConnectDbDialog onClose={() => setDbDialogOpen(false)} />}
     </>
   );
 }

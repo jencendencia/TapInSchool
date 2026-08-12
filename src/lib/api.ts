@@ -23,6 +23,9 @@ import type {
   BadgeLeaderboardRow,
   BadgeWeekProgress,
   AttendanceLogRow,
+  DbConfigInfo,
+  DbConfigInput,
+  DbConnectResult,
   EmailResult,
   EnrollmentRow,
   EntryType,
@@ -645,6 +648,29 @@ private sections: Section[] = [];
       sms: { provider: this.settings.sms_provider, online: true, detail: 'Simulator active (mock)' },
       queue: { pending: 0 },
     };
+  }
+
+  // ---- Network database connection (browser demo: always "connected") -----
+  async getDbConfig(): Promise<DbConfigInfo> {
+    return {
+      host: '127.0.0.1',
+      port: 3306,
+      user: 'root',
+      database: 'tapin_school',
+      hasSavedPassword: false,
+      isSaved: false,
+      source: 'env',
+      online: true,
+    };
+  }
+
+  async connectDb(_input: DbConfigInput): Promise<DbConnectResult> {
+    await new Promise((r) => setTimeout(r, 600));
+    return { ok: true };
+  }
+
+  async resetDbConfig(): Promise<DbConnectResult> {
+    return { ok: true };
   }
 
   /**

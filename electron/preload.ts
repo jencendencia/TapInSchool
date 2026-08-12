@@ -9,6 +9,9 @@ import type {
   AnnouncementInput,
   Badge,
   BadgeLeaderboardRow,
+  DbConfigInfo,
+  DbConfigInput,
+  DbConnectResult,
   EmailResult,
   EnrollmentRow,
   Excuse,
@@ -57,6 +60,9 @@ function on<T>(channel: string, cb: (data: T) => void): () => void {
 
 const api: TapinApi = {
   getStatus: () => ipcRenderer.invoke('tapin:getStatus') as Promise<SystemStatus>,
+  getDbConfig: () => ipcRenderer.invoke('tapin:getDbConfig') as Promise<DbConfigInfo>,
+  connectDb: (input: DbConfigInput) => ipcRenderer.invoke('tapin:connectDb', input) as Promise<DbConnectResult>,
+  resetDbConfig: () => ipcRenderer.invoke('tapin:resetDbConfig') as Promise<DbConnectResult>,
   processScan: (payload: string, source: ScanSource) =>
     ipcRenderer.invoke('tapin:processScan', payload, source) as Promise<ScanResult>,
   getScanMode: () => ipcRenderer.invoke('tapin:getScanMode') as Promise<ScanMode>,

@@ -1,10 +1,11 @@
 // Admin & Management Dashboard (PRD Screen B): sidebar navigation with
 // Overview, Students, Attendance Logs, SMS Outbox, and Settings pages.
 import { useEffect, useState } from 'react';
-import type { Settings } from '../../../shared/types';
+import type { Settings, SystemStatus } from '../../../shared/types';
 import { api, isElectron } from '../../lib/api';
 import { WindowControls } from '../../components/WindowControls';
 import { SchoolYearSelect } from '../../components/SchoolYearSelect';
+import { DbStatusPill } from '../../components/DbStatusPill';
 import { SchoolYearProvider } from './schoolYear';
 import { OverviewPage } from './Overview';
 import { StudentsPage } from './Students';
@@ -37,9 +38,10 @@ const NAV: { id: Tab; label: string; icon: string }[] = [
   { id: 'settings', label: 'Settings', icon: '⚙' },
 ];
 
-export function AdminDashboard({ onLogout }: { onLogout: () => void }) {
+export function AdminDashboard({ onLogout, onOpenDbConnect }: { onLogout: () => void; onOpenDbConnect: () => void }) {
   const [tab, setTab] = useState<Tab>('overview');
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [status, setStatus] = useState<SystemStatus | null>(null);
   const [confirmLogout, setConfirmLogout] = useState(false);
 
   // Refetch on tab switch so a freshly saved logo / school name in Settings
@@ -48,12 +50,19 @@ export function AdminDashboard({ onLogout }: { onLogout: () => void }) {
     void api.getSettings().then(setSettings);
   }, [tab]);
 
+  // Live DB status for the title-bar pill (online / offline / retrying).
+  useEffect(() => {
+    void api.getStatus().then(setStatus);
+    return api.onStatus(setStatus);
+  }, []);
+
   return (
     <SchoolYearProvider>
       <div className="admin">
         <div className="admin-titlebar">
           <span className="admin-titlebar-label">{settings?.school_name || 'TapIn School'} · Admin</span>
           <div className="admin-titlebar-right">
+            <DbStatusPill dbStatus={status?.db} onClick={onOpenDbConnect} />
             <SchoolYearSelect />
             {isElectron && <WindowControls />}
           </div>

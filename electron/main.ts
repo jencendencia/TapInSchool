@@ -4,6 +4,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import { loadEnv } from './lib/env';
 import { db } from './db/connection';
+import { configureDbFromDisk } from './db/config';
 import { settingsStore } from './db/settings';
 import { ensureSchema } from './db/schema';
 import { ensureDefaultUsers } from './services/auth';
@@ -15,7 +16,7 @@ import { startBadgeService, stopBadgeService } from './services/badges';
 import { decorateDbDetail, startClockDriftCheck } from './services/clock';
 import { logosDir, mimeForFile } from './services/logo';
 import { mediaDir, mediaMimeForFile } from './services/announcement';
-import { pendingQueueCount, startOfflineService } from './services/offline';
+import { pendingQueueCount, refreshOfflineCache, startOfflineService } from './services/offline';
 import { setupAutoUpdater } from './services/updater';
 import { setupWatchdog } from './services/watchdog';
 import { UsbScanner } from './services/scanner';
@@ -123,6 +124,10 @@ function applySchema(): Promise<void> {
 }
 
 async function bootDatabase(): Promise<void> {
+  // A connection saved from the title-bar Connect-to-database dialog (per
+  // machine, userData/db-config.json) is applied before the first connect so
+  // it overrides .env / OS env and survives app restarts.
+  await configureDbFromDisk();
   db.on('status', (s: { online: boolean }) => {
     // Reload settings from the DB whenever the connection comes back up, so a
     // kiosk started offline picks up saved settings without a restart.
@@ -268,6 +273,29 @@ async function serveLocalFile(filePath: string, mime: string): Promise<Response>
 
   registerIpc({
     setKioskMode: (active) => scanner?.setKioskMode(active),
+    // After a successful connect/reconnect from the Connect-to-database
+    // dialog: re-run the boot pipeline against the (possibly different)
+    // server (schema → default accounts → settings → offline snapshot), then
+    // reload the window so every page refetches. Idempotent — bootDatabase's
+    // status listener already collapses schema applies into one in-flight run.
+    onDbConnected: async () => {
+      try {
+        await applySchema();
+        await ensureDefaultUsers();
+        await settingsStore.reload();
+        void refreshOfflineCache();
+        void broadcastStatus();
+      } catch (err) {
+        console.error('[tapin] post-connect bootstrap failed:', err);
+      }
+      // Give the main process a tick to settle, then reload. The admin
+      // session is restored by the renderer via sessionStorage (App.tsx).
+      setTimeout(() => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.reload();
+        }
+      }, 150);
+    },
   });
 
   // Headless boot test: `electron . --smoke` — boots DB + settings, reports

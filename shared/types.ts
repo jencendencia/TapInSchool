@@ -348,6 +348,46 @@ export interface SystemStatus {
   queue: { pending: number };
 }
 
+// ---- Network database connection (title-bar Connect-to-database dialog) ----
+// See NETWORK_DATABASE_CONNECTION.md: config resolution is saved
+// (db-config.json) → env / .env → built-in defaults.
+
+/** Which layer produced the current DB config values. */
+export type DbConfigSource = 'saved' | 'env' | 'defaults';
+
+/** What the Connect-to-database dialog needs to prefill the form. */
+export interface DbConfigInfo {
+  host: string;
+  port: number;
+  user: string;
+  database: string;
+  /** True when a password is saved on this machine — the dialog keeps the
+   *  password field blank and reuses the saved one on connect. */
+  hasSavedPassword: boolean;
+  /** True when the values come from userData/db-config.json. */
+  isSaved: boolean;
+  /** Which layer produced the current values. */
+  source: DbConfigSource;
+  online: boolean;
+}
+
+/** Values the admin submits from the Connect-to-database dialog. */
+export interface DbConfigInput {
+  host: string;
+  port: number;
+  user: string;
+  /** Leave blank to keep the saved password (when one exists). */
+  password: string;
+  database: string;
+}
+
+/** Result of a connect/reconnect attempt from the dialog. */
+export interface DbConnectResult {
+  ok: boolean;
+  /** The real MySQL error (access denied, timeout, unknown DB, ...). */
+  error?: string;
+}
+
 export interface ActivityItem {
   id: number;
   full_name: string;
@@ -1078,6 +1118,16 @@ export interface LicenseApi {
 // ---------------------------------------------------------------------------
 export interface TapinApi {
   getStatus(): Promise<SystemStatus>;
+
+  // ---- Network database connection (Connect-to-database dialog) -----------
+  /** Current effective DB config + whether a saved one exists (form prefill). */
+  getDbConfig(): Promise<DbConfigInfo>;
+  /** Tests + saves + applies a new connection; re-runs the boot pipeline and
+   *  reloads the window on success. Returns the real MySQL error on failure. */
+  connectDb(input: DbConfigInput): Promise<DbConnectResult>;
+  /** Clears the saved connection and reconnects with .env / defaults. */
+  resetDbConfig(): Promise<DbConnectResult>;
+
   processScan(payload: string, source: ScanSource): Promise<ScanResult>;
   /** The kiosk gate-direction mode ('auto' | 'in' | 'out'). */
   getScanMode(): Promise<ScanMode>;

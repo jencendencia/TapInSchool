@@ -2,7 +2,8 @@
 // shared TapinApi contract (shared/types.ts).
 import { ipcMain, app, BrowserWindow, dialog } from 'electron';
 import { promises as fs } from 'fs';
-import { db } from './db/connection';
+import { currentConfig, db, getSavedConfig, type DbConfig } from './db/connection';
+import { clearDbConfig, saveDbConfig } from './db/config';
 import { settingsStore } from './db/settings';
 import { enqueueScan, getRecentActivity } from './services/attendance';
 import { getScanMode, setScanMode } from './services/scan-mode';
@@ -62,6 +63,9 @@ import type {
   AttendanceLogRow,
   Badge,
   BadgeLeaderboardRow,
+  DbConfigInfo,
+  DbConfigInput,
+  DbConnectResult,
   EmailResult,
   EnrollmentRow,
   Excuse,
@@ -101,6 +105,8 @@ import type {
 
 interface ScannerHook {
   setKioskMode(active: boolean): void;
+  /** Runs after a successful connect/reconnect from the DB dialog (re-boot + reload). */
+  onDbConnected?(): Promise<void> | void;
 }
 
 export function registerIpc(scanner: ScannerHook): void {
@@ -120,6 +126,76 @@ export function registerIpc(scanner: ScannerHook): void {
       sms: await provider.verify(settings),
       queue: { pending: await pendingQueueCount() },
     };
+  });
+
+  // ---- Network database connection (title-bar Connect-to-database) --------
+  ipcMain.handle('tapin:getDbConfig', async (): Promise<DbConfigInfo> => {
+    const cfg = currentConfig();
+    const saved = getSavedConfig();
+    return {
+      host: cfg.host,
+      port: cfg.port,
+      user: cfg.user,
+      database: cfg.database,
+      hasSavedPassword: !!saved?.password,
+      isSaved: !!saved,
+      // 'defaults' only when no DB_* variable is set anywhere.
+      source: saved ? 'saved' : ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'].some((k) => process.env[k] !== undefined) ? 'env' : 'defaults',
+      online: db.isOnline(),
+    };
+  });
+
+  ipcMain.handle('tapin:connectDb', async (_e, input: DbConfigInput): Promise<DbConnectResult> => {
+    const host = String(input?.host ?? '').trim();
+    const database = String(input?.database ?? '').trim();
+    if (!host || !database) return { ok: false, error: 'Host and database are required.' };
+    const cfg: DbConfig = {
+      host,
+      port: Number(input?.port) || 3306,
+      user: String(input?.user ?? '').trim() || 'root',
+      password: String(input?.password ?? ''),
+      database,
+    };
+    // The dialog never receives the saved password. An empty password field
+    // reuses the saved one ONLY when connecting to the exact same server — a
+    // different host/port/user/database must supply its own password (blank
+    // means "no password" there). This also stops a public kiosk entry point
+    // from sending the saved password to an arbitrary host.
+    if (!cfg.password) {
+      const saved = getSavedConfig();
+      if (
+        saved &&
+        saved.host === cfg.host &&
+        saved.port === cfg.port &&
+        saved.user === cfg.user &&
+        saved.database === cfg.database
+      ) {
+        cfg.password = saved.password;
+      }
+    }
+    const test = await db.testConnection(cfg);
+    if (!test.ok) return test;
+    try {
+      await saveDbConfig(cfg);
+    } catch (err) {
+      return { ok: false, error: `Connected, but could not save the config: ${(err as Error).message}` };
+    }
+    const applied = await db.setConfig(cfg);
+    if (!applied) {
+      // The test passed but the live reconnect failed in the gap (very rare).
+      // The config is saved and the 5s retry loop will bring it online; the
+      // window reload below then reflects the real state honestly.
+      console.error('[tapin] live reconnect failed after successful test:', db.getStatus().detail);
+    }
+    if (scanner.onDbConnected) await scanner.onDbConnected();
+    return { ok: true };
+  });
+
+  ipcMain.handle('tapin:resetDbConfig', async (): Promise<DbConnectResult> => {
+    await clearDbConfig();
+    await db.resetConfig();
+    if (scanner.onDbConnected) await scanner.onDbConnected();
+    return { ok: true };
   });
 
   ipcMain.handle('tapin:processScan', async (_e, payload: string, source: ScanSource): Promise<ScanResult> => {
@@ -721,7 +797,9 @@ export function registerIpc(scanner: ScannerHook): void {
   ipcMain.handle('tapin:createAnnouncement', async (_e, input: AnnouncementInput): Promise<Announcement> => {
     const title = String(input?.title ?? '').trim();
     const content = String(input?.content_text ?? '').trim();
-    if (!title && !content) throw new Error('Announcement needs a title or message.');
+    // The title is an admin-only label (never rendered on the kiosk), so an
+    // announcement must carry a message and/or uploaded media.
+    if (!content && !input?.media) throw new Error('Announcement needs a message or an image/video.');
 // Persist an uploaded media data URI to disk; text-only announcements get null.
     // The media_type is inferred from the data URI prefix when provided.
     let mediaUrl: string | null = null;

@@ -23,6 +23,7 @@ import { CameraScanner } from '../components/CameraScanner';
 import { ManualCheckIn } from '../components/ManualCheckIn';
 import { VisitorRegister } from '../components/VisitorRegister';
 import { WindowControls } from '../components/WindowControls';
+import { StaffPinGate } from '../components/StaffPinGate';
 import { Avatar, QrCodeImage, SchoolLogo, Toast, fmtTimeSec } from '../components/shared';
 
 const AUTO_RESET_MS = 4000;
@@ -45,11 +46,27 @@ const SCAN_MODES: { value: ScanMode; label: string; title: string }[] = [
   { value: 'out', label: '⟲ OUT', title: 'Force every scan to CHECK-OUT' },
 ];
 
-function StatusDot({ ok, label, title }: { ok: boolean; label: string; title: string }) {
-  return (
-    <div className="status-dot" title={title}>
+function StatusDot({ ok, label, title, onClick }: { ok: boolean; label: string; title: string; onClick?: () => void }) {
+  const inner = (
+    <>
       <span className={`dot ${ok ? 'dot-ok' : 'dot-bad'}`} />
       <span className="text-dim">{label}</span>
+    </>
+  );
+  if (onClick) {
+    // The Database dot doubles as the Connect-to-database entry point (see
+    // NETWORK_DATABASE_CONNECTION.md) so an admin can fix an offline server
+    // straight from the kiosk — where the dashboard is unreachable while the
+    // DB is down (login needs the DB).
+    return (
+      <button type="button" className="status-dot status-dot-btn" title={title} onClick={onClick}>
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <div className="status-dot" title={title}>
+      {inner}
     </div>
   );
 }
@@ -414,15 +431,19 @@ function AnnouncementsView({
       ) : announcement.media_url ? (
         <img className="announcement-media announcement-image" src={announcement.media_url} alt={announcement.title} />
       ) : null}
-      <div className="announcement-copy">
-        {announcement.title && <h2 className="announcement-title">{announcement.title}</h2>}
-        {announcement.content_text && <p className="announcement-text">{announcement.content_text}</p>}
-      </div>
+      {/* Only the message is shown on the kiosk — the title is an admin-only
+          label and is never displayed. Media-only announcements (no message)
+          render full-bleed with no overlay. */}
+      {announcement.content_text && (
+        <div className="announcement-copy">
+          <p className="announcement-text">{announcement.content_text}</p>
+        </div>
+      )}
     </div>
   );
 }
 
-export function KioskScreen({ onOpenAdmin }: { onOpenAdmin: () => void }) {
+export function KioskScreen({ onOpenAdmin, onOpenDbConnect }: { onOpenAdmin: () => void; onOpenDbConnect: () => void }) {
   const clock = useClock();
   const [center, setCenter] = useState<CenterState>({ kind: 'idle' });
   const [activity, setActivity] = useState<ActivityItem[]>([]);
@@ -431,6 +452,9 @@ export function KioskScreen({ onOpenAdmin }: { onOpenAdmin: () => void }) {
   const [camOpen, setCamOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [visitorRegOpen, setVisitorRegOpen] = useState(false);
+  // Staff-PIN gate in front of the Connect-to-database dialog (the kiosk is a
+  // public screen — see NETWORK_DATABASE_CONNECTION.md §4).
+  const [dbPinOpen, setDbPinOpen] = useState(false);
   // "Visitor registered" announcement: fired when the registration modal
   // closes after a successful create (so it never shows behind the modal).
   const [visitorToast, setVisitorToast] = useState<string | null>(null);
@@ -645,7 +669,12 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
             <div className="kiosk-date text-dim">{clock.date}</div>
           </div>
           <div className="kiosk-status">
-            <StatusDot ok={status?.db.online ?? false} label="Database" title={status?.db.detail ?? ''} />
+            <StatusDot
+              ok={status?.db.online ?? false}
+              label="Database"
+              title={`${status?.db.detail ?? 'Database connection'} — click to connect to a different server (staff PIN required)`}
+              onClick={isElectron ? () => setDbPinOpen(true) : undefined}
+            />
             <StatusDot ok={status?.sms.online ?? false} label={`SMS · ${status?.sms.provider ?? '…'}`} title={status?.sms.detail ?? ''} />
             <StatusDot
               ok={(status?.queue.pending ?? 0) === 0}
@@ -891,6 +920,18 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
         onClose={closeVisitorRegister}
         onRegistered={(v) => setLastRegistered(v.full_name)}
       />
+
+      {dbPinOpen && (
+        <StaffPinGate
+          title="Connect to database"
+          hint="Enter the gate staff PIN to change the database server."
+          onUnlocked={() => {
+            setDbPinOpen(false);
+            onOpenDbConnect();
+          }}
+          onClose={() => setDbPinOpen(false)}
+        />
+      )}
 
       {visitorToast && <Toast message={visitorToast} />}
     </div>

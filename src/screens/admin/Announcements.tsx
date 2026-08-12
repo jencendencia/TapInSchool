@@ -68,8 +68,10 @@ function AnnouncementForm({
   const isVideo = previewType === 'video';
 
   const submit = () => {
-    if (!form.title.trim() && !form.content_text.trim() && !form.media) {
-      setError('Add a title, message text, or an image/video.');
+    // The title is an admin-only label (never shown on the kiosk), so an
+    // announcement must carry a message and/or media to display anything.
+    if (!form.content_text.trim() && !form.media) {
+      setError('Add a message and/or an image/video.');
       return;
     }
     onSave({ ...form, title: form.title.trim(), content_text: form.content_text.trim() });
@@ -90,6 +92,7 @@ function AnnouncementForm({
           onChange={(e) => setForm({ ...form, title: e.target.value })}
           placeholder="e.g. School Fair on Friday"
         />
+        <p className="field-hint">For your reference only — the title is not shown on the kiosk.</p>
       </div>
       <div className="field">
         <label>Message</label>
@@ -97,7 +100,7 @@ function AnnouncementForm({
           rows={4}
           value={form.content_text}
           onChange={(e) => setForm({ ...form, content_text: e.target.value })}
-          placeholder="Optional announcement text shown on the kiosk…"
+          placeholder="Optional announcement text shown on the kiosk… (leave blank for picture/video-only)"
         />
       </div>
       <div className="field">
@@ -149,9 +152,149 @@ function AnnouncementForm({
   );
 }
 
+// Small image/video preview for the announcements table. Videos show their
+// first frame (preload="metadata") with a play badge; a broken/missing file
+// falls back to a type icon so the row still reads correctly. Clicking the
+// thumb opens a full-size preview (onPreview).
+function MediaThumb({ ann, onPreview }: { ann: Announcement; onPreview: (a: Announcement) => void }) {
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [ann.media_url, ann.media_type]);
+  if (ann.media_type === 'none' || !ann.media_url) return <span className="text-dim">—</span>;
+  return (
+    <button
+      type="button"
+      className={`ann-thumb ann-thumb-btn${broken ? ' ann-thumb-broken' : ''}`}
+      title={`Preview ${ann.title || 'announcement media'}`}
+      onClick={() => onPreview(ann)}
+    >
+      {broken ? (
+        <span className="ann-thumb-fallback">{ann.media_type === 'video' ? '🎬' : '🖼'}</span>
+      ) : ann.media_type === 'video' ? (
+        <>
+          <video
+            className="ann-thumb-media"
+            src={ann.media_url}
+            muted
+            playsInline
+            preload="metadata"
+            onError={() => setBroken(true)}
+          />
+          <span className="ann-thumb-play">▶</span>
+        </>
+      ) : (
+        <img
+          className="ann-thumb-media"
+          src={ann.media_url}
+          alt={ann.title || 'Announcement media'}
+          onError={() => setBroken(true)}
+        />
+      )}
+      <span className={`pill ${ann.media_type === 'video' ? 'pill-warn' : 'pill-info'} ann-thumb-pill`}>
+        {ann.media_type.toUpperCase()}
+      </span>
+    </button>
+  );
+}// Full-size media preview modal (opens from the table thumbnail). Videos are
+// playable via the native controls; images are shown at natural size. The ‹/›
+// arrows (and ←/→ keys) browse through the media-bearing announcements.
+function MediaPreviewModal({
+  ann,
+  index,
+  total,
+  onClose,
+  onPrev,
+  onNext,
+}: {
+  ann: Announcement;
+  index?: number;
+  total?: number;
+  onClose: () => void;
+  /** Undefined at the first announcement — the previous arrow hides. */
+  onPrev?: () => void;
+  /** Undefined at the last announcement — the next arrow hides. */
+  onNext?: () => void;
+}) {
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [ann.media_url, ann.media_type]);
+
+  // Escape closes the preview; ←/→ move between announcements.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+      else if (e.key === 'ArrowLeft') onPrev?.();
+      else if (e.key === 'ArrowRight') onNext?.();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose, onPrev, onNext]);
+
+  const media =
+    ann.media_type !== 'none' && ann.media_url ? (
+      ann.media_type === 'video' ? (
+        <video
+          className="ann-preview-full-media"
+          src={ann.media_url}
+          controls
+          playsInline
+          onError={() => setBroken(true)}
+        />
+      ) : (
+        <img
+          className="ann-preview-full-media"
+          src={ann.media_url}
+          alt={ann.title || 'Announcement media'}
+          onError={() => setBroken(true)}
+        />
+      )
+    ) : null;
+  return (
+    <Modal title={ann.title || 'Media preview'} onClose={onClose} wide>
+      <div className="ann-preview-full">
+        {typeof index === 'number' && typeof total === 'number' && total > 1 && (
+          <span className="ann-preview-count">{index} / {total}</span>
+        )}
+        <div className="ann-preview-stage">
+          {broken ? (
+            <div className="ann-preview-broken">
+              <span className="ann-preview-broken-icon">🗑</span>
+              <p className="text-dim">This media file is missing or can no longer be loaded.</p>
+            </div>
+          ) : media ? (
+            media
+          ) : (
+            <p className="text-dim">No media attached to this announcement.</p>
+          )}
+          <button
+            type="button"
+            className="ann-preview-nav ann-preview-nav-prev"
+            onClick={onPrev}
+            disabled={!onPrev}
+            aria-label="Previous announcement"
+            title="Previous announcement (←)"
+          >
+            ‹
+          </button>
+          <button
+            type="button"
+            className="ann-preview-nav ann-preview-nav-next"
+            onClick={onNext}
+            disabled={!onNext}
+            aria-label="Next announcement"
+            title="Next announcement (→)"
+          >
+            ›
+          </button>
+        </div>
+        {ann.content_text && <p className="ann-preview-msg">{ann.content_text}</p>}
+      </div>
+    </Modal>
+  );
+}
+
 export function AnnouncementsPage() {
 const [list, setList] = useState<Announcement[] | null>(null);
   const [modal, setModal] = useState<ModalState>(null);
+  const [preview, setPreview] = useState<Announcement | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [toastTone, setToastTone] = useState<'success' | 'error'>('success');
 const [idleMin, setIdleMin] = useState<number>(1);
@@ -270,6 +413,11 @@ const saveSlideSeconds = async () => {
 
   const activeCount = list.filter((a) => a.is_active).length;
 
+  // The preview carousel browses only media-bearing announcements (a
+  // text-only announcement has nothing to preview).
+  const mediaList = list.filter((a) => a.media_type !== 'none' && a.media_url);
+  const previewIndex = preview ? mediaList.findIndex((a) => a.id === preview.id) : -1;
+
   return (
     <div className="page">
       <div className="page-head">
@@ -341,13 +489,7 @@ const saveSlideSeconds = async () => {
                 <td className="ann-title">{a.title || '(untitled)'}</td>
                 <td className="ann-msg">{a.content_text || '—'}</td>
                 <td>
-                  {a.media_type === 'none' ? (
-                    <span className="text-dim">—</span>
-                  ) : (
-                    <span className={`pill ${a.media_type === 'video' ? 'pill-warn' : 'pill-info'}`}>
-                      {a.media_type.toUpperCase()}
-                    </span>
-                  )}
+                  <MediaThumb ann={a} onPreview={setPreview} />
                 </td>
                 <td>
                   <span className={`pill ${a.is_active ? 'pill-success' : 'pill-dim'}`}>
@@ -415,6 +557,21 @@ const saveSlideSeconds = async () => {
             <button className="btn-danger" onClick={() => void removeAnnouncement(modal.announcement)}>Delete announcement</button>
           </div>
         </Modal>
+      )}
+
+      {preview && (
+        <MediaPreviewModal
+          ann={preview}
+          index={previewIndex + 1}
+          total={mediaList.length}
+          onClose={() => setPreview(null)}
+          onPrev={previewIndex > 0 ? () => setPreview(mediaList[previewIndex - 1]) : undefined}
+          onNext={
+            previewIndex >= 0 && previewIndex < mediaList.length - 1
+              ? () => setPreview(mediaList[previewIndex + 1])
+              : undefined
+          }
+        />
       )}
 
       {toast && <Toast message={toast} tone={toastTone} />}

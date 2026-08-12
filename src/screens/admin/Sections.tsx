@@ -7,13 +7,19 @@
 // students can be enrolled in bulk (from the year's unassigned pool) or
 // unassigned.
 import { useCallback, useEffect, useState } from 'react';
+import QRCode from 'qrcode';
 import type { Section, SectionInput, Student } from '../../../shared/types';
 import { api } from '../../lib/api';
 import { compareGrades, sortGrades } from '../../lib/sort';
-import { Avatar, Modal, Spinner, Toast } from '../../components/shared';
+import { Avatar, Modal, QrCodeImage, Spinner, Toast } from '../../components/shared';
 import { useSchoolYear } from './schoolYear';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** HTML-escapes text inserted into the print window's document. */
+function escHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 type ModalState = { type: 'add' } | { type: 'edit'; section: Section } | null;
 
@@ -134,6 +140,134 @@ function SectionForm({
   );
 }
 
+/** Print-QRs modal: every student enrolled in the section (selected school
+ *  year) shown as a QR card with a checkbox; "Print" opens a print window
+ *  with only the checked cards, laid out for cutting into ID-sized tags. */
+function PrintQrsModal({
+  sectionName,
+  schoolYear,
+  students,
+  onClose,
+}: {
+  sectionName: string;
+  schoolYear: string;
+  students: Student[];
+  onClose: () => void;
+}) {
+  // Everyone starts checked — the common case is "print the whole section".
+  // Only payload-bearing students can be printed, so they're the only ones
+  // counted and selectable (keeps the counter/button label accurate).
+  const printable = students.filter((s) => s.qr_hash_payload);
+  const [checked, setChecked] = useState<Set<number>>(() => new Set(printable.map((s) => s.id)));
+  const [printing, setPrinting] = useState(false);
+  const toggle = (id: number) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const allChecked = printable.length > 0 && checked.size === printable.length;
+  const toggleAll = () => setChecked(allChecked ? new Set() : new Set(printable.map((s) => s.id)));
+
+  const print = async () => {
+    const selected = students.filter((s) => checked.has(s.id) && s.qr_hash_payload);
+    if (selected.length === 0) return;
+    setPrinting(true);
+    try {
+      const cards = await Promise.all(
+        selected.map(async (st) => ({
+          st,
+          url: await QRCode.toDataURL(st.qr_hash_payload, { width: 260, margin: 2 }),
+        })),
+      );
+      const w = window.open('', '_blank', 'width=820,height=1000');
+      if (!w) {
+        setPrinting(false);
+        return;
+      }
+      w.document.write(`<!doctype html><html><head><title>Student QR Codes — ${escHtml(sectionName)}</title>
+        <style>
+          * { box-sizing: border-box; }
+          body { font-family: Arial, sans-serif; margin: 14px; }
+          h1 { font-size: 16px; margin: 0 0 2px; }
+          .sub { color: #666; font-size: 12px; margin: 0 0 12px; }
+          .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+          .card { border: 1px solid #ccc; border-radius: 8px; padding: 10px; text-align: center; page-break-inside: avoid; }
+          .card img { width: 120px; height: 120px; }
+          .name { font-size: 12px; font-weight: 700; margin: 6px 0 2px; word-break: break-word; }
+          .meta { font-size: 11px; color: #555; margin: 0; word-break: break-word; }
+          @media print { body { margin: 6px; } }
+        </style></head><body>
+        <h1>Student QR Codes — ${escHtml(sectionName)}</h1>
+        <p class="sub">SY ${escHtml(schoolYear)} · ${selected.length} student${selected.length === 1 ? '' : 's'}</p>
+        <div class="grid">
+          ${cards
+            .map(
+              ({ st, url }) => `<div class="card">
+            <img src="${url}" alt="QR code for ${escHtml(st.full_name)}" />
+            <p class="name">${escHtml(st.full_name)}</p>
+            <p class="meta">${escHtml(st.student_no)}</p>
+          </div>`,
+            )
+            .join('\n')}
+        </div>
+      </body></html>`);
+      w.document.close();
+      w.focus();
+      setTimeout(() => w.print(), 300);
+    } catch {
+      // QR generation failure — nothing to print.
+    } finally {
+      setTimeout(() => setPrinting(false), 600);
+    }
+  };
+
+  return (
+    <Modal title={`Print Student QRs — ${sectionName}`} onClose={onClose} wide>
+      <p className="text-dim" style={{ marginTop: 0 }}>
+        {printable.length} enrolled in {schoolYear}. Tick the students to include, then press{' '}
+        <b>Print</b> — each QR is laid out as a card for cutting into tags.
+      </p>
+      <div className="print-qr-toolbar">
+        <label className="print-qr-check-all">
+          <input type="checkbox" checked={allChecked} onChange={toggleAll} />
+          <span>{allChecked ? 'Deselect all' : 'Select all'}</span>
+        </label>
+        <span className="text-dim">{checked.size} of {printable.length} selected</span>
+      </div>
+      <div className="print-qr-grid">
+        {students.map((st) => (
+          <label key={st.id} className={`print-qr-card${checked.has(st.id) ? ' checked' : ''}`}>
+            <input
+              type="checkbox"
+              checked={checked.has(st.id)}
+              onChange={() => toggle(st.id)}
+              disabled={!st.qr_hash_payload}
+              title={st.qr_hash_payload ? undefined : 'No QR payload'}
+            />
+            <QrCodeImage text={st.qr_hash_payload} size={112} />
+            <span className="print-qr-name">{st.full_name}</span>
+            <span className="print-qr-meta mono">{st.student_no}</span>
+          </label>
+        ))}
+        {students.length === 0 && <p className="text-dim">No students enrolled in this section yet.</p>}
+      </div>
+      <div className="form-actions" style={{ marginTop: 14 }}>
+        <button className="btn-ghost" onClick={onClose}>Cancel</button>
+        <button
+          className="btn-primary"
+          disabled={checked.size === 0 || printing}
+          onClick={() => void print()}
+        >
+          {printing ? 'Preparing…' : `🖨 Print (${checked.size})`}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 /** Bulk-enroll modal: students with NO enrollment in the selected school year. */
 function EnrollStudentsModal({
   sectionName,
@@ -225,6 +359,7 @@ export function SectionsPage() {
   const [modal, setModal] = useState<ModalState>(null);
   const [viewSection, setViewSection] = useState<string | null>(null);
   const [enrollOpen, setEnrollOpen] = useState(false);
+  const [qrPrintOpen, setQrPrintOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [toastTone, setToastTone] = useState<'success' | 'error'>('success');
 
@@ -340,6 +475,7 @@ export function SectionsPage() {
             </p>
           </div>
           <div className="page-actions">
+            <button className="btn-ghost" onClick={() => setQrPrintOpen(true)} disabled={roster.length === 0} title={roster.length === 0 ? 'Enroll students first' : 'Print all student QR codes'}>🖨 Print QRs</button>
             <button className="btn-ghost" onClick={() => setModal({ type: 'edit', section: view })}>✎ Edit section</button>
             <button className="btn-primary" onClick={() => setEnrollOpen(true)}>➕ Enroll students</button>
           </div>
@@ -397,6 +533,14 @@ export function SectionsPage() {
             students={notEnrolled}
             onEnroll={(ids) => void handleEnroll(ids)}
             onClose={() => setEnrollOpen(false)}
+          />
+        )}
+        {qrPrintOpen && (
+          <PrintQrsModal
+            sectionName={view.grade_section}
+            schoolYear={activeYear || '—'}
+            students={roster}
+            onClose={() => setQrPrintOpen(false)}
           />
         )}
         {modal?.type === 'edit' && (
