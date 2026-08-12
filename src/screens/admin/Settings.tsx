@@ -603,14 +603,28 @@ setTestingEmail(true);
               <span className="switch-knob" />
             </span>
           </label>
-          <div className="field">
-            <label>Send time</label>
-            <input type="time" value={settings.adviser_report_time} onChange={(e) => set('adviser_report_time', e.target.value)} />
-            <p className="field-hint">
-              Each adviser gets their section's per-student attendance report for the current day
-              (from midnight up to the send time). Days with no gate activity are skipped.
-            </p>
+          <div className="field-row">
+            <div className="field">
+              <label>Report frequency</label>
+              <select
+                value={settings.adviser_report_frequency}
+                onChange={(e) => set('adviser_report_frequency', e.target.value as Settings['adviser_report_frequency'])}
+              >
+                <option value="daily">Daily — today's attendance</option>
+                <option value="weekly">Weekly — this week (Mon → send time)</option>
+                <option value="monthly">Monthly — this month (1st → send time)</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>Send time</label>
+              <input type="time" value={settings.adviser_report_time} onChange={(e) => set('adviser_report_time', e.target.value)} />
+            </div>
           </div>
+          <p className="field-hint">
+            Each adviser gets their section's per-student attendance report covering the current period
+            up to the send time (day / week / month). Periods with no gate activity are skipped.
+            Changing the frequency restarts the schedule for the new period.
+          </p>
           <p className="field-hint">
             Requires a working SMTP setup above and adviser emails in the Sections tab. If the app
             was off at the send time, the report goes out on the next start.

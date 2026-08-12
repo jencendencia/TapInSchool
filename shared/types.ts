@@ -278,6 +278,9 @@ export type SmsProviderId = 'simulator' | 'gsm' | 'cloud';
 
 export type CloudProviderId = 'semaphore' | 'messagebird' | 'philsms' | 'generic';
 
+/** How often the automatic adviser reports are emailed. */
+export type AdviserReportFrequency = 'daily' | 'weekly' | 'monthly';
+
 export interface Settings {
   school_name: string;
   /** Minutes of kiosk inactivity before idle announcements start (default 1). */
@@ -324,14 +327,21 @@ export interface Settings {
   /** Report recipient(s), comma or semicolon separated. */
   email_recipient: string;
 
-  // ---- Automatic adviser reports (scheduled daily email) -----------------
-  /** When true, every day at adviser_report_time each section adviser is
-   *  emailed their section's per-student attendance report for the current
-   *  day (midnight → send time). Requires SMTP + adviser emails (Sections). */
+  // ---- Automatic adviser reports (scheduled email) ------------------------
+  /** When true, at adviser_report_time each section adviser is emailed their
+   *  section's per-student attendance report for the current period, chosen by
+   *  adviser_report_frequency. Requires SMTP + adviser emails (Sections). */
   adviser_report_enabled: boolean;
-  /** Local 'HH:MM' time the daily adviser report emails are sent (e.g. '20:00'). */
+  /** How often the automatic reports go out:
+   *   - 'daily'   → today (midnight → send time)
+   *   - 'weekly'  → this ISO week (Monday → send time)
+   *   - 'monthly' → this calendar month (1st → send time)
+   *  Periods with no gate activity are skipped. */
+  adviser_report_frequency: AdviserReportFrequency;
+  /** Local 'HH:MM' time the adviser report emails are sent (e.g. '20:00'). */
   adviser_report_time: string;
-  /** Internal: last date (YYYY-MM-DD) the adviser report emails were sent. */
+  /** Internal: last date (YYYY-MM-DD) the adviser report emails were sent —
+   *  compared per period (day / week / month) to prevent duplicate sends. */
   adviser_report_last_run: string;
 }
 

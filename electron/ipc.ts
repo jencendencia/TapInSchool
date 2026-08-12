@@ -1365,8 +1365,18 @@ ipcMain.handle('tapin:testEmail', async (_e, to: string, settings: Settings): Pr
     // renderer copy clobber it (that would re-trigger backfill + SMS).
     delete patch.absence_last_run;
     // adviser_report_last_run is owned by the adviser-report service; a stale
-    // renderer copy must not re-trigger (or suppress) today's send.
+    // renderer copy must not re-trigger (or suppress) today's send. Only an
+    // ACTUAL frequency change re-arms the schedule — the Settings page sends
+    // the full settings object on every save, so comparing against the current
+    // value stops an unrelated edit (e.g. school name) from clearing the guard
+    // and duplicating the current period's report.
     delete patch.adviser_report_last_run;
+    if (
+      'adviser_report_frequency' in patch &&
+      patch.adviser_report_frequency !== settingsStore.get().adviser_report_frequency
+    ) {
+      patch.adviser_report_last_run = '';
+    }
     // In auto-detect mode the GSM provider owns gsm_com_port/gsm_baud (it
     // persists the detected port/baud itself) — a stale renderer copy must
     // not overwrite the live detection.

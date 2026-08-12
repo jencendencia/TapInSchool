@@ -210,6 +210,7 @@ school_name: 'TapIn School',
   email_from: '',
   email_recipient: '',
   adviser_report_enabled: false,
+  adviser_report_frequency: 'daily',
   adviser_report_time: '20:00',
   adviser_report_last_run: '',
 };
@@ -1390,6 +1391,18 @@ private sections: Section[] = [];
   }
 
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
+    // Mirror the Electron main process: the last-run guard is service-owned.
+    // Only an ACTUAL frequency change re-arms the schedule for the new period
+    // (the Settings page sends the full object on every save); otherwise a
+    // stale renderer copy must not re-trigger/suppress a send.
+    if (
+      'adviser_report_frequency' in patch &&
+      patch.adviser_report_frequency !== this.settings.adviser_report_frequency
+    ) {
+      patch.adviser_report_last_run = '';
+    } else {
+      delete patch.adviser_report_last_run;
+    }
     this.settings = { ...this.settings, ...patch };
     this.emitStatus();
     return { ...this.settings };

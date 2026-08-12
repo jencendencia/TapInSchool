@@ -44,6 +44,7 @@ school_name: process.env.SCHOOL_NAME || 'TapIn School',
     email_from: '',
     email_recipient: '',
     adviser_report_enabled: false,
+    adviser_report_frequency: 'daily',
     adviser_report_time: '20:00',
     adviser_report_last_run: '',
   };
@@ -81,6 +82,7 @@ const KEYS = [
   'email_from',
   'email_recipient',
   'adviser_report_enabled',
+  'adviser_report_frequency',
   'adviser_report_time',
   'adviser_report_last_run',
 ] as const;

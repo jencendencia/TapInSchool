@@ -334,8 +334,9 @@ async function serveLocalFile(filePath: string, mime: string): Promise<Response>
   // Automated absence detection (Phase 2, 4.2): nightly LATE/ABSENT flags +
   // optional parent SMS, with missed-day backfill.
   startAbsenceService();
-  // Automatic adviser reports: daily per-section report emails at the
-  // configured time (Settings → Email). No-ops when disabled.
+  // Automatic adviser reports: per-section report emails on a daily / weekly
+  // / monthly schedule at the configured time (Settings → Email). No-ops when
+  // disabled.
   startAdviserReportService();
   // Weekly attendance badges (7.8): periodic authoritative recompute.
   startBadgeService();
