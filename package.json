@@ -1,7 +1,7 @@
 {
   "name": "tapin-school",
   "productName": "TapIn School",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Automated school gate QR attendance kiosk with SMS notifications to parents (Electron + React + MySQL).",
   "main": "dist-electron/electron/main.js",
   "author": "TapIn School",
