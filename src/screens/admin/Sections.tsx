@@ -552,6 +552,7 @@ export function SectionsPage() {
                 section: modal.section.section,
                 adviser_name: modal.section.adviser_name,
                 email: modal.section.email,
+                updated_at: modal.section.updated_at,
               }}
               sections={sections}
               lockSection
@@ -670,6 +671,7 @@ export function SectionsPage() {
               section: modal.section.section,
               adviser_name: modal.section.adviser_name,
               email: modal.section.email,
+              updated_at: modal.section.updated_at,
             }}
             sections={sections}
             lockSection

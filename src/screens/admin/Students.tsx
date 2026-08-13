@@ -713,7 +713,9 @@ const notify = (msg: string) => {
       // Enrollment is recorded in the globally selected school year.
       const payload = { ...input, school_year: year || undefined };
       if (modal?.type === 'edit') {
-        await api.updateStudent(modal.student.id, payload);
+        // Optimistic lock: send the version the form loaded so the backend
+        // refuses to overwrite a student saved by someone else since.
+        await api.updateStudent(modal.student.id, { ...payload, updated_at: modal.student.updated_at });
         notify('Student updated');
       } else {
         const created = await api.createStudent(payload);

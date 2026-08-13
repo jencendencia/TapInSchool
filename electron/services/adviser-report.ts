@@ -16,6 +16,7 @@
 import { db } from '../db/connection';
 import { settingsStore } from '../db/settings';
 import { sendAdviserReportEmails } from './report-email';
+import { withJobLock } from './job-lock';
 import { parseTime } from './bell-times';
 import type { AdviserReportFrequency, Settings } from '../../shared/types';
 
@@ -96,31 +97,39 @@ export async function runAdviserReport(): Promise<AdviserReportRunResult> {
   if (inFlight) return none;
   inFlight = true;
   try {
-    // Skip periods the gate was never used (weekend / holiday / kiosk off) —
-    // otherwise advisers would get a zero-scan report with nothing in it.
-    // Recording the date here also stops the per-minute polling until the
-    // next period.
-    const start = periodStart(frequency, today);
-    const [gate] = await db.query<{ c: number }[]>(
-      `SELECT COUNT(*) c FROM attendance_logs
-       WHERE scanned_at >= ? AND scanned_at < DATE_ADD(?, INTERVAL 1 DAY)`,
-      [start, todayStr],
-    );
-    if (!gate || gate.c === 0) {
-      await settingsStore.update({ adviser_report_last_run: todayStr });
-      return none;
-    }
+    // Leader election: only one machine may email a period's reports — two
+    // machines both past the period guard (both booted / clock-synced) would
+    // each email the same section report. Timeout 0 = skip this minute when a
+    // peer is already sending; the period guard still prevents re-fires.
+    return (
+      (await withJobLock('tapin:adviser-report', async () => {
+        // Skip periods the gate was never used (weekend / holiday / kiosk off) —
+        // otherwise advisers would get a zero-scan report with nothing in it.
+        // Recording the date here also stops the per-minute polling until the
+        // next period.
+        const start = periodStart(frequency, today);
+        const [gate] = await db.query<{ c: number }[]>(
+          `SELECT COUNT(*) c FROM attendance_logs
+           WHERE scanned_at >= ? AND scanned_at < DATE_ADD(?, INTERVAL 1 DAY)`,
+          [start, todayStr],
+        );
+        if (!gate || gate.c === 0) {
+          await settingsStore.update({ adviser_report_last_run: todayStr });
+          return none;
+        }
 
-    // Report covers the current period (day / week / month) up to the send
-    // time. Per-section reports, phones unmasked so advisers can follow up
-    // with parents. Section groupings reflect the current school year's
-    // enrollments.
-    const res = await sendAdviserReportEmails(start, todayStr, settings);
-    await settingsStore.update({ adviser_report_last_run: todayStr });
-    console.log(
-      `[tapin] adviser report (${frequency}): ${res.sent} sent, ${res.skipped} skipped, ${res.failed} failed — ${res.message}`,
+        // Report covers the current period (day / week / month) up to the send
+        // time. Per-section reports, phones unmasked so advisers can follow up
+        // with parents. Section groupings reflect the current school year's
+        // enrollments.
+        const res = await sendAdviserReportEmails(start, todayStr, settings);
+        await settingsStore.update({ adviser_report_last_run: todayStr });
+        console.log(
+          `[tapin] adviser report (${frequency}): ${res.sent} sent, ${res.skipped} skipped, ${res.failed} failed — ${res.message}`,
+        );
+        return { ran: true, sent: res.sent, skipped: res.skipped, failed: res.failed };
+      })) ?? none
     );
-    return { ran: true, sent: res.sent, skipped: res.skipped, failed: res.failed };
   } catch (err) {
     console.error('[tapin] adviser report failed:', err);
     return none;

@@ -10,6 +10,7 @@ import { ensureSchema } from './db/schema';
 import { ensureDefaultUsers } from './services/auth';
 import { getRecentActivity } from './services/attendance';
 import { startAbsenceService, stopAbsenceService } from './services/absence';
+import { withJobLock } from './services/job-lock';
 import { startAdviserReportService, stopAdviserReportService } from './services/adviser-report';
 import { startBackupService, stopBackupService } from './services/backup';
 import { startBadgeService, stopBadgeService } from './services/badges';
@@ -107,14 +108,19 @@ function enqueueScanAndBroadcast(payload: string, source: 'SCANNER' | 'WEBCAM' |
   );
 }
 
-// Serializes schema applications (boot + reconnect). The statements are
-// idempotent (CREATE TABLE IF NOT EXISTS + information_schema-guarded ALTERs),
-// but two concurrent runs could both see "column missing" and both ALTER —
-// collapsing them into one in-flight promise avoids that.
+// Serializes schema applications (boot + reconnect + dialog connect). The
+// statements are idempotent (CREATE TABLE IF NOT EXISTS + information_schema-
+// guarded ALTERs), so same-process runs collapse into one in-flight promise,
+// and a MySQL GET_LOCK makes the check-then-act ALTER window safe ACROSS
+// machines (two machines booting a fresh DB can't both run the same ALTER).
+// The lock waits up to 60 s for a busy peer; if it can't be acquired the
+// other machine is mid-migration and this pass skips (the reconnect handler
+// re-applies schema later).
 let schemaApplying: Promise<void> | null = null;
 function applySchema(): Promise<void> {
   if (!schemaApplying) {
-    schemaApplying = ensureSchema(db.query.bind(db))
+    schemaApplying = withJobLock('tapin:schema', () => ensureSchema(db.query.bind(db)), 60)
+      .then(() => undefined) // null result → lock held elsewhere, nothing to do
       .catch((err) => console.error('[tapin] schema apply failed:', err))
       .finally(() => {
         schemaApplying = null;

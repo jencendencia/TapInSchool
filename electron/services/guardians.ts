@@ -12,6 +12,7 @@
 // payload, which the unique key rejects as a true duplicate.
 import { db } from '../db/connection';
 import { generateGuardianPayload } from './qr';
+import { updateWithVersionCheck } from './db-retry';
 import { refreshOfflineCache } from './offline';
 import type { Guardian, GuardianInput, GuardianWriteResult } from '../../shared/types';
 
@@ -146,7 +147,7 @@ export async function syncGuardianSnapshot(guardian: Guardian): Promise<void> {
 
 export async function updateGuardian(
   id: number,
-  patch: Partial<GuardianInput & { is_active?: boolean }>,
+  patch: Partial<GuardianInput & { is_active?: boolean; updated_at?: string }>,
   opts?: { allowSameName?: boolean },
 ): Promise<GuardianWriteResult> {
   const gid = Number(id);
@@ -167,10 +168,25 @@ export async function updateGuardian(
     if (other) return { outcome: 'duplicate', existing: other };
   }
   const payload = generateGuardianPayload(nextName, nextAddress);
-  await db.execute(
-    'UPDATE guardians SET full_name = ?, mobile = ?, address = ?, qr_hash_payload = ?, is_active = ? WHERE id = ?',
-    [nextName, nextMobile, nextAddress, payload, nextActive, gid],
-  );
+  // Optimistic lock (C3): the edit form sends the updated_at it loaded — only
+  // overwrite when the row is still at that version.
+  const expectedUpdatedAt = patch.updated_at ? String(patch.updated_at) : '';
+  if (expectedUpdatedAt) {
+    const { notFound } = await updateWithVersionCheck(
+      'UPDATE guardians SET full_name = ?, mobile = ?, address = ?, qr_hash_payload = ?, is_active = ? WHERE id = ? AND updated_at = ?',
+      [nextName, nextMobile, nextAddress, payload, nextActive, gid, expectedUpdatedAt],
+      'SELECT updated_at FROM guardians WHERE id = ?',
+      [gid],
+      expectedUpdatedAt,
+      'This guardian was changed by someone else. Reload to see the latest version.',
+    );
+    if (notFound) throw new Error('Guardian not found.');
+  } else {
+    await db.execute(
+      'UPDATE guardians SET full_name = ?, mobile = ?, address = ?, qr_hash_payload = ?, is_active = ? WHERE id = ?',
+      [nextName, nextMobile, nextAddress, payload, nextActive, gid],
+    );
+  }
   const updated = await findGuardianById(gid);
   if (!updated) throw new Error('Guardian not found.');
   // Contact/identity changes must propagate to every linked student (SMS

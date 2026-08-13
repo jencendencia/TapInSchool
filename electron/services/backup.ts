@@ -6,6 +6,7 @@ import { app } from 'electron';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { db } from '../db/connection';
+import { withJobLock } from './job-lock';
 
 const BACKUP_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const KEEP_BACKUPS = 14;
@@ -20,38 +21,44 @@ function backupsDir(): string {
  */
 export async function createBackup(): Promise<string | null> {
   if (!db.isOnline()) return null;
-  try {
-    // Explicit alias: MySQL's information_schema columns use uppercase
-    // canonical names (TABLE_NAME), so without `AS table_name` the row key
-    // would be undefined and the snapshot loop would crash.
-    const tables = await db.query<{ table_name: string }[]>(
-      'SELECT TABLE_NAME AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY TABLE_NAME',
-    );
-    // NOTE: dumps all rows including student photos (data URIs); for a
-    // school-sized DB this is a few MB. If logs grow huge, scope this to
-    // attendance_logs/sms_logs only (see FEATURE_IMPROVEMENT_PLAN.md 3.2).
-    const snapshot: { exportedAt: string; tables: Record<string, unknown[]> } = {
-      exportedAt: new Date().toISOString(),
-      tables: {},
-    };
-    let totalRows = 0;
-    for (const { table_name: name } of tables) {
-      // Escape backticks so an odd table name can't break the statement.
-      const rows = await db.query<unknown[]>(`SELECT * FROM \`${name.replace(/`/g, '``')}\``);
-      snapshot.tables[name] = rows;
-      totalRows += rows.length;
+  // Leader election: the backup is a snapshot of the SHARED database, so only
+  // one machine should dump it per cycle — otherwise N machines each read the
+  // whole DB every 12 h. Timeout 0 = skip when a peer is already backing up
+  // (the next cycle, or the boot snapshot, still covers it).
+  return withJobLock('tapin:backup', async () => {
+    try {
+      // Explicit alias: MySQL's information_schema columns use uppercase
+      // canonical names (TABLE_NAME), so without `AS table_name` the row key
+      // would be undefined and the snapshot loop would crash.
+      const tables = await db.query<{ table_name: string }[]>(
+        'SELECT TABLE_NAME AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY TABLE_NAME',
+      );
+      // NOTE: dumps all rows including student photos (data URIs); for a
+      // school-sized DB this is a few MB. If logs grow huge, scope this to
+      // attendance_logs/sms_logs only (see FEATURE_IMPROVEMENT_PLAN.md 3.2).
+      const snapshot: { exportedAt: string; tables: Record<string, unknown[]> } = {
+        exportedAt: new Date().toISOString(),
+        tables: {},
+      };
+      let totalRows = 0;
+      for (const { table_name: name } of tables) {
+        // Escape backticks so an odd table name can't break the statement.
+        const rows = await db.query<unknown[]>(`SELECT * FROM \`${name.replace(/`/g, '``')}\``);
+        snapshot.tables[name] = rows;
+        totalRows += rows.length;
+      }
+      const dir = backupsDir();
+      await fs.mkdir(dir, { recursive: true });
+      const file = path.join(dir, `backup-${timestamp()}.json`);
+      await fs.writeFile(file, JSON.stringify(snapshot));
+      await pruneBackups(dir);
+      console.log(`[tapin] backup written: ${file} (${totalRows} rows)`);
+      return file;
+    } catch (err) {
+      console.error('[tapin] backup failed:', err);
+      return null;
     }
-    const dir = backupsDir();
-    await fs.mkdir(dir, { recursive: true });
-    const file = path.join(dir, `backup-${timestamp()}.json`);
-    await fs.writeFile(file, JSON.stringify(snapshot));
-    await pruneBackups(dir);
-    console.log(`[tapin] backup written: ${file} (${totalRows} rows)`);
-    return file;
-  } catch (err) {
-    console.error('[tapin] backup failed:', err);
-    return null;
-  }
+  });
 }
 
 function timestamp(): string {

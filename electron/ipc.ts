@@ -53,6 +53,7 @@ import { buildReportWorkbook } from './services/report-export';
 import { sendAdviserReportEmails, sendReportEmail, sendTestEmail } from './services/report-email';
 import { checkForUpdates, downloadUpdate, installUpdate } from './services/updater';
 import { activateLicense, checkLicense, getMachineIdValue } from './services/license';
+import { withRetry, updateWithVersionCheck } from './services/db-retry';
 import { getProvider } from './sms/providers';
 import type {
   ActivityItem,
@@ -563,7 +564,23 @@ export function registerIpc(scanner: ScannerHook): void {
     }
     if (!sets.length) throw new Error('Nothing to update.');
     params.push(id);
-    await db.execute(`UPDATE students SET ${sets.join(', ')} WHERE id = ?`, params);
+    // Optimistic lock (C3): when the form sends the updated_at it loaded, only
+    // overwrite if the row is still at that version — otherwise someone else
+    // saved since, and overwriting would silently lose their edit.
+    const expectedUpdatedAt = 'updated_at' in input && input.updated_at ? String(input.updated_at) : '';
+    if (expectedUpdatedAt) {
+      const { notFound } = await updateWithVersionCheck(
+        `UPDATE students SET ${sets.join(', ')} WHERE id = ? AND updated_at = ?`,
+        [...params, expectedUpdatedAt],
+        'SELECT updated_at FROM students WHERE id = ?',
+        [id],
+        expectedUpdatedAt,
+        'This student was changed by someone else. Reload to see the latest version.',
+      );
+      if (notFound) throw new Error('Student not found.');
+    } else {
+      await db.execute(`UPDATE students SET ${sets.join(', ')} WHERE id = ?`, params);
+    }
     // Keep the (requested) school year's enrollment in sync when the section
     // changes — the Students page edits the globally selected year. Only the
     // current year's enrollment is mirrored onto students.grade_section.
@@ -633,12 +650,29 @@ export function registerIpc(scanner: ScannerHook): void {
     const adviserName = String(input?.adviser_name ?? '').trim();
     const email = String(input?.email ?? '').trim();
     if (!gradeSection) throw new Error('Section is required.');
-    // Upsert by grade_section — a section has at most one registry row.
-    await db.execute(
-      `INSERT INTO sections (grade_section, grade, section, adviser_name, email) VALUES (?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE grade = ?, section = ?, adviser_name = ?, email = ?`,
-      [gradeSection, grade, section, adviserName, email, grade, section, adviserName, email],
-    );
+    // Optimistic lock (C3): an edit sends the loaded updated_at, so only
+    // overwrite if the section is still at that version (prevents two admins
+    // silently clobbering each other's adviser/email edits). New sections
+    // (no updated_at) keep the plain upsert.
+    const expectedUpdatedAt = input?.updated_at ? String(input.updated_at).trim() : '';
+    if (expectedUpdatedAt) {
+      const { notFound } = await updateWithVersionCheck(
+        'UPDATE sections SET grade = ?, section = ?, adviser_name = ?, email = ? WHERE grade_section = ? AND updated_at = ?',
+        [grade, section, adviserName, email, gradeSection, expectedUpdatedAt],
+        'SELECT updated_at FROM sections WHERE grade_section = ?',
+        [gradeSection],
+        expectedUpdatedAt,
+        'This section was changed by someone else. Reload to see the latest version.',
+      );
+      if (notFound) throw new Error('Section no longer exists.');
+    } else {
+      // Upsert by grade_section — a section has at most one registry row.
+      await db.execute(
+        `INSERT INTO sections (grade_section, grade, section, adviser_name, email) VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE grade = ?, section = ?, adviser_name = ?, email = ?`,
+        [gradeSection, grade, section, adviserName, email, grade, section, adviserName, email],
+      );
+    }
     const [row] = await db.query<Section[]>('SELECT * FROM sections WHERE grade_section = ?', [gradeSection]);
     return row;
   });
@@ -924,42 +958,47 @@ export function registerIpc(scanner: ScannerHook): void {
         continue;
       }
       try {
-        const payload = generatePayload(studentNo);
-        // Guardian QR is issued only when a guardian name is present (same rule
-        // as the Add/Edit form); it hashes the guardian identity so shared
-        // guardians reuse one QR. Rows that name a guardian AUTO-REGISTER it
-        // in the guardians registry (find-or-create by name + address) and
-        // link the student — bulk import runs no duplicate-name prompt.
-        const gName = String(guardianName ?? '').trim();
-        const gAddress = String(guardianAddress ?? '').trim();
-        let guardianId: number | null = null;
-        let guardianPhone = parentPhone || '';
-        let guardianQr: string | null = gName ? generateGuardianPayload(gName, gAddress) : null;
-        if (gName) {
-          const g = await findOrCreateGuardian(gName, gAddress, parentPhone || '');
-          guardianId = g.id;
-          guardianPhone = g.mobile;
-          guardianQr = g.qr_hash_payload;
-        }
-        const res = await db.execute(
-          `INSERT INTO students (student_no, qr_hash_payload, full_name, gender, grade_section, parent_phone,
-                                 lrn, guardian_name, guardian_address, guardian_qr_hash_payload, guardian_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            studentNo,
-            payload,
-            fullName,
-            normalizeGender(gender),
-            gradeSection || '',
-            guardianPhone,
-            String(lrn ?? '').trim(),
-            gName,
-            gAddress,
-            guardianQr,
-            guardianId,
-          ],
-        );
-        if (gradeSection) await syncEnrollment(res.insertId, gradeSection);
+        // Each row's writes are retried on deadlock (1213/1205) — inserts are
+        // idempotent by unique key (student_no), so a retried attempt can't
+        // double-add.
+        await withRetry(async () => {
+          const payload = generatePayload(studentNo);
+          // Guardian QR is issued only when a guardian name is present (same rule
+          // as the Add/Edit form); it hashes the guardian identity so shared
+          // guardians reuse one QR. Rows that name a guardian AUTO-REGISTER it
+          // in the guardians registry (find-or-create by name + address) and
+          // link the student — bulk import runs no duplicate-name prompt.
+          const gName = String(guardianName ?? '').trim();
+          const gAddress = String(guardianAddress ?? '').trim();
+          let guardianId: number | null = null;
+          let guardianPhone = parentPhone || '';
+          let guardianQr: string | null = gName ? generateGuardianPayload(gName, gAddress) : null;
+          if (gName) {
+            const g = await findOrCreateGuardian(gName, gAddress, parentPhone || '');
+            guardianId = g.id;
+            guardianPhone = g.mobile;
+            guardianQr = g.qr_hash_payload;
+          }
+          const res = await db.execute(
+            `INSERT INTO students (student_no, qr_hash_payload, full_name, gender, grade_section, parent_phone,
+                                   lrn, guardian_name, guardian_address, guardian_qr_hash_payload, guardian_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              studentNo,
+              payload,
+              fullName,
+              normalizeGender(gender),
+              gradeSection || '',
+              guardianPhone,
+              String(lrn ?? '').trim(),
+              gName,
+              gAddress,
+              guardianQr,
+              guardianId,
+            ],
+          );
+          if (gradeSection) await syncEnrollment(res.insertId, gradeSection);
+        });
         result.added++;
       } catch (err) {
         if ((err as { code?: string }).code === 'ER_DUP_ENTRY') {

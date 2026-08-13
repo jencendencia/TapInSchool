@@ -15,6 +15,7 @@
 // browser mock so demo mode always agrees with the real backend.
 import { db } from '../db/connection';
 import { settingsStore } from '../db/settings';
+import { withJobLock } from './job-lock';
 import { computeScanFlag } from './bell-times';
 import {
   BADGE_MIN_SCHOOL_DAYS,
@@ -369,18 +370,25 @@ export async function recomputeStudent(studentId: number): Promise<void> {
 /** Maintenance pass: resync every active student's badges. */
 export async function recomputeAllBadges(): Promise<number> {
   if (!db.isOnline()) return 0;
-  await ensureBadgeTables();
-  const rows = await db.query<{ id: number }[]>('SELECT id FROM students WHERE is_active = 1');
-  let done = 0;
-  for (const r of rows) {
-    try {
-      await recomputeStudent(r.id);
-      done++;
-    } catch (err) {
-      console.error(`[tapin] badge recompute failed for student ${r.id}:`, err);
-    }
-  }
-  return done;
+  // Leader election: recompute is idempotent (INSERT/DELETE diff per student)
+  // but expensive — only one machine should run the full pass at a time.
+  // Timeout 0 = skip this cycle when a peer is already recomputing.
+  return (
+    (await withJobLock('tapin:badges', async () => {
+      await ensureBadgeTables();
+      const rows = await db.query<{ id: number }[]>('SELECT id FROM students WHERE is_active = 1');
+      let done = 0;
+      for (const r of rows) {
+        try {
+          await recomputeStudent(r.id);
+          done++;
+        } catch (err) {
+          console.error(`[tapin] badge recompute failed for student ${r.id}:`, err);
+        }
+      }
+      return done;
+    })) ?? 0
+  );
 }
 
 // ---- Reads / writes for the admin + leaderboard ----------------------------

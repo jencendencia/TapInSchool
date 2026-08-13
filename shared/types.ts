@@ -56,6 +56,9 @@ export interface Student {
   photo_url: string | null;
   is_active: boolean;
   created_at: string;
+  /** Row version for optimistic locking (edit forms send it back to catch
+   *  concurrent saves). */
+  updated_at: string;
 }
 
 export interface StudentInput {
@@ -83,6 +86,10 @@ export interface StudentInput {
    * (the live section); editing a past year only touches that year's history.
    */
   school_year?: string;
+  /** Expected row version (optimistic lock) — the value the edit form loaded.
+   *  When provided, the backend refuses to overwrite a row that was saved by
+   *  someone else since (surfaces a conflict instead of a silent lost update). */
+  updated_at?: string;
 }
 
 export interface AttendanceLog {
@@ -877,6 +884,8 @@ export interface Section {
   adviser_name: string;
   email: string;
   created_at: string;
+  /** Row version for optimistic locking (edit forms send it back). */
+  updated_at: string;
 }
 
 export interface SectionInput {
@@ -888,6 +897,8 @@ export interface SectionInput {
   section: string;
   adviser_name: string;
   email: string;
+  /** Expected row version (optimistic lock) — the value the edit form loaded. */
+  updated_at?: string;
 }
 
 // ---- School years & enrollments --------------------------------------------
@@ -1182,10 +1193,11 @@ export interface TapinApi {
    *  guardian when the name is already taken (pass allowSameName to save a
    *  same-named, different-person record anyway). */
   createGuardian(input: GuardianInput, opts?: { allowSameName?: boolean }): Promise<GuardianWriteResult>;
-  /** Updates a guardian; mobile/address changes re-sync linked students. */
+  /** Updates a guardian; mobile/address changes re-sync linked students.
+   *  `updated_at` in the patch is the expected row version (optimistic lock). */
   updateGuardian(
     id: number,
-    patch: Partial<GuardianInput & { is_active?: boolean }>,
+    patch: Partial<GuardianInput & { is_active?: boolean; updated_at?: string }>,
     opts?: { allowSameName?: boolean },
   ): Promise<GuardianWriteResult>;
   /** Deletes a guardian, unlinking (but not wiping) its students' snapshots. */

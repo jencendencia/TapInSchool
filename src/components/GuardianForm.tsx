@@ -33,7 +33,7 @@ export function GuardianForm({
   const [input, setInput] = useState<GuardianInput | null>(null);
 
   const save = async (allowSameName: boolean) => {
-    const payload: GuardianInput = {
+    const payload: GuardianInput & { updated_at?: string } = {
       full_name: name.trim(),
       mobile: mobile.trim(),
       address: address.trim(),
@@ -46,7 +46,13 @@ export function GuardianForm({
     setSaving(true);
     try {
       const result = initial
-        ? await api.updateGuardian(initial.id, payload, allowSameName ? { allowSameName: true } : undefined)
+        ? // Optimistic lock: send the version the form loaded so the backend
+          // refuses to overwrite a guardian saved by someone else since.
+          await api.updateGuardian(
+            initial.id,
+            { ...payload, updated_at: initial.updated_at },
+            allowSameName ? { allowSameName: true } : undefined,
+          )
         : await api.createGuardian(payload, allowSameName ? { allowSameName: true } : undefined);
       if (result.outcome === 'duplicate') {
         if (allowSameName) {

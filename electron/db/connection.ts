@@ -223,6 +223,23 @@ class Database extends EventEmitter {
     };
   }
 
+  /**
+   * Runs `fn` with a dedicated pooled connection, always releasing it
+   * afterwards. Returns null when no pool exists (offline). Used by the
+   * job-lock helper, which needs a stable session for GET_LOCK — the lock is
+   * held on this connection for the whole job and auto-released by MySQL if
+   * the process dies mid-job.
+   */
+  async withConnection<T>(fn: (conn: PoolConnection) => Promise<T>): Promise<T | null> {
+    if (!this.pool) return null;
+    const conn = await this.pool.getConnection();
+    try {
+      return await fn(conn);
+    } finally {
+      conn.release();
+    }
+  }
+
   async stop(): Promise<void> {
     if (this.pool) {
       await this.pool.end().catch(() => undefined);

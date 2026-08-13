@@ -7,8 +7,10 @@
 // When MySQL is unreachable, scans are processed from the local offline
 // snapshot (students + today's scan state) and written to the write-behind
 // queue (services/offline.ts) so no scan is ever lost.
+import type { ResultSetHeader } from 'mysql2/promise';
 import { db } from '../db/connection';
 import { settingsStore } from '../db/settings';
+import { withRetry } from './db-retry';
 import { maskPhone } from './qr';
 import { computeScanFlag, flagSelectParams, flagSelectSql } from './bell-times';
 import { buildSmsMessage, resolveTemplate } from '../sms/message-builder';
@@ -139,6 +141,7 @@ function toStudent(c: CachedStudent): Student {
     photo_url: c.photo_url,
     is_active: c.is_active,
     created_at: '',
+    updated_at: '',
   };
 }
 
@@ -244,40 +247,60 @@ async function processScanOnline(
   );
   const entryType = forcedType ?? (lastToday[0]?.entry_type === 'IN' ? 'OUT' : 'IN');
 
-  // --- Commit log (FR-1, FR-3) ---------------------------------------------
-  const insert = await db.execute(
-    'INSERT INTO attendance_logs (student_id, entry_type, source) VALUES (?, ?, ?)',
-    [student.id, entryType, source],
+  // --- Commit log + SMS (FR-1, FR-3) in ONE transaction (C1) ----------------
+  // The attendance insert and its parent SMS must commit together: a crash
+  // between them would record the scan with no notification (or notify
+  // without a log). A deadlock / lock-wait timeout (1213/1205 — normal at
+  // peak hour when two machines scan related rows) is retried by withRetry;
+  // the transaction guarantees the retried attempt starts clean, so the scan
+  // is never double-logged or the parent double-notified.
+  const committed = await withRetry(() =>
+    db.withConnection(async (conn) => {
+      await conn.beginTransaction();
+      try {
+        // Type the INSERT result so insertId is available (mysql2's default
+        // QueryResult union doesn't expose it).
+        const [insertRes] = await conn.execute<ResultSetHeader>(
+          'INSERT INTO attendance_logs (student_id, entry_type, source) VALUES (?, ?, ?)',
+          [student.id, entryType, source],
+        );
+        const scannedAt = new Date();
+        const flag = computeScanFlag(entryType, scannedAt, settings);
+        const log: AttendanceLog = {
+          id: insertRes.insertId,
+          student_id: student.id,
+          entry_type: entryType,
+          scanned_at: scannedAt.toISOString(),
+          source,
+          flag,
+        };
+        let smsQueued = false;
+        if (student.parent_phone) {
+          const message = buildSmsMessage(resolveTemplate(settings), {
+            fullName: student.full_name,
+            gradeSection: student.grade_section,
+            entryType,
+            flag,
+            scannedAt,
+            school: settings.school_name,
+          });
+          await conn.execute(
+            "INSERT INTO sms_logs (attendance_id, parent_phone, message, status) VALUES (?, ?, ?, 'PENDING')",
+            [log.id, student.parent_phone, message],
+          );
+          smsQueued = true;
+        }
+        await conn.commit();
+        return { log, smsQueued };
+      } catch (err) {
+        await conn.rollback().catch(() => undefined);
+        throw err;
+      }
+    }),
   );
+  if (!committed) throw new Error('Database is offline');
   onlineScanCommitted = true;
-  const scannedAt = new Date();
-  const flag = computeScanFlag(entryType, scannedAt, settings);
-  const log: AttendanceLog = {
-    id: insert.insertId,
-    student_id: student.id,
-    entry_type: entryType,
-    scanned_at: scannedAt.toISOString(),
-    source,
-    flag,
-  };
-
-  // --- Enqueue SMS (FR-3) --------------------------------------------------
-  let smsQueued = false;
-  if (student.parent_phone) {
-    const message = buildSmsMessage(resolveTemplate(settings), {
-      fullName: student.full_name,
-      gradeSection: student.grade_section,
-      entryType,
-      flag,
-      scannedAt,
-      school: settings.school_name,
-    });
-    await db.execute(
-      "INSERT INTO sms_logs (attendance_id, parent_phone, message, status) VALUES (?, ?, ?, 'PENDING')",
-      [log.id, student.parent_phone, message],
-    );
-    smsQueued = true;
-  }
+  const { log, smsQueued } = committed;
 
   const result: ScanResult = {
     kind: 'SUCCESS',

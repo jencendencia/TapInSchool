@@ -11,6 +11,8 @@
 // weekend still catches Monday/Friday absences.
 import { db } from '../db/connection';
 import { settingsStore } from '../db/settings';
+import { withJobLock } from './job-lock';
+import { withRetry } from './db-retry';
 import { flagCutoffs, parseTime } from './bell-times';
 import { buildSmsMessage, resolveTemplate } from '../sms/message-builder';
 import type { Settings } from '../../shared/types';
@@ -109,28 +111,47 @@ async function runForDay(day: Date, settings: Settings): Promise<{ absent: numbe
     status: 'ABSENT' | 'LATE',
   ) => {
     const prev = existingMap.get(String(student.id));
-    let smsSent = 0;
     // SMS only for ABSENT on the current day, and only once per student/day.
-    if (status === 'ABSENT' && smsToday && student.parent_phone && (!prev || prev.status !== 'ABSENT' || !prev.sms_sent)) {
-      const message = buildSmsMessage(template, {
-        fullName: student.full_name,
-        gradeSection: student.grade_section,
-        scannedAt: new Date(),
-        school: settings.school_name,
-        absence: true,
-      });
-      await db.execute(
-        "INSERT INTO sms_logs (attendance_id, parent_phone, message, status) VALUES (NULL, ?, ?, 'PENDING')",
-        [student.parent_phone, message],
-      );
-      smsSent = 1;
-      out.sms++;
-    }
-    await db.execute(
-      `INSERT INTO absence_logs (student_id, day, status, sms_sent) VALUES (?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE status = VALUES(status), sms_sent = IF(absence_logs.sms_sent = 1, 1, VALUES(sms_sent))`,
-      [student.id, dayStr, status, smsSent],
+    // The SMS insert + absence upsert commit in ONE transaction (retried on
+    // deadlock), so a retry can never double-notify a parent.
+    const shouldSms =
+      status === 'ABSENT' && smsToday && student.parent_phone && (!prev || prev.status !== 'ABSENT' || !prev.sms_sent);
+    // withConnection returns null only when the pool is gone (offline) — the
+    // caller already checked db.isOnline(), so treat that as nothing sent.
+    const result = await withRetry(() =>
+      db.withConnection(async (conn) => {
+        await conn.beginTransaction();
+        try {
+          let smsSent = 0;
+          if (shouldSms) {
+            const message = buildSmsMessage(template, {
+              fullName: student.full_name,
+              gradeSection: student.grade_section,
+              scannedAt: new Date(),
+              school: settings.school_name,
+              absence: true,
+            });
+            await conn.execute(
+              "INSERT INTO sms_logs (attendance_id, parent_phone, message, status) VALUES (NULL, ?, ?, 'PENDING')",
+              [student.parent_phone, message],
+            );
+            smsSent = 1;
+          }
+          await conn.execute(
+            `INSERT INTO absence_logs (student_id, day, status, sms_sent) VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE status = VALUES(status), sms_sent = IF(absence_logs.sms_sent = 1, 1, VALUES(sms_sent))`,
+            [student.id, dayStr, status, smsSent],
+          );
+          await conn.commit();
+          return { smsSent };
+        } catch (err) {
+          await conn.rollback().catch(() => undefined);
+          throw err;
+        }
+      }),
     );
+    const smsSent = result?.smsSent ?? 0;
+    if (smsSent) out.sms++;
     if (status === 'ABSENT') out.absent++;
     else out.late++;
   };
@@ -145,34 +166,42 @@ export async function runAbsenceDetection(): Promise<AbsenceRunResult> {
   const settings = settingsStore.get();
   if (!settings.absence_detect || !db.isOnline()) return { ran: false, absent: 0, late: 0, sms: 0 };
 
-  const today = new Date();
-  const lastRun = settings.absence_last_run ? parseDay(settings.absence_last_run) : null;
-  const days: Date[] = [];
-  if (lastRun) {
-    let d = addDays(lastRun, 1);
-    while (d.getTime() < today.getTime() && days.length < BACKFILL_CAP) {
-      days.push(d);
-      d = addDays(d, 1);
-    }
-  }
-  // Today only counts once dismissal + buffer has passed.
-  if (isPastCutoff(settings)) days.push(today);
+  // Leader election: only one machine flags absences + enqueues the parent
+  // SMS per day, so two machines can't both notify a parent or double-flag.
+  // Timeout 0 = skip this cycle when a peer is already running it (the
+  // absence_last_run guard in the DB still covers the day either way).
+  return (
+    (await withJobLock('tapin:absence', async () => {
+      const today = new Date();
+      const lastRun = settings.absence_last_run ? parseDay(settings.absence_last_run) : null;
+      const days: Date[] = [];
+      if (lastRun) {
+        let d = addDays(lastRun, 1);
+        while (d.getTime() < today.getTime() && days.length < BACKFILL_CAP) {
+          days.push(d);
+          d = addDays(d, 1);
+        }
+      }
+      // Today only counts once dismissal + buffer has passed.
+      if (isPastCutoff(settings)) days.push(today);
 
-  if (days.length === 0) return { ran: false, absent: 0, late: 0, sms: 0 };
+      if (days.length === 0) return { ran: false, absent: 0, late: 0, sms: 0 };
 
-  const totals = { absent: 0, late: 0, sms: 0 };
-  for (const day of days) {
-    try {
-      const r = await runForDay(day, settings);
-      totals.absent += r.absent;
-      totals.late += r.late;
-      totals.sms += r.sms;
-    } catch (err) {
-      console.error(`[tapin] absence detection failed for ${fmtDay(day)}:`, err);
-    }
-  }
-  await settingsStore.update({ absence_last_run: fmtDay(today) });
-  return { ran: true, ...totals };
+      const totals = { absent: 0, late: 0, sms: 0 };
+      for (const day of days) {
+        try {
+          const r = await runForDay(day, settings);
+          totals.absent += r.absent;
+          totals.late += r.late;
+          totals.sms += r.sms;
+        } catch (err) {
+          console.error(`[tapin] absence detection failed for ${fmtDay(day)}:`, err);
+        }
+      }
+      await settingsStore.update({ absence_last_run: fmtDay(today) });
+      return { ran: true, ...totals };
+    })) ?? { ran: false, absent: 0, late: 0, sms: 0 }
+  );
 }
 
 let timer: NodeJS.Timeout | null = null;

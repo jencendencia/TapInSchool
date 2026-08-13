@@ -327,6 +327,7 @@ private sections: Section[] = [];
       photo_url: null,
       is_active: true,
       created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
+      updated_at: new Date(Date.now() - 30 * 86400000).toISOString(),
     }));
 
     // Demo guardians: registered from the demo students' guardian identities so
@@ -371,6 +372,7 @@ private sections: Section[] = [];
       adviser_name,
       email,
       created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
+      updated_at: new Date(Date.now() - 30 * 86400000).toISOString(),
     }));
 
     // Demo announcements for the kiosk idle carousel — one full-bleed image
@@ -1084,6 +1086,7 @@ private sections: Section[] = [];
       photo_url: input.photo_url ?? null,
       is_active: input.is_active ?? true,
       created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
     this.students.push(s);
     // The enrollment is recorded for the requested (or current) school year.
@@ -1096,6 +1099,11 @@ private sections: Section[] = [];
   async updateStudent(id: number, input: Partial<StudentInput>): Promise<Student> {
     const s = this.students.find((x) => x.id === id);
     if (!s) throw new Error('Student not found');
+    // Optimistic lock parity (mirrors ipc.ts): refuse to overwrite a student
+    // saved by someone else since this form loaded.
+    if (input.updated_at !== undefined && String(input.updated_at) !== s.updated_at) {
+      throw new Error('This student was changed by someone else. Reload to see the latest version.');
+    }
     // school_year is an enrollment hint, not a student column — keep it off the row.
     const { school_year, ...studentFields } = input;
     const prevSection = s.grade_section;
@@ -1145,6 +1153,7 @@ private sections: Section[] = [];
         this.enrollments.push({ studentId: id, schoolYear: year, gradeSection: input.grade_section });
       }
     }
+    s.updated_at = new Date().toISOString();
     return { ...s };
   }
 
@@ -1202,11 +1211,16 @@ private sections: Section[] = [];
 
   async updateGuardian(
     id: number,
-    patch: Partial<GuardianInput & { is_active?: boolean }>,
+    patch: Partial<GuardianInput & { is_active?: boolean; updated_at?: string }>,
     opts?: { allowSameName?: boolean },
   ): Promise<GuardianWriteResult> {
     const g = this.guardians.find((x) => x.id === id);
     if (!g) throw new Error('Guardian not found.');
+    // Optimistic lock parity (mirrors guardians.ts): refuse to overwrite a
+    // guardian saved by someone else since this form loaded.
+    if (patch.updated_at !== undefined && String(patch.updated_at) !== g.updated_at) {
+      throw new Error('This guardian was changed by someone else. Reload to see the latest version.');
+    }
     const nextName = patch.full_name !== undefined ? String(patch.full_name).trim() : g.full_name;
     const nextMobile = patch.mobile !== undefined ? String(patch.mobile).trim() : g.mobile;
     const nextAddress = patch.address !== undefined ? String(patch.address).trim() : g.address;
@@ -1407,10 +1421,16 @@ private sections: Section[] = [];
     const section = (input.section || '').trim() || splitSection(gradeSection).section;
     const existing = this.sections.find((a) => a.grade_section === gradeSection);
     if (existing) {
+      // Optimistic lock parity (mirrors ipc.ts): refuse to overwrite a section
+      // saved by someone else since this form loaded.
+      if (input.updated_at !== undefined && String(input.updated_at) !== existing.updated_at) {
+        throw new Error('This section was changed by someone else. Reload to see the latest version.');
+      }
       existing.grade = grade;
       existing.section = section;
       existing.adviser_name = (input.adviser_name || '').trim();
       existing.email = (input.email || '').trim();
+      existing.updated_at = new Date().toISOString();
       return { ...existing };
     }
     const sectionRow: Section = {
@@ -1421,6 +1441,7 @@ private sections: Section[] = [];
       adviser_name: (input.adviser_name || '').trim(),
       email: (input.email || '').trim(),
       created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
     this.sections.push(sectionRow);
     return { ...sectionRow };
