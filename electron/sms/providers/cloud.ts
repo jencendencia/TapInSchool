@@ -160,15 +160,36 @@ export class CloudProvider implements SmsProvider {
     }
   }
 
+  /** Max time a provider HTTP request may take before the send is abandoned. */
+  private static readonly SEND_TIMEOUT_MS = 15000;
+
   async send(settings: Settings, phone: string, message: string): Promise<void> {
-    if (settings.cloud_provider === 'semaphore') {
-      await this.sendSemaphore(settings, phone, message);
-    } else if (settings.cloud_provider === 'messagebird') {
-      await this.sendMessageBird(settings, phone, message);
-    } else if (settings.cloud_provider === 'philsms') {
-      await this.sendPhilSms(settings, phone, message);
-    } else {
-      await this.sendGeneric(settings, phone, message);
+    // A provider that hangs (unreachable host, captive portal, stalled DNS)
+    // must not wedge the SMS queue worker: the worker holds the queue lock
+    // for the whole tick, so a forever-pending fetch would stall dispatch
+    // AND hold a pool connection indefinitely.
+    const work = (async (): Promise<void> => {
+      if (settings.cloud_provider === 'semaphore') {
+        await this.sendSemaphore(settings, phone, message);
+      } else if (settings.cloud_provider === 'messagebird') {
+        await this.sendMessageBird(settings, phone, message);
+      } else if (settings.cloud_provider === 'philsms') {
+        await this.sendPhilSms(settings, phone, message);
+      } else {
+        await this.sendGeneric(settings, phone, message);
+      }
+    })();
+    let timer: NodeJS.Timeout | null = null;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('SMS provider send timed out (15s)')),
+        CloudProvider.SEND_TIMEOUT_MS,
+      );
+    });
+    try {
+      await Promise.race([work, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 

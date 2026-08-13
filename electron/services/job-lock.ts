@@ -14,6 +14,19 @@
 import { db } from '../db/connection';
 
 /**
+ * Per-machine job queue. A job holds its lock on a DEDICATED pooled
+ * connection for its whole run and then makes regular pool queries for the
+ * work itself — so several jobs firing at once (boot, every DB reconnect, or
+ * timer overlap) could check out every pool connection and then deadlock
+ * waiting for a free one for their inner queries. With a small pool that
+ * starves ALL queries — including login. Chaining acquisitions on this local
+ * queue means at most ONE job holds a lock connection at a time, so the pool
+ * can never be exhausted by the job machinery. Cross-machine correctness is
+ * unchanged: GET_LOCK still arbitrates between machines.
+ */
+let jobChain: Promise<unknown> = Promise.resolve();
+
+/**
  * Runs `fn` only while this machine holds the MySQL named lock `name`.
  *
  * `timeout` is how many seconds GET_LOCK waits for a busy lock before giving
@@ -25,12 +38,24 @@ import { db } from '../db/connection';
  * machine holds it, or the DB is offline). Callers treat null as "not my
  * turn this cycle" and simply skip.
  */
-export async function withJobLock<T>(
+export function withJobLock<T>(
   name: string,
   fn: () => Promise<T>,
   timeout = 0,
 ): Promise<T | null> {
-  if (!db.isOnline()) return null;
+  if (!db.isOnline()) return Promise.resolve(null);
+  const run = jobChain.then(() => acquireAndRun(name, fn, timeout));
+  // Keep the chain alive even when a job rejects — the next caller chains
+  // onto this settled promise instead of a broken one.
+  jobChain = run.catch(() => undefined);
+  return run;
+}
+
+async function acquireAndRun<T>(
+  name: string,
+  fn: () => Promise<T>,
+  timeout: number,
+): Promise<T | null> {
   return db.withConnection(async (conn) => {
     const [rows] = await conn.query(
       'SELECT GET_LOCK(?, ?) AS got',
