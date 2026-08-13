@@ -34,7 +34,8 @@ import type {
   ExportResult,
   GuardianChildReport,
   GuardianDayReport,
-ImportResult,
+  ImportResult,
+  JobsConfig,
   LicenseStatus,
   LogFilter,
   LoginResult,
@@ -262,6 +263,8 @@ private sections: Section[] = [];
   private schoolYears: SchoolYear[] = [];
   private enrollments: { studentId: number; schoolYear: string; gradeSection: string }[] = [];
   private settings: Settings = { ...DEFAULT_MOCK_SETTINGS };
+  /** B5: per-machine scheduled-jobs flag (browser mock — in-memory). */
+  private runScheduledJobs = true;
   private idSeq = 1;
   private smsIdSeq = 1;
   private sectionIdSeq = 1;
@@ -1404,6 +1407,15 @@ private sections: Section[] = [];
     this.settings = { ...this.settings, ...patch };
     this.emitStatus();
     return { ...this.settings };
+  }
+
+  async getJobsConfig(): Promise<JobsConfig> {
+    return { runScheduledJobs: this.runScheduledJobs };
+  }
+
+  async setRunScheduledJobs(active: boolean): Promise<JobsConfig> {
+    this.runScheduledJobs = Boolean(active);
+    return { runScheduledJobs: this.runScheduledJobs };
   }
 
   async verifyStaffPin(pin: string): Promise<boolean> {

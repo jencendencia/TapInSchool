@@ -1,7 +1,7 @@
 // Settings: global toggles, debounce timeout, SMS provider + port selection,
 // school years, and SMTP email config for report delivery.
 import { useEffect, useRef, useState } from 'react';
-import type { SchoolYear, Settings } from '../../../shared/types';
+import type { JobsConfig, SchoolYear, Settings } from '../../../shared/types';
 import { api } from '../../lib/api';
 import { Spinner, Toast } from '../../components/shared';
 import { UpdatePanel } from '../../components/UpdatePanel';
@@ -52,6 +52,9 @@ const [settings, setSettings] = useState<Settings | null>(null);
   const [schoolYears, setSchoolYears] = useState<SchoolYear[]>([]);
   const [newYear, setNewYear] = useState('');
   const [yearBusy, setYearBusy] = useState(false);
+  /** B5: per-machine scheduled-jobs flag (this machine runs the background jobs). */
+  const [jobsConfig, setJobsConfig] = useState<JobsConfig>({ runScheduledJobs: true });
+  const [jobsBusy, setJobsBusy] = useState(false);
   /** Snapshot of the last saved/loaded settings, diffed against current to show an unsaved notice. */
   const savedRef = useRef<Settings | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -67,6 +70,7 @@ const [settings, setSettings] = useState<Settings | null>(null);
       setSettings(s);
     });
     void api.listSchoolYears().then(setSchoolYears);
+    void api.getJobsConfig().then(setJobsConfig);
   }, []);
 
   // Recompute the unsaved flag by diffing against the last saved snapshot, so
@@ -163,6 +167,28 @@ const set = <K extends keyof Settings>(key: K, value: Settings[K]) =>
       if (!s) return s;
       return { ...s, [key]: value };
     });
+
+  // B5: flip THIS machine's scheduled-jobs role. Takes effect immediately (the
+  // main process starts/stops the services) and is remembered per machine — it
+  // is NOT shared with the other computers.
+  const toggleJobsWorker = async () => {
+    if (jobsBusy) return;
+    setJobsBusy(true);
+    try {
+      const next = await api.setRunScheduledJobs(!jobsConfig.runScheduledJobs);
+      setJobsConfig(next);
+      setToast(
+        next.runScheduledJobs
+          ? 'Scheduled jobs enabled on this machine.'
+          : 'Scheduled jobs disabled on this machine (passive kiosk).',
+      );
+    } catch (err) {
+      setToast(`Error: ${(err as Error).message}`);
+    } finally {
+      setJobsBusy(false);
+      setTimeout(() => setToast(null), 3500);
+    }
+  };
 
   const pickLogo = (file?: File | null) => {
     if (!file) return;
@@ -386,6 +412,25 @@ setTestingEmail(true);
         <div className="settings-card">
           <h3>App activation</h3>
           <ActivationPanel />
+        </div>
+
+        <div className="settings-card">
+          <h3>Scheduled jobs (this machine)</h3>
+          <label className="switch-row">
+            <span>Run scheduled jobs on this machine</span>
+            <span
+              className={`switch ${jobsConfig.runScheduledJobs ? 'on' : ''}`}
+              onClick={() => void toggleJobsWorker()}
+            >
+              <span className="switch-knob" />
+            </span>
+          </label>
+          <p className="field-hint">
+            With several computers sharing one database, the background jobs — SMS sending, DB backups, absence
+            detection, adviser reports, badge recompute — only need to run on <b>one</b> machine. Leave this ON on
+            the computer that should do that work and turn it OFF on the kiosks. Takes effect immediately; this
+            setting is per machine (not shared). Applies on every launch.
+          </p>
         </div>
 
         <div className="settings-card">

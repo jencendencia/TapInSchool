@@ -117,6 +117,10 @@ const api: TapinApi = {
   verifyStaffPin: (pin: string) =>
     ipcRenderer.invoke('tapin:verifyStaffPin', pin) as Promise<boolean>,
 
+  getJobsConfig: () => ipcRenderer.invoke('tapin:getJobsConfig') as Promise<import('../shared/types').JobsConfig>,
+  setRunScheduledJobs: (active: boolean) =>
+    ipcRenderer.invoke('tapin:setRunScheduledJobs', active) as Promise<import('../shared/types').JobsConfig>,
+
   listSections: () => ipcRenderer.invoke('tapin:listSections') as Promise<Section[]>,
   saveSection: (input: SectionInput) => ipcRenderer.invoke('tapin:saveSection', input) as Promise<Section>,
   deleteSection: (gradeSection: string) =>

@@ -54,6 +54,7 @@ import { sendAdviserReportEmails, sendReportEmail, sendTestEmail } from './servi
 import { checkForUpdates, downloadUpdate, installUpdate } from './services/updater';
 import { activateLicense, checkLicense, getMachineIdValue } from './services/license';
 import { withRetry, updateWithVersionCheck } from './services/db-retry';
+import { getJobsConfig } from './services/jobs-config';
 import { getProvider } from './sms/providers';
 import type {
   ActivityItem,
@@ -75,6 +76,7 @@ import type {
   GuardianInput,
   GuardianWriteResult,
   ImportResult,
+  JobsConfig,
   LogFilter,
   LoginResult,
   OverviewStats,
@@ -107,6 +109,8 @@ interface ScannerHook {
   setKioskMode(active: boolean): void;
   /** Runs after a successful connect/reconnect from the DB dialog (re-boot + reload). */
   onDbConnected?(): Promise<void> | void;
+  /** B5: toggles this machine's scheduled-jobs worker role (persist + live start/stop). */
+  setRunScheduledJobs?(active: boolean): Promise<void>;
 }
 
 export function registerIpc(scanner: ScannerHook): void {
@@ -1302,6 +1306,15 @@ ipcMain.handle('tapin:testEmail', async (_e, to: string, settings: Settings): Pr
 
   // ---- Settings ------------------------------------------------------------
   ipcMain.handle('tapin:getSettings', async (): Promise<Settings> => settingsStore.get());
+
+  // ---- Scheduled-jobs worker flag (B5) -------------------------------------
+  // Per-machine (userData/jobs-config.json), NOT in the shared settings table.
+  ipcMain.handle('tapin:getJobsConfig', async (): Promise<JobsConfig> => getJobsConfig());
+
+  ipcMain.handle('tapin:setRunScheduledJobs', async (_e, active: boolean): Promise<JobsConfig> => {
+    await scanner.setRunScheduledJobs?.(Boolean(active));
+    return getJobsConfig();
+  });
 
   ipcMain.handle('tapin:verifyStaffPin', async (_e, pin: string): Promise<boolean> => {
     // Matches any account's stored PIN hash (constant-time via pbkdf2).

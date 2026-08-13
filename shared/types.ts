@@ -288,6 +288,14 @@ export type CloudProviderId = 'semaphore' | 'messagebird' | 'philsms' | 'generic
 /** How often the automatic adviser reports are emailed. */
 export type AdviserReportFrequency = 'daily' | 'weekly' | 'monthly';
 
+/** Per-machine scheduled-jobs flag (B5). NOT part of the shared settings —
+ *  each machine decides independently whether IT runs the background jobs
+ *  (SMS dispatch, backups, absence detection, adviser reports, badges). */
+export interface JobsConfig {
+  /** False = this machine is a passive kiosk (no scheduled jobs). */
+  runScheduledJobs: boolean;
+}
+
 export interface Settings {
   school_name: string;
   /** Minutes of kiosk inactivity before idle announcements start (default 1). */
@@ -1215,6 +1223,11 @@ export interface TapinApi {
   updateSettings(patch: Partial<Settings>): Promise<Settings>;
   /** True when the given PIN matches the configured kiosk staff PIN (manual check-in). */
   verifyStaffPin(pin: string): Promise<boolean>;
+
+  /** This machine's scheduled-jobs flag (B5 — per machine, not shared). */
+  getJobsConfig(): Promise<JobsConfig>;
+  /** Turns scheduled background jobs on/off for THIS machine (live, no restart). */
+  setRunScheduledJobs(active: boolean): Promise<JobsConfig>;
 
   /** Registered sections (one row per grade_section, with adviser + email). */
   listSections(): Promise<Section[]>;

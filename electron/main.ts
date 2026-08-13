@@ -14,6 +14,7 @@ import { withJobLock } from './services/job-lock';
 import { startAdviserReportService, stopAdviserReportService } from './services/adviser-report';
 import { startBackupService, stopBackupService } from './services/backup';
 import { startBadgeService, stopBadgeService } from './services/badges';
+import { getJobsConfig, loadJobsConfig, saveJobsConfig } from './services/jobs-config';
 import { decorateDbDetail, startClockDriftCheck } from './services/clock';
 import { logosDir, mimeForFile } from './services/logo';
 import { mediaDir, mediaMimeForFile } from './services/announcement';
@@ -39,6 +40,43 @@ protocol.registerSchemesAsPrivileged([
 let mainWindow: BrowserWindow | null = null;
 let scanner: UsbScanner | null = null;
 const queueWorker = new SmsQueueWorker();
+
+// Scheduled background jobs (B5 — MULTI_USER_SCALING_RESEARCH.md): SMS
+// dispatch, backups, absence detection, adviser reports, and badge recompute
+// only need to run on ONE machine per school. When "Run scheduled jobs on this
+// machine" is OFF in Settings (per-machine jobs-config.json), this app acts as
+// a passive kiosk and skips them. GET_LOCK still prevents collisions when more
+// than one machine is left ON. `workerActive` guards against double start/stop
+// when the toggle is flipped at runtime.
+let workerActive = false;
+
+function startWorkerServices(): void {
+  if (workerActive) return;
+  workerActive = true;
+  // Automatic DB backups (P0-3.2): boot snapshot + every 12 h, with rotation.
+  startBackupService();
+  // Automated absence detection (Phase 2, 4.2): nightly LATE/ABSENT flags +
+  // optional parent SMS, with missed-day backfill.
+  startAbsenceService();
+  // Automatic adviser reports: per-section report emails on a daily / weekly
+  // / monthly schedule at the configured time (Settings → Email).
+  startAdviserReportService();
+  // Weekly attendance badges (7.8): periodic authoritative recompute.
+  startBadgeService();
+  queueWorker.start();
+  console.log('[tapin] scheduled jobs running on this machine');
+}
+
+function stopWorkerServices(): void {
+  if (!workerActive) return;
+  workerActive = false;
+  queueWorker.stop();
+  stopBackupService();
+  stopAbsenceService();
+  stopAdviserReportService();
+  stopBadgeService();
+  console.log('[tapin] scheduled jobs disabled on this machine (passive kiosk)');
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -279,6 +317,14 @@ async function serveLocalFile(filePath: string, mime: string): Promise<Response>
 
   registerIpc({
     setKioskMode: (active) => scanner?.setKioskMode(active),
+    // B5: flip this machine's worker role live — persist the per-machine flag
+    // and start/stop the scheduled services without a restart.
+    setRunScheduledJobs: async (active: boolean) => {
+      await saveJobsConfig({ runScheduledJobs: active });
+      if (active) startWorkerServices();
+      else stopWorkerServices();
+      void broadcastStatus();
+    },
     // After a successful connect/reconnect from the Connect-to-database
     // dialog: re-run the boot pipeline against the (possibly different)
     // server (schema → default accounts → settings → offline snapshot), then
@@ -331,23 +377,17 @@ async function serveLocalFile(filePath: string, mime: string): Promise<Response>
   // Silent auto-update (P0-3.8) — packaged builds only.
   setupAutoUpdater();
 
+  // Per-machine worker flag (B5) must be read before deciding what to start.
+  await loadJobsConfig();
+
   createWindow();
   void bootDatabase();
-  // Automatic DB backups (P0-3.2): boot snapshot + every 12 h, with rotation.
-  startBackupService();
   // Clock drift monitoring (P0-3.7): refresh status so the kiosk dot shows it.
+  // Read-only status — runs on every machine.
   startClockDriftCheck(() => void broadcastStatus());
-  // Automated absence detection (Phase 2, 4.2): nightly LATE/ABSENT flags +
-  // optional parent SMS, with missed-day backfill.
-  startAbsenceService();
-  // Automatic adviser reports: per-section report emails on a daily / weekly
-  // / monthly schedule at the configured time (Settings → Email). No-ops when
-  // disabled.
-  startAdviserReportService();
-  // Weekly attendance badges (7.8): periodic authoritative recompute.
-  startBadgeService();
-  // Offline write-behind queue: replays scans recorded during DB outages and
-  // pushes the refreshed activity feed + status (incl. pending count) to the UI.
+  // Offline write-behind queue: replays THIS machine's scans recorded during
+  // DB outages and pushes the refreshed activity feed + status to the UI. Runs
+  // on every machine — each kiosk replays its own per-machine queue.
   startOfflineService({
     onSynced: () => {
       void getRecentActivity(5)
@@ -365,7 +405,13 @@ async function serveLocalFile(filePath: string, mime: string): Promise<Response>
       if (!win.isDestroyed()) win.webContents.send('tapin:activity', items);
     }
   };
-  queueWorker.start();
+  // Scheduled background jobs (B5) — gated by the per-machine worker flag:
+  // SMS dispatch, backups, absence detection, adviser reports, badge recompute.
+  if (getJobsConfig().runScheduledJobs) {
+    startWorkerServices();
+  } else {
+    console.log('[tapin] scheduled jobs disabled on this machine (B5) — passive kiosk');
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
