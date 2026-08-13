@@ -65,6 +65,9 @@ export function ActivationPanel() {
           Machine ID: <code>{status.machineId}</code> — this device's license is tied to this ID.
         </p>
       )}
+      {!status?.activated && status?.message && (
+        <p className="field-hint sms-error">{status.message}</p>
+      )}
       <form onSubmit={(e) => void submit(e)}>
         <div className="field">
           <label>{status?.activated ? 'Replace license key' : 'License key'}</label>

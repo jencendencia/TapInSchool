@@ -1118,6 +1118,8 @@ export interface LicenseStatus {
   activated: boolean;
   licenseKey?: string;
   machineId?: string;
+  /** Reason the app is not activated (revoked, grace expired, etc.). */
+  message?: string;
 }
 
 export interface ActivationResult {

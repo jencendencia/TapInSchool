@@ -5,9 +5,9 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { api } from '../lib/api';
 import jeLogo from '../../JE_logo.png';
 
-export function ActivationScreen({ onActivated }: { onActivated: () => void }) {
+export function ActivationScreen({ onActivated, initialMessage }: { onActivated: () => void; initialMessage?: string }) {
   const [key, setKey] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(initialMessage ?? null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -46,7 +46,10 @@ return (
           <input
             type="text"
             value={key}
-            onChange={(e) => setKey(e.target.value)}
+            onChange={(e) => {
+              setKey(e.target.value);
+              if (error) setError(null);
+            }}
             placeholder="TAPIN-XXXX-XXXX-XXXX"
             autoFocus
             autoComplete="off"

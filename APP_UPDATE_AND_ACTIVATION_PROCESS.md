@@ -164,8 +164,11 @@ This happens automatically on first launch, before the login screen.
 
 1. **App starts** → renderer calls `ipcRenderer.invoke('check-license')`.
 2. **Main checks the local license file** (`license.json`) in `userData`:
-   - If a valid key + `activatedAt` exists → `{ activated: true }` → renderer shows the **login screen**.
-   - If not → `{ activated: false }` → renderer shows the **activation screen**.
+   - If no valid key + `activatedAt` → `{ activated: false }` → renderer shows the **activation screen**.
+   - Otherwise **main re-validates the key with the server** (`POST /validate`, 8s timeout):
+     - Server says valid → `{ activated: true }` → renderer shows the **login screen** (grace timestamp refreshed).
+     - Server says revoked / expired / over device limit → `{ activated: false, message }` → **activation screen** with the reason.
+     - Server unreachable → within the **3-day offline grace** → `{ activated: true }`; past it → `{ activated: false, message }`.
 3. **User enters a license key** and submits.
 4. **Renderer calls** `ipcRenderer.invoke('activate-license', key)`.
 5. **Main generates a machine ID** using `getMachineId()`:
@@ -240,7 +243,7 @@ Keys are generated with the format **`DTR-XXXX-XXXX-XXXX`** (4 groups of 4, usin
 1. First launch → activation screen appears
 2. Enter license key → **Activate**
 3. Server validates + registers machine → login screen appears
-4. (Subsequent launches skip activation if `license.json` exists)
+4. (Subsequent launches re-validate the key with the server — revoked keys are locked out; a 3-day offline grace period applies)
 
 ---
 

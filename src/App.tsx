@@ -18,6 +18,7 @@ export default function App() {
   const [loginOpen, setLoginOpen] = useState(false);
   const [adminAuthed, setAdminAuthed] = useState(() => sessionStorage.getItem(SESSION_KEY) === '1');
   const [activated, setActivated] = useState<boolean | null>(null);
+  const [activationMessage, setActivationMessage] = useState<string | undefined>(undefined);
   const [dbDialogOpen, setDbDialogOpen] = useState(false);
 
   const handleLogout = useCallback(() => {
@@ -53,7 +54,10 @@ export default function App() {
   // License gate: check activation on startup. Browser mock mode always
   // reports activated, so dev workflows are unaffected.
   useEffect(() => {
-    void api.checkLicense().then((r) => setActivated(r.activated));
+    void api.checkLicense().then((r) => {
+      setActivated(r.activated);
+      if (!r.activated && r.message) setActivationMessage(r.message);
+    });
   }, []);
 
   if (activated === null) {
@@ -61,7 +65,7 @@ export default function App() {
     return <div className="activation-screen"><div className="spinner" /></div>;
   }
   if (!activated) {
-    return <ActivationScreen onActivated={() => setActivated(true)} />;
+    return <ActivationScreen initialMessage={activationMessage} onActivated={() => setActivated(true)} />;
   }
 
   return (
