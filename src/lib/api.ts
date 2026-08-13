@@ -1313,17 +1313,6 @@ private sections: Section[] = [];
     return result;
   }
 
-  async seedDemoData(): Promise<ImportResult> {
-    if (this.students.length > 0) return { added: 0, skipped: this.students.length, errors: [] };
-    return this.importStudentsCsv(
-      [
-        'student_no,full_name,grade_section,parent_phone,gender',
-        '2025-0101,Demo Student One,Grade 7 - Section A,09170000001,Male',
-        '2025-0102,Demo Student Two,Grade 8 - Section B,09170000002,Female',
-      ].join('\n'),
-    );
-  }
-
   async listLogs(filter: LogFilter = {}): Promise<{ rows: AttendanceLogRow[]; total: number }> {
     let rows = [...this.logs];
     if (filter.search) {
@@ -1379,11 +1368,6 @@ private sections: Section[] = [];
     }
     if (row) return row;
     throw new Error('SMS not found');
-  }
-
-  async testSms(phone: string): Promise<{ ok: boolean; message: string }> {
-    await new Promise((r) => setTimeout(r, 700));
-    return { ok: true, message: `Test SMS delivered via simulator to ${phone} (mock)` };
   }
 
   async getSettings(): Promise<Settings> {

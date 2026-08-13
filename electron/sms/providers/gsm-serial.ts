@@ -113,7 +113,7 @@ export class GsmSerialProvider implements SmsProvider {
   private portPath = '';
   private buffer = '';
   private lastError = 'Not initialized';
-  // Serialize send() calls (queue worker + manual testSms) so only one AT
+  // Serialize send() calls (queue worker) so only one AT
   // session runs at a time — prevents double port opens and interleaved writes.
   private sendQueue: Promise<void> = Promise.resolve();
   // Auto-detection state.

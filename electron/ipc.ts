@@ -26,7 +26,6 @@ import {
   evaluateStudentToday,
   listBadges,
   listExcuses,
-  recomputeAllBadges,
   recomputeStudent,
   removeExcuse,
 } from './services/badges';
@@ -890,81 +889,6 @@ export function registerIpc(scanner: ScannerHook): void {
     return importCsv(csv);
   });
 
-  ipcMain.handle('tapin:seedDemoData', async (): Promise<ImportResult> => {
-    const csv = [
-      'student_no,full_name,grade_section,parent_phone,gender',
-      '2024-0112,Juan Dela Cruz,Grade 7 - Section A,09171234567,Male',
-      '2024-0113,Maria Santos,Grade 7 - Section A,09182345678,Female',
-      '2024-0215,Carlos Garcia,Grade 8 - Section B,09193456789,Male',
-      '2024-0318,Ana Reyes,Grade 9 - Section C,09184567890,Female',
-      '2024-0421,Miguel Torres,Grade 10 - Section D,09195678901,Male',
-      '2024-0524,Liza Fernandez,Grade 11 - STEM,09196789012,Female',
-    ].join('\n');
-    const result = await importCsv(csv);
-    // Fresh demo import: seed ~30 days of attendance history so the badge
-    // system has real data to evaluate — weekly/monthly/quarterly badges show
-    // up right away instead of waiting for real scans. Story mirrors the
-    // browser mock: Ana missed a day that is EXCUSED (badge preserved), Miguel
-    // missed a day with no excuse (his badges are missed). Skipped when the
-    // demo students already have logs (e.g. a real roster that happens to use
-    // the same student numbers).
-    const demoNos = ['2024-0112', '2024-0113', '2024-0215', '2024-0318', '2024-0421', '2024-0524'];
-    const placeholders = demoNos.map(() => '?').join(',');
-    const rows = await db.query<{ id: number; student_no: string }[]>(
-      `SELECT id, student_no FROM students WHERE student_no IN (${placeholders})`,
-      demoNos,
-    );
-    if (rows.length) {
-      const [logCount] = await db.query<{ c: number }[]>(
-        `SELECT COUNT(*) c FROM attendance_logs a JOIN students s ON s.id = a.student_id
-         WHERE s.student_no IN (${placeholders})`,
-        demoNos,
-      );
-      if (result.added > 0 || (logCount?.c ?? 0) === 0) {
-        const pad2 = (n: number) => String(n).padStart(2, '0');
-        const iso = (dt: Date) => `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
-        const values: string[] = [];
-        const params: unknown[] = [];
-        for (let d = 29; d >= 0; d--) {
-          const day = new Date();
-          day.setDate(day.getDate() - d);
-          rows.forEach((s, i) => {
-            if ((s.student_no === '2024-0318' && d === 2) || (s.student_no === '2024-0421' && d === 1)) return;
-            const inTime = new Date(day);
-            inTime.setHours(6 + (i % 3), 20 + ((i * 13) % 35), (i * 7) % 60, 0);
-            // OUT after the 16:00 dismissal so no EARLY flags pollute the demo
-            // (students 1/2/4/5 arrive after the 07:15 late cutoff → LATE,
-            // which is what keeps their punctuality badges unearned).
-            const outTime = new Date(day);
-            outTime.setHours(16 + (i % 2), 10 + ((i * 17) % 40), (i * 11) % 60, 0);
-            values.push("(?, ?, 'SCANNER', ?)", "(?, ?, 'SCANNER', ?)");
-            params.push(s.id, 'IN', inTime, s.id, 'OUT', outTime);
-          });
-        }
-        if (values.length) {
-          await db.execute(
-            `INSERT INTO attendance_logs (student_id, entry_type, source, scanned_at) VALUES ${values.join(', ')}`,
-            params,
-          );
-        }
-        const ana = rows.find((r) => r.student_no === '2024-0318');
-        if (ana) {
-          const excDay = new Date();
-          excDay.setDate(excDay.getDate() - 2);
-          await db.execute(
-            `INSERT INTO excuses (student_id, excuse_date, category, note) VALUES (?, ?, 'SICK', 'Flu — adviser approved')
-             ON DUPLICATE KEY UPDATE category = 'SICK', note = 'Flu — adviser approved'`,
-            [ana.id, iso(excDay)],
-          );
-        }
-        // Compute badges from the seeded history so the demo shows them now.
-        await recomputeAllBadges();
-        void refreshOfflineCache();
-      }
-    }
-    return result;
-  });
-
   async function importCsv(csv: string): Promise<ImportResult> {
     const lines = csv.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     const result: ImportResult = { added: 0, skipped: 0, errors: [] };
@@ -1223,21 +1147,6 @@ export function registerIpc(scanner: ScannerHook): void {
     await db.execute("UPDATE sms_logs SET status = 'PENDING', attempts = 0, error = NULL WHERE id = ?", [id]);
     const [row] = await db.query<SmsLog[]>('SELECT * FROM sms_logs WHERE id = ?', [id]);
     return row;
-  });
-
-  ipcMain.handle('tapin:testSms', async (_e, phone: string): Promise<{ ok: boolean; message: string }> => {
-    const settings = settingsStore.get();
-    const provider = getProvider(settings.sms_provider);
-    try {
-      await provider.send(
-        settings,
-        phone,
-        `[TapIn Test] ${settings.school_name} SMS gateway test at ${new Date().toLocaleTimeString()}.`,
-      );
-      return { ok: true, message: `Test SMS delivered via ${provider.id} to ${phone}` };
-    } catch (err) {
-      return { ok: false, message: `${provider.id}: ${(err as Error).message}` };
-    }
   });
 
   // ---- Reports (PDF / Excel export) ----------------------------------------

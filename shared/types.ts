@@ -1172,7 +1172,6 @@ export interface TapinApi {
   deleteStudent(id: number): Promise<void>;
   generateQrPayload(studentNo: string): Promise<string>;
   importStudentsCsv(csv: string): Promise<ImportResult>;
-  seedDemoData(): Promise<ImportResult>;
 
   // ---- Guardians (registry + student linking) -----------------------------
   /** All registered guardians, sorted by name, optionally narrowed by search. */
@@ -1197,7 +1196,6 @@ export interface TapinApi {
 
   listSms(filter?: SmsFilter): Promise<Paged<SmsLogRow>>;
   retrySms(id: number): Promise<SmsLog>;
-  testSms(phone: string): Promise<{ ok: boolean; message: string }>;
 
   getSettings(): Promise<Settings>;
   updateSettings(patch: Partial<Settings>): Promise<Settings>;

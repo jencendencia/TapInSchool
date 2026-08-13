@@ -94,7 +94,6 @@ const api: TapinApi = {
   generateQrPayload: (studentNo: string) =>
     ipcRenderer.invoke('tapin:generateQrPayload', studentNo) as Promise<string>,
   importStudentsCsv: (csv: string) => ipcRenderer.invoke('tapin:importStudentsCsv', csv) as Promise<ImportResult>,
-  seedDemoData: () => ipcRenderer.invoke('tapin:seedDemoData') as Promise<ImportResult>,
 
   listGuardians: (search?: string) =>
     ipcRenderer.invoke('tapin:listGuardians', search) as Promise<Guardian[]>,
@@ -111,7 +110,6 @@ const api: TapinApi = {
 
   listSms: (filter?: SmsFilter) => ipcRenderer.invoke('tapin:listSms', filter) as Promise<{ rows: SmsLogRow[]; total: number }>,
   retrySms: (id: number) => ipcRenderer.invoke('tapin:retrySms', id) as Promise<SmsLog>,
-  testSms: (phone: string) => ipcRenderer.invoke('tapin:testSms', phone) as Promise<{ ok: boolean; message: string }>,
 
   getSettings: () => ipcRenderer.invoke('tapin:getSettings') as Promise<Settings>,
   updateSettings: (patch: Partial<Settings>) =>

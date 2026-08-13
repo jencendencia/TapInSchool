@@ -1,4 +1,4 @@
-// Students management: CRUD, QR payload generator, CSV import, demo seed.
+// Students management: CRUD, QR payload generator, CSV import.
 // The Grade & Section picker is a cascading Grade → Section dropdown fed by the
 // section registry, and enrollment targets the GLOBALLY selected school year
 // (title bar) — the table shows each student's section for that year.
@@ -744,12 +744,6 @@ const notify = (msg: string) => {
     reader.readAsText(file);
   };
 
-  const seed = async () => {
-    const res = await api.seedDemoData();
-    notify(`Demo data: ${res.added} added${res.skipped ? `, ${res.skipped} already present` : ''}`);
-    load();
-  };
-
   if (!students) return <Spinner label="Loading students…" />;
 
   // Gender is filtered client-side on top of the (server-side) name/no/section
@@ -768,8 +762,7 @@ const notify = (msg: string) => {
         </div>
         <div className="page-actions">
           <button className="btn-ghost" onClick={() => setModal({ type: 'import' })}>⬆ CSV Import</button>
-          <button className="btn-ghost" onClick={seed}>🎲 Demo data</button>
-<button className="btn-primary" onClick={() => void openAdd()}>+ Add Student</button>
+          <button className="btn-primary" onClick={() => void openAdd()}>+ Add Student</button>
         </div>
       </div>
 
@@ -920,7 +913,7 @@ const notify = (msg: string) => {
               <tr>
                 <td colSpan={10} className="empty-cell">
                   {students.length === 0
-                    ? 'No students yet. Add one manually or use CSV import / demo data.'
+                    ? 'No students yet. Add one manually or use CSV import.'
                     : 'No students match the current gender filter.'}
                 </td>
               </tr>

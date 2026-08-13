@@ -1,4 +1,4 @@
-// SMS Outbox: delivery audit log, failed retries, test SMS (PRD Screen B).
+// SMS Outbox: delivery audit log + failed retries (PRD Screen B).
 import { useCallback, useEffect, useState } from 'react';
 import type { SmsLogRow, SmsStatus } from '../../../shared/types';
 import { api } from '../../lib/api';
@@ -15,9 +15,6 @@ export function SmsOutboxPage() {
   const [to, setTo] = useState('');
   const [offset, setOffset] = useState(0);
   const [expanded, setExpanded] = useState<SmsLogRow | null>(null);
-  const [testOpen, setTestOpen] = useState(false);
-  const [testPhone, setTestPhone] = useState('');
-  const [testResult, setTestResult] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -42,11 +39,6 @@ export function SmsOutboxPage() {
     load();
   };
 
-  const sendTest = async () => {
-    const res = await api.testSms(testPhone);
-    setTestResult(res.message);
-  };
-
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const page = Math.floor(offset / PAGE_SIZE) + 1;
 
@@ -56,9 +48,6 @@ export function SmsOutboxPage() {
         <div>
           <h2>SMS Outbox</h2>
           <p className="text-dim">{total} messages</p>
-        </div>
-        <div className="page-actions">
-          <button className="btn-ghost" onClick={() => { setTestOpen(true); setTestResult(null); }}>📱 Test SMS</button>
         </div>
       </div>
 
@@ -140,19 +129,6 @@ export function SmsOutboxPage() {
             {expanded.sent_at && <p><b>Sent:</b> {fmtTimeSec(expanded.sent_at)}</p>}
             {expanded.error && <p className="sms-error"><b>Last error:</b> {expanded.error}</p>}
             <div className="sms-message-box">{expanded.message}</div>
-          </div>
-        </Modal>
-      )}
-
-      {testOpen && (
-        <Modal title="Send a test SMS" onClose={() => setTestOpen(false)}>
-          <div className="form">
-            <div className="field">
-              <label>Recipient mobile</label>
-              <input value={testPhone} onChange={(e) => setTestPhone(e.target.value)} placeholder="09171234567" />
-            </div>
-            <button className="btn-primary" onClick={() => void sendTest()}>Send test</button>
-            {testResult && <p className={testResult.startsWith('Error') ? 'sms-error' : 'sms-ok'}>{testResult}</p>}
           </div>
         </Modal>
       )}
