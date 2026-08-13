@@ -41,6 +41,7 @@ Notes:
 | `DB_USER` | `root` | Database account (use a dedicated `pta` user on the network) |
 | `DB_PASSWORD` | *(empty)* | Account password |
 | `DB_NAME` | `tapin_school` | The shared database name — do **not** change unless TapIn uses another name |
+| `DB_POOL` | `3` | Per-client connection pool size (1–50). Kiosks rarely need more than 3; raise it on a busy admin PC. Each machine's pool counts against the server's `max_connections`, so keep the sum well under it |
 
 ---
 
@@ -49,8 +50,9 @@ Notes:
 1. `electron/main.ts` calls `configureDbFromDisk()` — if `userData/db-config.json`
    exists, it is applied **before** any connection attempt (so a reconnect
    survives app restarts).
-2. `db.start()` creates a small MySQL pool (up to 5 connections, 4s connect
-   timeout, keep-alive on) and tries to connect.
+2. `db.start()` creates a small MySQL pool (**3 connections by default** — see
+   `DB_POOL` above; 4s connect timeout, keep-alive on, 60s idle timeout) and
+   tries to connect.
 3. **Offline-first retry:** if the server is unreachable, the app does **not**
    crash — it retries every **5 seconds** and shows an amber `offline` pill in
    the title bar. As soon as the server appears, it connects automatically.
@@ -125,6 +127,25 @@ Do this once on the computer that hosts the `tapin_school` database.
 > (if the MySQL client is installed) or just launch the app and watch the pill
 > turn green.
 
+### Sizing & monitoring (multi-machine capacity)
+
+Each client opens a pool of **3** connections by default, so the total slots
+needed is roughly `machines × 3` (plus admin tools / backups). MySQL's default
+`max_connections` is **151**; when many machines share one server, raise it in
+`my.ini` to leave headroom:
+
+```ini
+max_connections = 200        # e.g. 20 machines × 3 pool + admin/backup headroom
+innodb_buffer_pool_size = 1G # ≈ 70–80% of server RAM; tiny datasets fit entirely in cache
+thread_cache_size = 32       # reuse worker threads for fast client churn
+```
+
+Keep an eye on actual usage — `SHOW STATUS LIKE 'Threads_connected'` (or
+`performance_schema` in MySQL 8) shows how many of the budget the app is
+consuming; the per-client `DB_POOL` cap exists so a busy machine can't hog the
+server. `skip_name_resolve = 1` also speeds up every new connection on a LAN
+(grants must then use IPs, not hostnames).
+
 ---
 
 ## 6. Client setup (every computer running PTA CD)
@@ -146,6 +167,7 @@ DB_PORT=3306
 DB_USER=pta
 DB_PASSWORD=a-strong-password
 DB_NAME=tapin_school
+DB_POOL=3
 ```
 
 Then `npm run dev` (or the installed app). First connect self-creates the
@@ -176,6 +198,7 @@ without launching the GUI.
 | `ETIMEDOUT` / connection hangs | Firewall, antivirus, or different subnet/VLAN | Open port 3306, add an AV exclusion, keep clients on the same LAN |
 | `ER_ACCESS_DENIED_ERROR` | Wrong user/password or user not allowed from this host | Use the `pta`@`'%'` account; check password; `FLUSH PRIVILEGES` after grants |
 | `ER_BAD_DB_ERROR` (unknown database `tapin_school`) | Wrong `DB_NAME`, or the database lives on another server | Confirm the database name; TapIn School must be installed there first |
+| `ER_CON_COUNT_ERROR` / `Too many connections` | Aggregate pool size exceeds the server's `max_connections` | Lower `DB_POOL` on clients, or raise `max_connections` in `my.ini` (see §5 sizing) |
 | Connects in dev but not in the installed app | Old saved config (`db-config.json`) overrides `.env` | Open the title-bar dialog and connect to the correct server (it overwrites the saved config) |
 | Data looks stale after switching servers | The window needs to reload after reconnect | Connect again via the title bar — success triggers a full reload |
 | Server comes up later; app still offline | Retry loop should handle it | Wait up to 5s — the pool auto-reconnects; the pill flips green by itself |

@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS sms_logs (
   attendance_id BIGINT UNSIGNED NULL DEFAULT NULL,
   parent_phone VARCHAR(20) NOT NULL,
   message TEXT NOT NULL,
-  status ENUM('PENDING','SENT','FAILED') NOT NULL DEFAULT 'PENDING',
+  status ENUM('PENDING','IN_PROGRESS','SENT','FAILED') NOT NULL DEFAULT 'PENDING',
   provider VARCHAR(20) DEFAULT NULL,
   attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
   error TEXT DEFAULT NULL,
@@ -374,4 +374,18 @@ export async function ensureSchema(query: (sql: string, params?: unknown[]) => P
      SET s.guardian_id = g.id
      WHERE s.guardian_id IS NULL AND s.guardian_qr_hash_payload IS NOT NULL`,
   );
+
+  // ---- Idempotent migration: sms_logs.status gains IN_PROGRESS (B2) --------
+  // The SMS queue worker now atomically claims PENDING rows as IN_PROGRESS
+  // before dispatching (electron/sms/queue-worker.ts), so two machines can't
+  // both send the same message. Older installs have the 3-value enum; extend
+  // it in place (the CREATE TABLE in SCHEMA_SQL already includes it for fresh
+  // installs).
+  const smsStatusCols = (await query(
+    `SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sms_logs' AND COLUMN_NAME = 'status'`,
+  )) as { COLUMN_TYPE: string }[];
+  if (!String(smsStatusCols[0]?.COLUMN_TYPE ?? '').includes('IN_PROGRESS')) {
+    await query("ALTER TABLE sms_logs MODIFY status ENUM('PENDING','IN_PROGRESS','SENT','FAILED') NOT NULL DEFAULT 'PENDING'");
+  }
 }

@@ -258,14 +258,20 @@ async function processScanOnline(
     db.withConnection(async (conn) => {
       await conn.beginTransaction();
       try {
+        // Server time (C5): stamp the scan with the DB server's clock (NOW(3))
+        // instead of the kiosk's, so absence/badges are computed on the same
+        // day even when a kiosk clock drifts. The offline write-behind path
+        // keeps the kiosk's own time — it has no server to ask (see offline.ts).
+        const tsRows = (await conn.query('SELECT NOW(3) AS ts'))[0] as Array<{ ts: string }>;
+        const serverTs = String(tsRows[0]?.ts ?? '');
+        const scannedAt = serverTs ? new Date(serverTs) : new Date();
+        const flag = computeScanFlag(entryType, scannedAt, settings);
         // Type the INSERT result so insertId is available (mysql2's default
         // QueryResult union doesn't expose it).
         const [insertRes] = await conn.execute<ResultSetHeader>(
-          'INSERT INTO attendance_logs (student_id, entry_type, source) VALUES (?, ?, ?)',
-          [student.id, entryType, source],
+          'INSERT INTO attendance_logs (student_id, entry_type, source, scanned_at) VALUES (?, ?, ?, ?)',
+          [student.id, entryType, source, serverTs || scannedAt],
         );
-        const scannedAt = new Date();
-        const flag = computeScanFlag(entryType, scannedAt, settings);
         const log: AttendanceLog = {
           id: insertRes.insertId,
           student_id: student.id,

@@ -186,12 +186,17 @@ export async function processVisitorScan(
   );
   const entryType: EntryType = forcedType ?? (lastToday[0]?.entry_type === 'IN' ? 'OUT' : 'IN');
 
+  // Server time (C5): same rule as student scans — stamp with the DB server's
+  // clock (NOW(3)), not the kiosk's, so logs stay consistent across machines.
+  const tsRows = await db.query<{ ts: string }[]>('SELECT NOW(3) AS ts');
+  const serverTs = String(tsRows[0]?.ts ?? '');
+  const scannedAt = serverTs ? new Date(serverTs) : new Date();
+
   // Insert the log.
   const insert = await db.execute(
-    'INSERT INTO visitor_logs (visitor_id, entry_type, source) VALUES (?, ?, ?)',
-    [visitor.id, entryType, source],
+    'INSERT INTO visitor_logs (visitor_id, entry_type, source, scanned_at) VALUES (?, ?, ?, ?)',
+    [visitor.id, entryType, source, serverTs || scannedAt],
   );
-  const scannedAt = new Date().toISOString();
 
   const result: ScanResult = {
     kind: 'VISITOR',
@@ -202,7 +207,7 @@ export async function processVisitorScan(
       id: insert.insertId,
       student_id: 0, // not a student
       entry_type: entryType,
-      scanned_at: scannedAt,
+      scanned_at: scannedAt.toISOString(),
       source,
       flag: '',
     },

@@ -36,9 +36,18 @@ export class SmsQueueWorker {
       await withJobLock('tapin:sms-queue', async () => {
         const settings = settingsStore.get();
         const provider = getProvider(settings.sms_provider);
+        // Atomic claim (B2): PENDING → IN_PROGRESS is a single UPDATE, so only
+        // the rows THIS statement changed are ours to dispatch. A concurrent
+        // worker that runs the same claim (even without the lock — belt and
+        // braces) changes 0 rows for the same PENDING set and can't double-
+        // claim them. Rows left IN_PROGRESS by a peer that died mid-dispatch
+        // are picked up here too (they're not PENDING anymore, so no other
+        // claimer touches them) and are either finished or re-queued below.
+        await db.execute(
+          "UPDATE sms_logs SET status = 'IN_PROGRESS' WHERE status = 'PENDING' ORDER BY id ASC LIMIT 3",
+        );
         const rows = await db.query<SmsLog[]>(
-          'SELECT * FROM sms_logs WHERE status = ? ORDER BY id ASC LIMIT 3',
-          ['PENDING'],
+          "SELECT * FROM sms_logs WHERE status = 'IN_PROGRESS' ORDER BY id ASC",
         );
         if (rows.length === 0) return;
         for (const row of rows) {

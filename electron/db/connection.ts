@@ -76,11 +76,19 @@ class Database extends EventEmitter {
     if (this.online) return true;
     const seq = ++this.connectSeq;
     const cfg = currentConfig();
+    // Per-client pool size (A2): kiosk/guard machines rarely need more than a
+    // couple of concurrent queries, and with N machines each opening a pool,
+    // the aggregate must stay well under the server's max_connections (151 by
+    // default). 20 machines × 3 = 60 slots vs 100 at the old 5. Overridable
+    // per machine via DB_POOL (e.g. a busy admin PC can raise it). Queries
+    // queue inside the pool rather than failing when the limit is hit.
+    const poolLimit = Math.max(1, Math.min(50, Number(process.env.DB_POOL) || 3));
     try {
       const pool = createPool({
         ...cfg,
         waitForConnections: true,
-        connectionLimit: 5,
+        connectionLimit: poolLimit,
+        idleTimeout: 60000,
         connectTimeout: 4000,
         enableKeepAlive: true,
         // Shared types declare date fields as strings; without this, mysql2 maps

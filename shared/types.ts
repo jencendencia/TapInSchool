@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 export type EntryType = 'IN' | 'OUT';
-export type SmsStatus = 'PENDING' | 'SENT' | 'FAILED';
+export type SmsStatus = 'PENDING' | 'IN_PROGRESS' | 'SENT' | 'FAILED';
 export type ScanSource = 'SCANNER' | 'WEBCAM' | 'MANUAL';
 
 /**
