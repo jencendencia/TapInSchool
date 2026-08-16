@@ -10,6 +10,7 @@ import { getScanMode, setScanMode } from './services/scan-mode';
 import {
   createUser as authCreateUser,
   deleteUser as authDeleteUser,
+  listAdvisers as authListAdvisers,
   listUsers as authListUsers,
   login as authLogin,
   updateUser as authUpdateUser,
@@ -98,6 +99,7 @@ import type {
   StudentBadgeSummary,
   StudentInput,
   SystemStatus,
+  TeacherOption,
   User,
   UserInput,
   Visitor,
@@ -643,6 +645,12 @@ export function registerIpc(scanner: ScannerHook): void {
   // ---- Sections (registry wired to the Students page + report emailing) ----
   ipcMain.handle('tapin:listSections', async (): Promise<Section[]> => {
     return db.query<Section[]>('SELECT * FROM sections ORDER BY grade_section');
+  });
+
+  // Teacher accounts (created in the TapIn Teacher Companion app) — the
+  // adviser dropdown source for the Sections page.
+  ipcMain.handle('tapin:listAdvisers', async (): Promise<TeacherOption[]> => {
+    return authListAdvisers();
   });
 
   ipcMain.handle('tapin:saveSection', async (_e, input: SectionInput): Promise<Section> => {

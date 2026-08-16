@@ -25,6 +25,7 @@ import { UsbScanner } from './services/scanner';
 import { SmsQueueWorker } from './sms/queue-worker';
 import { registerIpc } from './ipc';
 import { getProvider } from './sms/providers';
+import { startPortal, stopPortal } from '../server/portal';
 import type { SystemStatus } from '../shared/types';
 
 loadEnv(app.getAppPath());
@@ -382,6 +383,10 @@ async function serveLocalFile(filePath: string, mime: string): Promise<Response>
 
   createWindow();
   void bootDatabase();
+  // TapIn Teacher portal (bundled companion web UI): auto-serves at
+  // http://<this-machine-ip>:4000 so teachers/dept heads need no install.
+  // PORTAL_ENABLED=0 disables; a busy port logs a warning and is skipped.
+  startPortal();
   // Clock drift monitoring (P0-3.7): refresh status so the kiosk dot shows it.
   // Read-only status — runs on every machine.
   startClockDriftCheck(() => void broadcastStatus());
@@ -428,5 +433,6 @@ app.on('will-quit', () => {
   stopAbsenceService();
   stopAdviserReportService();
   stopBadgeService();
+  stopPortal();
   globalShortcut.unregisterAll();
 });

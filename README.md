@@ -29,6 +29,28 @@ npm start                                 # or: build + run packaged-style
 npm run dist                              # or: build a Windows installer (NSIS)
 ```
 
+## TapIn Teacher portal (bundled)
+
+The kiosk installer ships the **TapIn Teacher** web portal: once TapIn School is
+running on a machine, teachers and department heads open
+`http://<that-machine-ip>:4000` in any browser and sign in — no separate
+install. The portal uses the same MySQL database and exposes the teacher app's
+UI (rosters, attendance, excuses, badges, reports, teacher management).
+
+- The portal UI is the **companion app's** renderer, built and copied into
+  `portal-dist/` by `scripts/build-portal.mjs` (run as part of `npm run build`
+  and `npm run dist`). It resolves the companion folder as the sibling
+  `TapIn Teacher Companion app`, or from the `PORTAL_COMPANION_DIR` env var;
+  if the companion folder isn't available the kiosk still builds, and the
+  portal shows a "not bundled" notice instead.
+- `npm run portal` runs the portal server standalone (no kiosk UI) for testing.
+- Env knobs (in `.env`): `PORTAL_ENABLED=0` disables the portal,
+  `PORT` (default 4000), `PORTAL_BIND` (default `0.0.0.0`),
+  `SESSION_TTL_HOURS` (default 12).
+- The portal is LAN-grade: cookie sessions in memory (a kiosk restart signs
+  everyone out), login rate-limited per IP. Open port 4000 in Windows Firewall
+  on the kiosk machine so laptops can reach it.
+
 **No MySQL yet?** The app still opens — the kiosk shows a Database OFFLINE state
 and the whole UI (including the admin dashboard) can be explored in a plain
 browser with mock data:
@@ -102,6 +124,14 @@ app config → test send → troubleshooting): see [`PHILSMS_SETUP_GUIDE.md`](PH
 ## Project layout
 
 ```
+server/              TapIn Teacher portal (embedded HTTP server)
+  portal.ts          sessions, /api/rpc, /api/export, static serving
+  attendance.ts      teacher-side roster / manual check-in (ported)
+  reports.ts         teacher report builders (ported)
+  teacher-service.ts teacher/dept_head login + scoped CRUD
+  export-data.ts     CSV / XLSX / PDF-HTML generators
+  teacher-types.ts   teacher API types shared with the portal server
+scripts/build-portal.mjs  builds the companion UI → portal-dist/
 electron/            Electron main process (Node)
   main.ts            window, env, boot, shortcuts
   ipc.ts             all ipcMain handlers

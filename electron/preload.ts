@@ -43,6 +43,7 @@ import type {
   StudentBadgeSummary,
   StudentInput,
   SystemStatus,
+  TeacherOption,
   TapinApi,
   UpdateStatus,
   User,
@@ -122,6 +123,7 @@ const api: TapinApi = {
     ipcRenderer.invoke('tapin:setRunScheduledJobs', active) as Promise<import('../shared/types').JobsConfig>,
 
   listSections: () => ipcRenderer.invoke('tapin:listSections') as Promise<Section[]>,
+  listAdvisers: () => ipcRenderer.invoke('tapin:listAdvisers') as Promise<TeacherOption[]>,
   saveSection: (input: SectionInput) => ipcRenderer.invoke('tapin:saveSection', input) as Promise<Section>,
   deleteSection: (gradeSection: string) =>
     ipcRenderer.invoke('tapin:deleteSection', gradeSection) as Promise<void>,

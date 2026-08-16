@@ -7,6 +7,14 @@ files:
   - dist/**/*
   - dist-electron/**/*
   - package.json
+# The bundled TapIn Teacher portal UI (built by scripts/build-portal.mjs from
+# the companion app's renderer). Shipped outside the asar so the portal server
+# can stream it directly from disk.
+extraResources:
+  - from: portal-dist
+    to: portal-dist
+    filter:
+      - "**/*"
 # Native serialport bindings must stay unpacked to be loadable from the packaged app.
 asarUnpack:
   - "**/*.node"

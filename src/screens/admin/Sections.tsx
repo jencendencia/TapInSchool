@@ -6,15 +6,125 @@
 // "Send to advisers". Clicking a section drills into that year's roster, where
 // students can be enrolled in bulk (from the year's unassigned pool) or
 // unassigned.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import type { Section, SectionInput, Student } from '../../../shared/types';
+import type { Section, SectionInput, Student, TeacherOption } from '../../../shared/types';
 import { api } from '../../lib/api';
 import { compareGrades, sortGrades } from '../../lib/sort';
 import { Avatar, Modal, QrCodeImage, Spinner, Toast } from '../../components/shared';
 import { useSchoolYear } from './schoolYear';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Searchable teacher-account dropdown for the section's adviser. Teacher
+ *  accounts (role 'teacher' in users) are created in the TapIn Teacher
+ *  Companion app; picking one fills the section's adviser name (their
+ *  username) + email (from their account). Sections that predate teacher
+ *  accounts keep their free-text adviser name until the admin reassigns —
+ *  shown as a legacy card with a "⇄" button to replace it. */
+function AdviserPicker({
+  teachers,
+  adviserName,
+  email,
+  onChange,
+}: {
+  teachers: TeacherOption[];
+  adviserName: string;
+  email: string;
+  onChange: (name: string, email: string) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  // Close the dropdown when clicking anywhere outside it.
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const selected = teachers.find((t) => t.username === adviserName.trim()) ?? null;
+  const q = query.trim().toLowerCase();
+  const filtered = teachers.filter(
+    (t) => !q || t.username.toLowerCase().includes(q) || t.email.toLowerCase().includes(q),
+  );
+  const pick = (t: TeacherOption) => {
+    onChange(t.username, t.email);
+    setQuery('');
+    setOpen(false);
+  };
+
+  return (
+    <div className="guardian-picker" ref={wrapRef}>
+      {selected ? (
+        <div className="guardian-selected">
+          <div className="guardian-selected-main">
+            <span className="guardian-selected-name">{selected.username}</span>
+            <span className="text-dim guardian-selected-meta">
+              {selected.email || 'No email on account'}
+            </span>
+          </div>
+          <button type="button" className="btn-icon" title="Remove adviser" onClick={() => onChange('', '')}>
+            ✕
+          </button>
+        </div>
+      ) : adviserName.trim() ? (
+        <div className="guardian-selected">
+          <div className="guardian-selected-main">
+            <span className="guardian-selected-name">{adviserName}</span>
+            <span className="text-dim guardian-selected-meta">
+              {email || 'no email'} · no matching teacher account
+            </span>
+          </div>
+          <button
+            type="button"
+            className="btn-icon"
+            title="Pick a teacher account instead"
+            onClick={() => {
+              setQuery('');
+              setOpen(true);
+            }}
+          >
+            ⇄
+          </button>
+          <button type="button" className="btn-icon" title="Clear adviser" onClick={() => onChange('', '')}>
+            ✕
+          </button>
+        </div>
+      ) : (
+        <input
+          className="guardian-picker-input"
+          placeholder="Search teacher account…"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+        />
+      )}
+      {!selected && open && (
+        <div className="guardian-options">
+          {filtered.map((t) => (
+            <button type="button" key={t.id} className="guardian-option" onClick={() => pick(t)}>
+              <span className="guardian-option-name">{t.username}</span>
+              <span className="text-dim guardian-option-meta">{t.email || 'no email set'}</span>
+            </button>
+          ))}
+          {filtered.length === 0 && (
+            <div className="guardian-option guardian-option-empty text-dim">
+              No teacher account matches “{query}”.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** HTML-escapes text inserted into the print window's document. */
 function escHtml(s: string): string {
@@ -33,12 +143,15 @@ function composeSection(grade: string, section: string): string {
 function SectionForm({
   initial,
   sections,
+  teachers,
   lockSection,
   onSave,
   onCancel,
 }: {
   initial: SectionInput;
   sections: Section[];
+  /** Teacher accounts for the adviser search dropdown. */
+  teachers: TeacherOption[];
   /** When editing, the grade/section are fixed so the registry key can't change. */
   lockSection?: boolean;
   onSave: (input: SectionInput) => void;
@@ -111,12 +224,17 @@ function SectionForm({
         </p>
       )}
       <div className="field">
-        <label>Adviser name (optional)</label>
-        <input
-          value={form.adviser_name}
-          onChange={(e) => setForm({ ...form, adviser_name: e.target.value })}
-          placeholder="Ms. Maria Reyes"
+        <label>Adviser (optional)</label>
+        <AdviserPicker
+          teachers={teachers}
+          adviserName={form.adviser_name}
+          email={form.email}
+          onChange={(name, email) => setForm({ ...form, adviser_name: name, email })}
         />
+        <p className="field-hint">
+          Pick a teacher account — their email fills in automatically. Teacher accounts are created in
+          the <b>TapIn Teacher Companion</b> app.
+        </p>
       </div>
       <div className="field">
         <label>Adviser email (optional)</label>
@@ -127,8 +245,9 @@ function SectionForm({
           placeholder="maria.reyes@school.edu.ph"
         />
         <p className="field-hint">
-          Optional — receives this section's attendance report (PDF) when you send reports to advisers.
-          Sections without an email are skipped by "Send to advisers".
+          Auto-filled from the adviser's account when you pick one; edit if needed. Receives this
+          section's attendance report (PDF) when you send reports to advisers. Sections without an
+          email are skipped by "Send to advisers".
         </p>
       </div>
       {error && <p className="field-hint sms-error">{error}</p>}
@@ -354,6 +473,7 @@ export function SectionsPage() {
   const { year: activeYear } = useSchoolYear();
   const [sections, setSections] = useState<Section[] | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
+  const [teachers, setTeachers] = useState<TeacherOption[]>([]);
   const [enrollments, setEnrollments] = useState<Map<number, string>>(new Map());
   const [gradeFilter, setGradeFilter] = useState('');
   const [modal, setModal] = useState<ModalState>(null);
@@ -366,9 +486,10 @@ export function SectionsPage() {
   const load = useCallback(() => {
     // allSettled so one failing call (e.g. DB offline) can't blank out a
     // successful sibling — each list degrades to empty independently.
-    void Promise.allSettled([api.listSections(), api.listStudents()]).then(([sRes, stRes]) => {
+    void Promise.allSettled([api.listSections(), api.listStudents(), api.listAdvisers()]).then(([sRes, stRes, aRes]) => {
       setSections(sRes.status === 'fulfilled' ? sRes.value : []);
       setStudents(stRes.status === 'fulfilled' ? stRes.value : []);
+      setTeachers(aRes.status === 'fulfilled' ? aRes.value : []);
     });
   }, []);
 
@@ -555,6 +676,7 @@ export function SectionsPage() {
                 updated_at: modal.section.updated_at,
               }}
               sections={sections}
+              teachers={teachers}
               lockSection
               onSave={(i) => void saveSection(i)}
               onCancel={() => setModal(null)}
@@ -657,6 +779,7 @@ export function SectionsPage() {
           <SectionForm
             initial={EMPTY_FORM}
             sections={sections}
+            teachers={teachers}
             onSave={(i) => void saveSection(i)}
             onCancel={() => setModal(null)}
           />
@@ -674,6 +797,7 @@ export function SectionsPage() {
               updated_at: modal.section.updated_at,
             }}
             sections={sections}
+            teachers={teachers}
             lockSection
             onSave={(i) => void saveSection(i)}
             onCancel={() => setModal(null)}

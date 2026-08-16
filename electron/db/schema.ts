@@ -23,6 +23,11 @@
 // keep their rosters (idempotent — UNIQUE(student_id, school_year) skips rows
 // that already exist).
 //
+// The teacher_sections table maps any password-bearing user (dept_head,
+// teacher) to the grade_sections they manage for a school year. It is also
+// created by the TapIn Teacher Companion app; the kiosk needs it as well
+// because the admin assigns sections to a dept_head on the Users & Roles page.
+//
 // IMPORTANT: SCHEMA_SQL must contain NO SQL comments and NO ';' characters
 // other than statement terminators. Both ensureSchema() below and
 // scripts/init-db.mjs split the string on ';' and execute each chunk, so any
@@ -87,11 +92,24 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS users (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   username VARCHAR(64) NOT NULL,
+  email VARCHAR(255) NOT NULL DEFAULT '',
   password_hash VARCHAR(255) DEFAULT NULL,
-  role ENUM('admin','staff') NOT NULL DEFAULT 'admin',
+  role ENUM('admin','staff','teacher','dept_head') NOT NULL DEFAULT 'admin',
   pin_hash VARCHAR(255) DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uq_users_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS teacher_sections (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  teacher_id INT UNSIGNED NOT NULL,
+  grade_section VARCHAR(40) NOT NULL,
+  school_year VARCHAR(32) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_teacher_section (teacher_id, grade_section, school_year),
+  KEY idx_ts_teacher (teacher_id),
+  KEY idx_ts_section_year (grade_section, school_year),
+  CONSTRAINT fk_ts_teacher FOREIGN KEY (teacher_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS absence_logs (
@@ -278,8 +296,26 @@ export async function ensureSchema(query: (sql: string, params?: unknown[]) => P
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'`,
   )) as { COLUMN_NAME: string }[];
   const names = new Set(userCols.map((c) => c.COLUMN_NAME));
+  // Teacher accounts (created in the TapIn Teacher Companion app) carry an
+  // optional email that the Sections page copies onto the section for adviser
+  // report delivery. Additive column for existing installs.
+  if (!names.has('email')) {
+    await query("ALTER TABLE users ADD COLUMN email VARCHAR(255) NOT NULL DEFAULT '' AFTER username");
+  }
   if (!names.has('role')) {
-    await query("ALTER TABLE users ADD COLUMN role ENUM('admin','staff') NOT NULL DEFAULT 'admin' AFTER username");
+    await query("ALTER TABLE users ADD COLUMN role ENUM('admin','staff','teacher','dept_head') NOT NULL DEFAULT 'admin' AFTER username");
+  } else {
+    // Extend the role enum in place for existing installs (older ones only had
+    // 'admin','staff'; the companion app may have added 'teacher'). Idempotent.
+    const roleType = (await query(
+      `SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'role'`,
+    )) as { COLUMN_TYPE: string }[];
+    if (!String(roleType[0]?.COLUMN_TYPE ?? '').includes('dept_head')) {
+      await query(
+        "ALTER TABLE users MODIFY role ENUM('admin','staff','teacher','dept_head') NOT NULL DEFAULT 'admin'",
+      );
+    }
   }
   if (!names.has('pin_hash')) {
     await query('ALTER TABLE users ADD COLUMN pin_hash VARCHAR(255) DEFAULT NULL AFTER role');

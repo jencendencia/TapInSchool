@@ -160,6 +160,114 @@ button { font-family: inherit; }
 .entry-chip.out { background: var(--indigo-soft); color: #a5b4fc; border: 1px solid rgba(165, 180, 252, 0.4); }
 .entry-chip.lg { font-size: 14px; padding: 4px 14px; }
 
+/* ---- Toggle chips (e.g. dept-head section picker on the Users page) ---- */
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+.chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.05s ease;
+}
+.chip:hover { color: var(--text); border-color: #475569; }
+.chip:active { transform: translateY(1px); }
+.chip.on {
+  background: var(--emerald-soft);
+  border-color: rgba(16, 185, 129, 0.55);
+  color: #34d399;
+}
+.chip .chip-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  font-size: 11px;
+  font-weight: 800;
+  color: #34d399;
+}
+
+/* ---- Section picker card (Users → add/edit dept head) ---- */
+.section-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.section-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.section-picker-count {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.section-picker-count b { color: #34d399; }
+.section-picker-search {
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 5px 13px;
+  font-size: 12.5px;
+  font-family: inherit;
+  outline: none;
+  width: 185px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.section-picker-search:focus {
+  border-color: var(--emerald);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+}
+.section-picker-search::placeholder { color: var(--text-faint); }
+.section-picker-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 216px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.section-picker-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.section-picker-actions { display: inline-flex; gap: 14px; }
+.section-picker-actions button {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.section-picker-actions button:hover { color: var(--emerald); }
+
 /* ===========================================================================
    KIOSK SCREEN
    =========================================================================== */

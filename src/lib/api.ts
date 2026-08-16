@@ -68,6 +68,7 @@ import type {
   StudentBadgeSummary,
   SystemStatus,
   TapinApi,
+  TeacherOption,
   TardinessFrequencyRow,
   TardinessRow,
   User,
@@ -248,12 +249,16 @@ interface MockPeriodResult {
 }
 
 class MockApi implements TapinApi {
-  private users: { id: number; username: string; password: string; role: UserRole; pin: string | null; created_at: string }[];
+  private users: { id: number; username: string; password: string; role: UserRole; pin: string | null; sections: string[]; created_at: string }[];
   private userSeq = 1;
   private students: Student[];
   private logs: AttendanceLogRow[] = [];
-  private sms: SmsLogRow[] = [];
-private sections: Section[] = [];
+  private sms: SmsLogRow[] = [];  private sections: Section[] = [];
+  /** Demo teacher accounts (role 'teacher') for the Sections adviser dropdown. */
+  private advisers: TeacherOption[] = [
+    { id: 101, username: 'maria.reyes', email: 'maria.reyes@school.edu.ph' },
+    { id: 102, username: 'carlo.mendoza', email: 'carlo.mendoza@school.edu.ph' },
+  ];
   private announcements: Announcement[] = [];
   private announcementIdSeq = 1;
   private badges: Badge[] = [];
@@ -293,7 +298,8 @@ private sections: Section[] = [];
       ['2024-0421', 'Miguel Torres', 'male', 'Grade 10 - Section D', '09195678901', '136542110127', '', ''],
       ['2024-0524', 'Liza Fernandez', 'female', 'Grade 11 - STEM', '09196789012', '136542110128', '', ''],
     ];
-    // Demo accounts: admin (dashboard) + staff (kiosk manual check-in PIN).
+    // Demo accounts: admin (dashboard) + staff (kiosk manual check-in PIN)
+    // + a department head managing Grade 8 - Section B.
     this.users = [
       {
         id: this.userSeq++,
@@ -301,6 +307,7 @@ private sections: Section[] = [];
         password: 'admin',
         role: 'admin',
         pin: null,
+        sections: [],
         created_at: new Date().toISOString(),
       },
       {
@@ -309,6 +316,16 @@ private sections: Section[] = [];
         password: '',
         role: 'staff',
         pin: '1234',
+        sections: [],
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: this.userSeq++,
+        username: 'head.science',
+        password: 'head',
+        role: 'dept_head',
+        pin: null,
+        sections: ['Grade 8 - Section B', 'Grade 9 - Section C'],
         created_at: new Date().toISOString(),
       },
     ];
@@ -896,6 +913,7 @@ private sections: Section[] = [];
       role: u.role,
       has_pin: !!u.pin,
       created_at: u.created_at,
+      sections: u.sections ?? [],
     }));
   }
 
@@ -903,18 +921,19 @@ private sections: Section[] = [];
     const username = String(input?.username ?? '').trim();
     if (!username) throw new Error('Username is required.');
     if (this.users.some((u) => u.username === username)) throw new Error(`Username "${username}" is already taken.`);
-    const role: UserRole = input?.role === 'staff' ? 'staff' : 'admin';
+    const role: UserRole =
+      input?.role === 'staff' || input?.role === 'dept_head' ? input.role : 'admin';
     let password = '';
     let pin: string | null = null;
-    if (role === 'admin') {
+    if (role === 'staff') {
+      pin = String(input?.pin ?? '').replace(/\D/g, '');
+      if (!pin || pin.length < 4 || pin.length > 8) throw new Error('Kiosk PIN must be 4-8 digits.');
+    } else {
       password = String(input?.password ?? '');
-      if (password.length < 4) throw new Error('Admin users need a password (min 4 characters).');
+      if (password.length < 4) throw new Error('Users need a password (min 4 characters).');
       const digits = String(input?.pin ?? '').replace(/\D/g, '');
       if (digits && (digits.length < 4 || digits.length > 8)) throw new Error('Kiosk PIN must be 4-8 digits.');
       if (digits) pin = digits;
-    } else {
-      pin = String(input?.pin ?? '').replace(/\D/g, '');
-      if (!pin || pin.length < 4 || pin.length > 8) throw new Error('Kiosk PIN must be 4-8 digits.');
     }
     const user = {
       id: this.userSeq++,
@@ -922,10 +941,18 @@ private sections: Section[] = [];
       password,
       role,
       pin,
+      sections: role === 'dept_head' ? [...(input?.sections ?? [])] : [],
       created_at: new Date().toISOString(),
     };
     this.users.push(user);
-    return { id: user.id, username: user.username, role: user.role, has_pin: !!user.pin, created_at: user.created_at };
+    return {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      has_pin: !!user.pin,
+      created_at: user.created_at,
+      sections: user.sections,
+    };
   }
 
   async updateUser(id: number, patch: Partial<UserInput>): Promise<User> {
@@ -939,11 +966,12 @@ private sections: Section[] = [];
     if (this.users.some((u) => u.username === nextUsername && u.id !== id)) {
       throw new Error(`Username "${nextUsername}" is already taken.`);
     }
-    const nextRole: UserRole = 'role' in patch ? (patch.role === 'staff' ? 'staff' : 'admin') : user.role;
-    if (nextRole === 'admin') {
+    const nextRole: UserRole =
+      'role' in patch ? (patch.role === 'staff' || patch.role === 'dept_head' ? patch.role : 'admin') : user.role;
+    if (nextRole !== 'staff') {
       const nextPassword = 'password' in patch ? String(patch.password ?? '') : '';
       const keepCurrent = !nextPassword && !!user.password;
-      if (!keepCurrent && nextPassword.length < 4) throw new Error('Admin users need a password (min 4 characters).');
+      if (!keepCurrent && nextPassword.length < 4) throw new Error('Users need a password (min 4 characters).');
     }
     if ('password' in patch && !('role' in patch)) {
       const password = String(patch.password ?? '');
@@ -958,11 +986,12 @@ private sections: Section[] = [];
     // All valid — apply.
     user.username = nextUsername;
     if ('role' in patch) {
-      if (nextRole === 'admin') {
+      if (nextRole !== 'staff') {
         const pw = 'password' in patch ? String(patch.password ?? '') : '';
         if (pw) user.password = pw;
       }
       user.role = nextRole;
+      if (nextRole === 'dept_head') user.sections = [...(patch.sections ?? [])];
     }
     if ('password' in patch && !('role' in patch)) {
       const pw = String(patch.password ?? '');
@@ -970,7 +999,14 @@ private sections: Section[] = [];
     }
     if ('pin' in patch) user.pin = nextPin;
 
-    return { id: user.id, username: user.username, role: user.role, has_pin: !!user.pin, created_at: user.created_at };
+    return {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      has_pin: !!user.pin,
+      created_at: user.created_at,
+      sections: user.sections ?? [],
+    };
   }
 
   async deleteUser(id: number): Promise<void> {
@@ -1425,6 +1461,10 @@ private sections: Section[] = [];
 
   async listSections(): Promise<Section[]> {
     return [...this.sections].sort((a, b) => a.grade_section.localeCompare(b.grade_section));
+  }
+
+  async listAdvisers(): Promise<TeacherOption[]> {
+    return [...this.advisers];
   }
 
   async saveSection(input: SectionInput): Promise<Section> {

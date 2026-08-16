@@ -15,5 +15,5 @@
     "sourceMap": false,
     "types": ["node"]
   },
-  "include": ["electron", "shared"]
+  "include": ["electron", "server", "shared"]
 }

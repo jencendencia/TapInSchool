@@ -259,8 +259,15 @@ export interface LoginResult {
 
 // ---- Users & roles ---------------------------------------------------------
 
-/** Who the account is: admin (dashboard access) or staff (kiosk manual check-in PIN). */
-export type UserRole = 'admin' | 'staff';
+/** Who the account is:
+ *   - admin      — dashboard access (kiosk)
+ *   - staff      — kiosk manual check-in PIN only
+ *   - teacher    — created + managed in the TapIn Teacher Companion app
+ *   - dept_head  — created by an admin on the kiosk's Users & Roles page;
+ *                  signs into the Teacher Companion app and manages the
+ *                  teachers assigned to their sections
+ */
+export type UserRole = 'admin' | 'staff' | 'teacher' | 'dept_head';
 
 /** A dashboard/kiosk account. The PIN hash is never exposed to the renderer. */
 export interface User {
@@ -269,6 +276,8 @@ export interface User {
   role: UserRole;
   /** True when the account has a kiosk PIN set (staff use it for manual check-in). */
   has_pin: boolean;
+  /** Sections the account manages (dept_head; ''/omitted for other roles). */
+  sections?: string[];
   created_at: string;
 }
 
@@ -279,6 +288,8 @@ export interface UserInput {
   password?: string;
   /** 4–8 digit kiosk PIN. Required for staff; pass '' to clear an existing PIN. */
   pin?: string;
+  /** grade_section keys the dept_head manages (persisted in teacher_sections). */
+  sections?: string[];
 }
 
 export type SmsProviderId = 'simulator' | 'gsm' | 'cloud';
@@ -875,6 +886,17 @@ export interface EmailResult {
   error?: string;
 }
 
+// ---- Teacher accounts (adviser dropdown source for the Sections page) ------
+// Teacher accounts live in the shared `users` table with role 'teacher' (they
+// are created in the TapIn Teacher Companion app). The Sections page's adviser
+// picker lists them; picking one fills the section's adviser name (their
+// username) + email (from their account).
+export interface TeacherOption {
+  id: number;
+  username: string;
+  email: string;
+}
+
 // ---- Sections (section registry + adviser report email delivery) -----------
 
 /**
@@ -1231,6 +1253,8 @@ export interface TapinApi {
 
   /** Registered sections (one row per grade_section, with adviser + email). */
   listSections(): Promise<Section[]>;
+  /** Teacher accounts (role 'teacher' in users) — the adviser dropdown source. */
+  listAdvisers(): Promise<TeacherOption[]>;
   /** Inserts or updates a section (upsert by grade_section). */
   saveSection(input: SectionInput): Promise<Section>;
   /** Removes a section from the registry. */
