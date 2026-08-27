@@ -12,7 +12,7 @@ import { db } from '../db/connection';
 import { settingsStore } from '../db/settings';
 import { withRetry } from './db-retry';
 import { maskPhone } from './qr';
-import { computeScanFlag, flagSelectParams, flagSelectSql } from './bell-times';
+import { computeScanFlag, flagSelectParams, flagSelectSql, parseTime } from './bell-times';
 import { buildSmsMessage, resolveTemplate } from '../sms/message-builder';
 import { forcedEntryType, getScanMode } from './scan-mode';
 import {
@@ -46,6 +46,25 @@ import type {
 export interface ScanEventBus {
   onScanResult(result: ScanResult): void;
   onActivity(items: ActivityItem[]): void;
+}
+
+// Context-aware scan messages: the toggle engine supports 4 scans per day
+// (IN/OUT morning, IN/OUT afternoon). The message reflects which session
+// the student is in based on the bell times.
+function scanMessage(entryType: EntryType, settings: { bell_time_in: string; bell_time_out: string }): string {
+  const inMin = settings.bell_time_in ? parseTime(settings.bell_time_in) : NaN;
+  const outMin = settings.bell_time_out ? parseTime(settings.bell_time_out) : NaN;
+  // Midpoint between bell_time_in and bell_time_out = the lunch break.
+  // If bell times are not set, fall back to noon (12:00 = 720 min).
+  const mid = !Number.isNaN(inMin) && !Number.isNaN(outMin)
+    ? Math.round((inMin + outMin) / 2)
+    : 720;
+  const now = new Date().getHours() * 60 + new Date().getMinutes();
+  const isAfternoon = now >= mid;
+  if (entryType === 'IN') {
+    return isAfternoon ? 'Checked IN — welcome back!' : 'Checked IN — have a great day!';
+  }
+  return isAfternoon ? 'Checked OUT — see you tomorrow!' : 'Checked OUT — enjoy your break!';
 }
 
 // Serializes ALL scan processing (scanner, webcam, manual) so debounce/toggle
@@ -310,10 +329,7 @@ async function processScanOnline(
 
   const result: ScanResult = {
     kind: 'SUCCESS',
-    message:
-      entryType === 'IN'
-        ? 'Checked IN — have a great day!'
-        : 'Checked OUT — see you tomorrow!',
+    message: scanMessage(entryType, settings),
     student,
     entryType,
     log,
@@ -558,10 +574,7 @@ async function processScanOffline(
 
   const result: ScanResult = {
     kind: 'SUCCESS',
-    message:
-      entryType === 'IN'
-        ? 'Checked IN — have a great day!'
-        : 'Checked OUT — see you tomorrow!',
+    message: scanMessage(entryType, settings),
     student: toStudent(student),
     entryType,
     log: { id: 0, student_id: student.id, entry_type: entryType, scanned_at: scannedAt, source, flag },
