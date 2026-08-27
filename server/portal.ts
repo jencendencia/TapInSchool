@@ -186,6 +186,13 @@ type RpcHandler = (params: unknown[], session: Session) => Promise<unknown>;
 const rpcHandlers: Record<string, RpcHandler> = {
   logout: async () => undefined,
 
+  // ---- Current user profile (who is logged in) --------------------------------
+  getProfile: async (_p, s) => ({
+    id: s.id,
+    username: s.username,
+    role: s.role,
+  }),
+
   // ---- School branding (login + sidebar) -----------------------------------
   getSchoolInfo: async () => {
     const info = await readSchoolBranding();
