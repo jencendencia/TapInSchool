@@ -2,6 +2,7 @@
 // shared TapinApi contract (shared/types.ts).
 import { ipcMain, app, BrowserWindow, dialog } from 'electron';
 import { promises as fs } from 'fs';
+import * as os from 'os';
 import { currentConfig, db, getSavedConfig, type DbConfig } from './db/connection';
 import { clearDbConfig, saveDbConfig } from './db/config';
 import { settingsStore } from './db/settings';
@@ -54,6 +55,9 @@ import { buildReportWorkbook } from './services/report-export';
 import { sendAdviserReportEmails, sendReportEmail, sendTestEmail } from './services/report-email';
 import { checkForUpdates, downloadUpdate, installUpdate } from './services/updater';
 import { activateLicense, checkLicense, getMachineIdValue } from './services/license';
+import * as subjects from '../server/subjects';
+import * as grading from '../server/grading';
+import * as lessonPlans from '../server/lesson-plans';
 import { withRetry, updateWithVersionCheck } from './services/db-retry';
 import { getJobsConfig } from './services/jobs-config';
 import { getProvider } from './sms/providers';
@@ -115,6 +119,26 @@ interface ScannerHook {
   setRunScheduledJobs?(active: boolean): Promise<void>;
 }
 
+/** The portal port the kiosk's embedded server listens on (mirrors server/portal.ts). */
+function portalPort(): number {
+  return Number(process.env.PORT || 4000);
+}
+
+/** http:// URLs teachers can open to reach the TapIn Teacher portal on this machine. */
+function portalUrls(): string[] {
+  const port = portalPort();
+  const urls: string[] = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const iface of list ?? []) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        urls.push(`http://${iface.address}:${port}`);
+      }
+    }
+  }
+  if (urls.length === 0) urls.push(`http://localhost:${port}`);
+  return [...new Set(urls)];
+}
+
 export function registerIpc(scanner: ScannerHook): void {
   const broadcast = (channel: string, ...args: unknown[]) => {
     for (const win of BrowserWindow.getAllWindows()) {
@@ -131,6 +155,7 @@ export function registerIpc(scanner: ScannerHook): void {
       db: { online: dbStatus.online, detail: decorateDbDetail(dbStatus.detail) },
       sms: await provider.verify(settings),
       queue: { pending: await pendingQueueCount() },
+      portal: { urls: portalUrls() },
     };
   });
 
@@ -662,6 +687,13 @@ export function registerIpc(scanner: ScannerHook): void {
     const adviserName = String(input?.adviser_name ?? '').trim();
     const email = String(input?.email ?? '').trim();
     if (!gradeSection) throw new Error('Section is required.');
+    // Fetch the old adviser_name before the update so we can clean up
+    // teacher_sections when the adviser is removed or replaced.
+    const [oldRow] = await db.query<{ adviser_name: string }[]>(
+      'SELECT adviser_name FROM sections WHERE grade_section = ?',
+      [gradeSection],
+    );
+    const oldAdviser = oldRow?.adviser_name ?? '';
     // Optimistic lock (C3): an edit sends the loaded updated_at, so only
     // overwrite if the section is still at that version (prevents two admins
     // silently clobbering each other's adviser/email edits). New sections
@@ -686,6 +718,45 @@ export function registerIpc(scanner: ScannerHook): void {
       );
     }
     const [row] = await db.query<Section[]>('SELECT * FROM sections WHERE grade_section = ?', [gradeSection]);
+
+    // Sync teacher_sections when the adviser changes: the companion app
+    // determines a teacher's sections from teacher_sections, so the Sections
+    // page must keep that table in sync — otherwise the teacher won't see
+    // (or will keep seeing) the section in their companion portal.
+    const [curYearRow] = await db.query<{ name: string }[]>(
+      'SELECT name FROM school_years WHERE is_current = 1 ORDER BY id LIMIT 1',
+    );
+    const year = curYearRow?.name ?? String(new Date().getFullYear());
+
+    // If the old adviser was a teacher and is being removed or replaced,
+    // clean up their teacher_sections mapping for this section.
+    if (oldAdviser && oldAdviser !== adviserName) {
+      const oldTeachers = await db.query<{ id: number }[]>(
+        "SELECT id FROM users WHERE username = ? AND role = 'teacher' LIMIT 1",
+        [oldAdviser],
+      );
+      if (oldTeachers[0]) {
+        await db.execute(
+          'DELETE FROM teacher_sections WHERE teacher_id = ? AND grade_section = ? AND school_year = ?',
+          [oldTeachers[0].id, gradeSection, year],
+        );
+      }
+    }
+
+    // If a new adviser is assigned, ensure the teacher is mapped to this section.
+    if (adviserName) {
+      const newTeachers = await db.query<{ id: number }[]>(
+        "SELECT id FROM users WHERE username = ? AND role = 'teacher' LIMIT 1",
+        [adviserName],
+      );
+      if (newTeachers[0]) {
+        await db.execute(
+          'INSERT IGNORE INTO teacher_sections (teacher_id, grade_section, school_year) VALUES (?, ?, ?)',
+          [newTeachers[0].id, gradeSection, year],
+        );
+      }
+    }
+
     return row;
   });
 
@@ -1227,9 +1298,10 @@ export function registerIpc(scanner: ScannerHook): void {
     if (!report) return { ok: false, error: 'No report data to export.' };
     try {
       const win = BrowserWindow.fromWebContents(e.sender);
+      const schoolSlug = (report.schoolName || 'TapIn School').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-');
       const filePath = await pickSavePath(
         win,
-        `tapin-report-${report.from}-to-${report.to}.pdf`,
+        `${schoolSlug}-report-${report.from}-to-${report.to}.pdf`,
         'PDF document',
         ['pdf'],
       );
@@ -1247,9 +1319,10 @@ export function registerIpc(scanner: ScannerHook): void {
   ipcMain.handle('tapin:exportReportXlsx', async (e, report: ReportData): Promise<ExportResult> => {
     try {
       const win = BrowserWindow.fromWebContents(e.sender);
+      const schoolSlug = (report.schoolName || 'TapIn School').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-');
       const filePath = await pickSavePath(
         win,
-        `tapin-report-${report.from}-to-${report.to}.xlsx`,
+        `${schoolSlug}-report-${report.from}-to-${report.to}.xlsx`,
         'Excel workbook',
         ['xlsx'],
       );
@@ -1479,5 +1552,151 @@ const next = await settingsStore.update(patch);
 
   ipcMain.handle('tapin:getMachineId', async (): Promise<string> => {
     return getMachineIdValue();
+  });
+
+  // ---- Subjects CRUD --------------------------------------------------------
+  ipcMain.handle('tapin:listSubjects', async (_e, search?: string): Promise<import('../server/subjects').Subject[]> => {
+    return subjects.listSubjects(search);
+  });
+
+  ipcMain.handle('tapin:getSubject', async (_e, id: number): Promise<import('../server/subjects').Subject | null> => {
+    return subjects.getSubject(id);
+  });
+
+  ipcMain.handle('tapin:createSubject', async (_e, input: import('../server/subjects').SubjectInput): Promise<import('../server/subjects').Subject> => {
+    return subjects.createSubject(input);
+  });
+
+  ipcMain.handle('tapin:updateSubject', async (_e, id: number, patch: Partial<import('../server/subjects').SubjectInput>): Promise<import('../server/subjects').Subject> => {
+    return subjects.updateSubject(id, patch);
+  });
+
+  ipcMain.handle('tapin:deleteSubject', async (_e, id: number): Promise<void> => {
+    return subjects.deleteSubject(id);
+  });
+
+  // ---- Teacher-Subject Assignments ------------------------------------------
+  ipcMain.handle('tapin:listTeacherSubjects', async (_e, teacherId: number, schoolYear?: string): Promise<unknown[]> => {
+    return subjects.listTeacherSubjects(teacherId, schoolYear);
+  });
+
+  ipcMain.handle('tapin:assignTeacherSubject', async (_e, teacherId: number, input: import('../server/subjects').TeacherSubjectInput, schoolYear?: string): Promise<import('../server/subjects').TeacherSubject> => {
+    return subjects.assignTeacherSubject(teacherId, input, schoolYear);
+  });
+
+  ipcMain.handle('tapin:removeTeacherSubject', async (_e, id: number): Promise<void> => {
+    return subjects.removeTeacherSubject(id);
+  });
+
+  // ---- Subject Attendance (per-subject SF2) ---------------------------------
+  ipcMain.handle('tapin:markSubjectAttendance', async (_e, teacherId: number, input: import('../server/subjects').SubjectAttendanceInput, schoolYear?: string): Promise<import('../server/subjects').SubjectAttendanceRow> => {
+    return subjects.markSubjectAttendance(teacherId, input, schoolYear);
+  });
+
+  ipcMain.handle('tapin:markBulkSubjectAttendance', async (_e, teacherId: number, subjectId: number, date: string, marks: { student_id: number; status: string; remarks?: string }[], schoolYear?: string): Promise<number> => {
+    return subjects.markBulkSubjectAttendance(teacherId, subjectId, date, marks, schoolYear);
+  });
+
+  ipcMain.handle('tapin:getSubjectRoster', async (_e, subjectId: number, gradeSection: string, date: string, schoolYear?: string): Promise<import('../server/subjects').SubjectAttendanceRoster[]> => {
+    return subjects.getSubjectRoster(subjectId, gradeSection, date, schoolYear);
+  });
+
+  ipcMain.handle('tapin:getSubjectSf2', async (_e, subjectId: number, gradeSection: string, from: string, to: string, schoolYear?: string): Promise<import('../server/subjects').SubjectSf2Report> => {
+    return subjects.getSubjectSf2(subjectId, gradeSection, from, to, schoolYear);
+  });
+
+  ipcMain.handle('tapin:getSubjectAttendanceSummary', async (_e, subjectId: number, gradeSection: string, from: string, to: string): Promise<unknown> => {
+    return subjects.getSubjectAttendanceSummary(subjectId, gradeSection, from, to);
+  });
+
+  // ---- Grading (DepEd grading sheets + class records) -----------------------
+  ipcMain.handle('tapin:listGradingComponents', async (_e, subjectId: number, gradeSection: string, schoolYear: string, quarter: number): Promise<import('../server/grading').GradingComponent[]> => {
+    return grading.listGradingComponents(subjectId, gradeSection, schoolYear, quarter);
+  });
+
+  ipcMain.handle('tapin:createGradingComponent', async (_e, input: import('../server/grading').GradingComponentInput): Promise<import('../server/grading').GradingComponent> => {
+    return grading.createGradingComponent(input);
+  });
+
+  ipcMain.handle('tapin:updateGradingComponent', async (_e, id: number, patch: Partial<import('../server/grading').GradingComponentInput>): Promise<import('../server/grading').GradingComponent> => {
+    return grading.updateGradingComponent(id, patch);
+  });
+
+  ipcMain.handle('tapin:deleteGradingComponent', async (_e, id: number): Promise<void> => {
+    return grading.deleteGradingComponent(id);
+  });
+
+  ipcMain.handle('tapin:setGradingScore', async (_e, componentId: number, studentId: number, score: number, recordedBy?: number): Promise<import('../server/grading').GradingScore> => {
+    return grading.setScore(componentId, studentId, score, recordedBy);
+  });
+
+  ipcMain.handle('tapin:setBulkGradingScores', async (_e, componentId: number, scores: { student_id: number; score: number }[], recordedBy?: number): Promise<number> => {
+    return grading.setBulkScores(componentId, scores, recordedBy);
+  });
+
+  ipcMain.handle('tapin:getGradingSheet', async (_e, subjectId: number, gradeSection: string, schoolYear: string, quarter: number): Promise<import('../server/grading').GradingSheet> => {
+    return grading.getGradingSheet(subjectId, gradeSection, schoolYear, quarter);
+  });
+
+  ipcMain.handle('tapin:recomputeClassRecords', async (_e, subjectId: number, gradeSection: string, schoolYear: string, quarter: number, recordedBy?: number): Promise<import('../server/grading').ClassRecord[]> => {
+    return grading.recomputeAllClassRecords(subjectId, gradeSection, schoolYear, quarter, recordedBy);
+  });
+
+  ipcMain.handle('tapin:getClassRecords', async (_e, subjectId: number, gradeSection: string, schoolYear: string, quarter: number): Promise<unknown[]> => {
+    return grading.getClassRecords(subjectId, gradeSection, schoolYear, quarter);
+  });
+
+  ipcMain.handle('tapin:getFinalGrades', async (_e, subjectId: number, gradeSection: string, schoolYear: string): Promise<unknown[]> => {
+    return grading.getFinalGrades(subjectId, gradeSection, schoolYear);
+  });
+
+  ipcMain.handle('tapin:getTransmutationTable', async (): Promise<typeof grading.TRANSMUTATION_TABLE> => {
+    return grading.TRANSMUTATION_TABLE;
+  });
+
+  // ---- Lesson Plans (ILAW format) -------------------------------------------
+  ipcMain.handle('tapin:listLessonPlans', async (_e, teacherId: number, filters?: { subjectId?: number; gradeSection?: string; status?: string; from?: string; to?: string }): Promise<import('../server/lesson-plans').LessonPlan[]> => {
+    return lessonPlans.listLessonPlans(teacherId, filters);
+  });
+
+  ipcMain.handle('tapin:getLessonPlan', async (_e, id: number): Promise<import('../server/lesson-plans').LessonPlan | null> => {
+    return lessonPlans.getLessonPlan(id);
+  });
+
+  ipcMain.handle('tapin:createLessonPlan', async (_e, teacherId: number, input: import('../server/lesson-plans').LessonPlanInput): Promise<import('../server/lesson-plans').LessonPlan> => {
+    return lessonPlans.createLessonPlan(teacherId, input);
+  });
+
+  ipcMain.handle('tapin:updateLessonPlan', async (_e, id: number, patch: Partial<import('../server/lesson-plans').LessonPlanInput>): Promise<import('../server/lesson-plans').LessonPlan> => {
+    return lessonPlans.updateLessonPlan(id, patch);
+  });
+
+  ipcMain.handle('tapin:deleteLessonPlan', async (_e, id: number): Promise<void> => {
+    return lessonPlans.deleteLessonPlan(id);
+  });
+
+  ipcMain.handle('tapin:buildAiLessonPlanPrompt', async (_e, topic: string, gradeLevel: string, subjectName: string, objectives: string): Promise<string> => {
+    return lessonPlans.buildAiPrompt(topic, gradeLevel, subjectName, objectives);
+  });
+
+  ipcMain.handle('tapin:formatIlawAsText', async (_e, ilawData: import('../server/lesson-plans').IlawSection): Promise<string> => {
+    return lessonPlans.formatIlawAsText(ilawData);
+  });
+
+  // ---- Lesson Plan Templates ------------------------------------------------
+  ipcMain.handle('tapin:listLessonPlanTemplates', async (_e, teacherId: number, subjectId?: number): Promise<import('../server/lesson-plans').LessonPlanTemplate[]> => {
+    return lessonPlans.listLessonPlanTemplates(teacherId, subjectId);
+  });
+
+  ipcMain.handle('tapin:createLessonPlanTemplate', async (_e, teacherId: number, input: import('../server/lesson-plans').LessonPlanTemplateInput): Promise<import('../server/lesson-plans').LessonPlanTemplate> => {
+    return lessonPlans.createLessonPlanTemplate(teacherId, input);
+  });
+
+  ipcMain.handle('tapin:useLessonPlanTemplate', async (_e, templateId: number): Promise<void> => {
+    return lessonPlans.useLessonPlanTemplate(templateId);
+  });
+
+  ipcMain.handle('tapin:deleteLessonPlanTemplate', async (_e, id: number): Promise<void> => {
+    return lessonPlans.deleteLessonPlanTemplate(id);
   });
 }

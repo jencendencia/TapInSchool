@@ -1,6 +1,7 @@
 // TapIn School — Electron main process.
 import { app, BrowserWindow, globalShortcut, Menu, powerSaveBlocker, protocol } from 'electron';
 import { promises as fs } from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { loadEnv } from './lib/env';
 import { db } from './db/connection';
@@ -204,6 +205,26 @@ async function bootDatabase(): Promise<void> {
   }
 }
 
+/** The portal port the kiosk's embedded server listens on (mirrors server/portal.ts). */
+function portalPort(): number {
+  return Number(process.env.PORT || 4000);
+}
+
+/** http:// URLs teachers can open to reach the TapIn Teacher portal on this machine. */
+function portalUrls(): string[] {
+  const port = portalPort();
+  const urls: string[] = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const iface of list ?? []) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        urls.push(`http://${iface.address}:${port}`);
+      }
+    }
+  }
+  if (urls.length === 0) urls.push(`http://localhost:${port}`);
+  return [...new Set(urls)];
+}
+
 async function broadcastStatus(): Promise<void> {
   const settings = settingsStore.get();
   const provider = getProvider(settings.sms_provider);
@@ -212,6 +233,7 @@ async function broadcastStatus(): Promise<void> {
     db: { online: dbStatus.online, detail: decorateDbDetail(dbStatus.detail) },
     sms: await provider.verify(settings),
     queue: { pending: await pendingQueueCount() },
+    portal: { urls: portalUrls() },
   };
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send('tapin:status', status);
@@ -237,6 +259,10 @@ async function serveLocalFile(filePath: string, mime: string): Promise<Response>
         'Content-Type': mime,
         'Content-Length': String(stat.size),
         'Accept-Ranges': 'bytes',
+        // Never cache these local files: a re-uploaded logo / announcement
+        // media must show immediately (the tapin-logo:// URL carries a version
+        // query, but a no-store header makes even same-URL requests fresh).
+        'Cache-Control': 'no-store',
       },
     });
   }

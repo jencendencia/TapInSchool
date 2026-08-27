@@ -201,6 +201,48 @@ onScanResult: (cb) => on<ScanResult>('tapin:scan-result', cb),
   activateLicense: (licenseKey: string) =>
     ipcRenderer.invoke('tapin:activateLicense', licenseKey) as Promise<ActivationResult>,
   getMachineId: () => ipcRenderer.invoke('tapin:getMachineId') as Promise<string>,
+
+  // ---- Teacher Companion: Subjects, Grading, Lesson Plans -----------------
+  listSubjects: (search?: string) => ipcRenderer.invoke('tapin:listSubjects', search) as any,
+  getSubject: (id: number) => ipcRenderer.invoke('tapin:getSubject', id) as any,
+  createSubject: (input: any) => ipcRenderer.invoke('tapin:createSubject', input) as any,
+  updateSubject: (id: number, patch: any) => ipcRenderer.invoke('tapin:updateSubject', id, patch) as any,
+  deleteSubject: (id: number) => ipcRenderer.invoke('tapin:deleteSubject', id) as Promise<void>,
+
+  listTeacherSubjects: (teacherId: number, schoolYear?: string) => ipcRenderer.invoke('tapin:listTeacherSubjects', teacherId, schoolYear) as any,
+  assignTeacherSubject: (teacherId: number, input: any, schoolYear?: string) => ipcRenderer.invoke('tapin:assignTeacherSubject', teacherId, input, schoolYear) as any,
+  removeTeacherSubject: (id: number) => ipcRenderer.invoke('tapin:removeTeacherSubject', id) as Promise<void>,
+
+  markSubjectAttendance: (teacherId: number, input: any, schoolYear?: string) => ipcRenderer.invoke('tapin:markSubjectAttendance', teacherId, input, schoolYear) as any,
+  markBulkSubjectAttendance: (teacherId: number, subjectId: number, date: string, marks: { student_id: number; status: string; remarks?: string }[], schoolYear?: string) => ipcRenderer.invoke('tapin:markBulkSubjectAttendance', teacherId, subjectId, date, marks, schoolYear) as Promise<number>,
+  getSubjectRoster: (subjectId: number, gradeSection: string, date: string, schoolYear?: string) => ipcRenderer.invoke('tapin:getSubjectRoster', subjectId, gradeSection, date, schoolYear) as any,
+  getSubjectSf2: (subjectId: number, gradeSection: string, from: string, to: string, schoolYear?: string) => ipcRenderer.invoke('tapin:getSubjectSf2', subjectId, gradeSection, from, to, schoolYear) as any,
+  getSubjectAttendanceSummary: (subjectId: number, gradeSection: string, from: string, to: string) => ipcRenderer.invoke('tapin:getSubjectAttendanceSummary', subjectId, gradeSection, from, to) as any,
+
+  listGradingComponents: (subjectId: number, gradeSection: string, schoolYear: string, quarter: number) => ipcRenderer.invoke('tapin:listGradingComponents', subjectId, gradeSection, schoolYear, quarter) as any,
+  createGradingComponent: (input: any) => ipcRenderer.invoke('tapin:createGradingComponent', input) as any,
+  updateGradingComponent: (id: number, patch: any) => ipcRenderer.invoke('tapin:updateGradingComponent', id, patch) as any,
+  deleteGradingComponent: (id: number) => ipcRenderer.invoke('tapin:deleteGradingComponent', id) as Promise<void>,
+  setGradingScore: (componentId: number, studentId: number, score: number, recordedBy?: number) => ipcRenderer.invoke('tapin:setGradingScore', componentId, studentId, score, recordedBy) as any,
+  setBulkGradingScores: (componentId: number, scores: { student_id: number; score: number }[], recordedBy?: number) => ipcRenderer.invoke('tapin:setBulkGradingScores', componentId, scores, recordedBy) as Promise<number>,
+  getGradingSheet: (subjectId: number, gradeSection: string, schoolYear: string, quarter: number) => ipcRenderer.invoke('tapin:getGradingSheet', subjectId, gradeSection, schoolYear, quarter) as any,
+  recomputeClassRecords: (subjectId: number, gradeSection: string, schoolYear: string, quarter: number, recordedBy?: number) => ipcRenderer.invoke('tapin:recomputeClassRecords', subjectId, gradeSection, schoolYear, quarter, recordedBy) as any,
+  getClassRecords: (subjectId: number, gradeSection: string, schoolYear: string, quarter: number) => ipcRenderer.invoke('tapin:getClassRecords', subjectId, gradeSection, schoolYear, quarter) as any,
+  getFinalGrades: (subjectId: number, gradeSection: string, schoolYear: string) => ipcRenderer.invoke('tapin:getFinalGrades', subjectId, gradeSection, schoolYear) as any,
+  getTransmutationTable: () => ipcRenderer.invoke('tapin:getTransmutationTable') as any,
+
+  listLessonPlans: (teacherId: number, filters?: any) => ipcRenderer.invoke('tapin:listLessonPlans', teacherId, filters) as any,
+  getLessonPlan: (id: number) => ipcRenderer.invoke('tapin:getLessonPlan', id) as any,
+  createLessonPlan: (teacherId: number, input: any) => ipcRenderer.invoke('tapin:createLessonPlan', teacherId, input) as any,
+  updateLessonPlan: (id: number, patch: any) => ipcRenderer.invoke('tapin:updateLessonPlan', id, patch) as any,
+  deleteLessonPlan: (id: number) => ipcRenderer.invoke('tapin:deleteLessonPlan', id) as Promise<void>,
+  buildAiLessonPlanPrompt: (topic: string, gradeLevel: string, subjectName: string, objectives: string) => ipcRenderer.invoke('tapin:buildAiLessonPlanPrompt', topic, gradeLevel, subjectName, objectives) as Promise<string>,
+  formatIlawAsText: (ilawData: any) => ipcRenderer.invoke('tapin:formatIlawAsText', ilawData) as Promise<string>,
+
+  listLessonPlanTemplates: (teacherId: number, subjectId?: number) => ipcRenderer.invoke('tapin:listLessonPlanTemplates', teacherId, subjectId) as any,
+  createLessonPlanTemplate: (teacherId: number, input: any) => ipcRenderer.invoke('tapin:createLessonPlanTemplate', teacherId, input) as any,
+  useLessonPlanTemplate: (templateId: number) => ipcRenderer.invoke('tapin:useLessonPlanTemplate', templateId) as Promise<void>,
+  deleteLessonPlanTemplate: (id: number) => ipcRenderer.invoke('tapin:deleteLessonPlanTemplate', id) as Promise<void>,
 };
 
 contextBridge.exposeInMainWorld('tapin', api);

@@ -137,11 +137,12 @@ const TYPE_SHEETS: Record<ReportData['type'], string> = {
   'sms-audit': 'SMS Audit',
   trends: 'Trends',
   student: 'Student Record',
+  sf1: 'School Register (SF1)',
 };
 
 export async function buildReportWorkbook(report: ReportData): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
-  wb.creator = 'TapIn School';
+  wb.creator = report.schoolName || 'TapIn School';
   const ws = wb.addWorksheet(TYPE_SHEETS[report.type] ?? 'Report');
   const s = report.summary;
 
@@ -372,6 +373,45 @@ export async function buildReportWorkbook(report: ReportData): Promise<Buffer> {
       [true],
     );
     ws.views = [{ state: 'frozen', ySplit: wHead }];
+  } else if (report.type === 'sf1') {
+    for (let c = 1; c <= 9; c++) ws.getColumn(c).width = [6, 16, 28, 6, 12, 30, 24, 16, 12][c - 1];
+    banner(ws, report, 'School Register (SF1)', 9);
+    let rowIdx = 5;
+    for (const g of report.schoolRegister) {
+      // Section group banner row.
+      const secRow = ws.getRow(rowIdx);
+      secRow.height = 22;
+      ws.mergeCells(rowIdx, 1, rowIdx, 9);
+      const sc = ws.getCell(rowIdx, 1);
+      sc.value = `Grade Level & Section: ${g.gradeSection}`;
+      sc.font = { ...FONT, bold: true };
+      sc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: LABEL_BG } };
+      sc.alignment = { horizontal: 'left' };
+      sc.border = border();
+      rowIdx++;
+      const hHead = rowIdx;
+      headerRow(ws, hHead, ['No.', 'LRN', "LEARNER'S NAME (Last Name, First Name, Middle Name)", 'Sex', 'Birthdate', 'Address (Home)', 'Guardian', 'Contact No.', 'Remarks'], [false, false, true, false, false, true, true, false, false]);
+      rowIdx = bodyRows(
+        ws,
+        hHead + 1,
+        g.rows.map((r, i) => [i + 1, r.lrn || r.studentNo, r.fullName, r.sex, '', r.address, r.guardian, r.contact, '']),
+        [false, false, true, false, false, true, true, false, false],
+      );
+      // Section totals row.
+      const total = g.male + g.female;
+      const t = ws.getCell(rowIdx, 1);
+      t.value = `MALE: ${g.male} · FEMALE: ${g.female} · TOTAL: ${total}`;
+      t.font = { ...FONT, bold: true };
+      t.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: LABEL_BG } };
+      t.alignment = { horizontal: 'left' };
+      for (let c = 2; c <= 9; c++) {
+        const cc = ws.getCell(rowIdx, c);
+        cc.border = border();
+        cc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: LABEL_BG } };
+      }
+      rowIdx += 2;
+    }
+    ws.views = [{ state: 'frozen', ySplit: 5 }];
   }
 
   return Buffer.from(await wb.xlsx.writeBuffer());

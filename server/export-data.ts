@@ -62,12 +62,23 @@ export function tableFor(data: ReportData): Table {
           r.daysAbsent + r.daysExcused, r.daysLate,
         ]),
       };
+    case 'sf1':
+      // DepEd SF1 School Register columns.
+      return {
+        headers: ['No.', 'LRN', "LEARNER'S NAME (Last Name, First Name, Middle Name)", 'Sex', 'Birthdate', 'Address (Home)', 'Guardian', 'Contact No.', 'Remarks'],
+        rows: data.rows.map((r, i) => [
+          i + 1, r.lrn || r.studentNo, r.fullName, r.sex, '', r.address, r.guardian, r.contact, '',
+        ]),
+      };
   }
 }
 
-export function defaultFileName(data: ReportData, ext: string): string {
+export function defaultFileName(data: ReportData, ext: string, schoolName?: string): string {
   const section = 'section' in data ? data.section : 'all';
-  return `TapIn-${data.kind}-${sanitize(section)}-${data.from}_${data.to}.${ext}`;
+  const school = schoolName || ('schoolName' in data && data.schoolName ? data.schoolName : '');
+  const prefix = school ? `${sanitize(school)}-` : '';
+  if (data.kind === 'sf1') return `${prefix}sf1-${sanitize(section)}-${sanitize(data.schoolYear)}.${ext}`;
+  return `${prefix}${data.kind}-${sanitize(section)}-${data.from}_${data.to}.${ext}`;
 }
 
 function csvEscape(v: string | number): string {
@@ -110,6 +121,7 @@ export async function xlsxBuffer(data: ReportData): Promise<Buffer> {
  *  except register). */
 export function pdfHtml(data: ReportData, meta?: { schoolName?: string; schoolYear?: string }): string {
   if (data.kind === 'register') return sf2Html(data);
+  if (data.kind === 'sf1') return sf1Html(data);
   const titles: Record<string, string> = {
     section: 'Per-Student Attendance Report',
     'per-section': 'Per-Section Attendance Summary',
@@ -263,6 +275,85 @@ export function sf2Html(data: Extract<ReportData, { kind: 'register' }>): string
     <div class="sig">
       <div>I certify that this is a true and correct report.<div class="line">______________________________</div><div class="role">(Signature of Teacher over Printed Name)</div></div>
       <div>Attested by:<div class="line">______________________________</div><div class="role">(Signature of School Head over Printed Name)</div></div>
+    </div>
+  </body></html>`;
+}
+
+/** Official DepEd SF1 — School Form 1: School Register (per section, portal). */
+export function sf1Html(data: Extract<ReportData, { kind: 'sf1' }>): string {
+  const gradeLevel = /^Grade\s*\d+/i.test(data.section) ? data.section.split('-')[0].trim() : '';
+  const body = data.rows
+    .map(
+      (r, i) => `<tr>
+      <td>${i + 1}</td>
+      <td class="lrn">${esc(r.lrn || r.studentNo)}</td>
+      <td class="name">${esc(r.fullName)}</td>
+      <td>${esc(r.sex)}</td>
+      <td></td>
+      <td class="addr">${esc(r.address)}</td>
+      <td>${esc(r.guardian)}</td>
+      <td>${esc(r.contact)}</td>
+      <td></td>
+    </tr>`,
+    )
+    .join('');
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    @page { size: A4 landscape; margin: 10mm; }
+    body { font-family: 'Times New Roman', Times, serif; color: #000; margin: 0; font-size: 10.5px; }
+    .letterhead { text-align: center; }
+    .letterhead .rep { font-weight: 700; font-size: 13px; }
+    .letterhead .school { font-weight: 700; font-size: 15px; margin-top: 3px; }
+    .title { text-align: center; font-weight: 700; font-size: 12px; text-transform: uppercase; margin: 8px 0 2px; }
+    .subtitle { text-align: center; font-size: 8px; font-style: italic; margin-bottom: 8px; }
+    .fields { font-size: 10px; margin-bottom: 8px; }
+    .fields .row { display: flex; gap: 6px 34px; flex-wrap: wrap; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #000; padding: 3px 5px; text-align: center; }
+    th { font-size: 8.5px; }
+    .sub { font-size: 7px; font-weight: 400; }
+    .name { text-align: left; padding-left: 5px; }
+    .addr { text-align: left; padding-left: 5px; font-size: 9px; }
+    .lrn { font-size: 8.5px; }
+    .summary { display: inline-block; border: 1px solid #000; font-size: 9px; margin-top: 8px; }
+    .summary td { border: 1px solid #000; padding: 2px 12px; }
+    .summary .v { text-align: right; font-weight: 700; }
+    .sig { display: flex; justify-content: space-between; margin-top: 26px; text-align: center; }
+    .sig .line { margin-top: 22px; }
+    .sig .role { font-size: 8.5px; }
+  </style></head><body>
+    <div class="letterhead">
+      <div class="rep">Republic of the Philippines</div>
+      <div>Department of Education</div>
+      <div class="school">${esc(data.schoolName)}</div>
+    </div>
+    <div class="title">School Form 1 (SF1) — School Register</div>
+    <div class="subtitle">(This is a report on the learners enrolled at the beginning of the school year. Please accomplish this form by filling up all the necessary data in the corresponding cells. Shaded areas are for Schools Division Offices (SDOs) only.)</div>
+    <div class="fields">
+      <div class="row"><span><b>School ID:</b> _______________</span><span><b>School Year:</b> ${esc(data.schoolYear)}</span><span><b>Grade Level:</b> ${esc(gradeLevel)}</span></div>
+      <div class="row"><span><b>Name of School:</b> ${esc(data.schoolName)}</span><span><b>Section:</b> ${esc(data.section)}</span></div>
+    </div>
+    <table>
+      <thead><tr>
+        <th rowspan="2">No.</th>
+        <th rowspan="2">LRN</th>
+        <th rowspan="2">LEARNER'S NAME<br><span class="sub">(Last Name, First Name, Middle Name)</span></th>
+        <th rowspan="2">Sex</th>
+        <th rowspan="2">Birthdate</th>
+        <th rowspan="2">Address (Home)</th>
+        <th rowspan="2">Guardian</th>
+        <th rowspan="2">Contact No.</th>
+        <th rowspan="2">Remarks</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+    <table class="summary">
+      <tr><td>MALE</td><td class="v">${data.male}</td></tr>
+      <tr><td>FEMALE</td><td class="v">${data.female}</td></tr>
+      <tr><td>TOTAL</td><td class="v">${data.rows.length}</td></tr>
+    </table>
+    <div class="sig">
+      <div>Prepared by:<div class="line">______________________________</div><div class="role">(Signature of Class Adviser over Printed Name)</div></div>
+      <div>Noted by:<div class="line">______________________________</div><div class="role">(Signature of School Head over Printed Name)</div></div>
     </div>
   </body></html>`;
 }

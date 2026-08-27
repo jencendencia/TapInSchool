@@ -323,6 +323,7 @@ export function UsersPage() {
 
   const adminCount = users.filter((u) => u.role === 'admin').length;
   const deptHeadCount = users.filter((u) => u.role === 'dept_head').length;
+  const teacherCount = users.filter((u) => u.role === 'teacher').length;
 
   return (
     <div className="page">
@@ -330,7 +331,7 @@ export function UsersPage() {
         <div>
           <h2>Users & Roles</h2>
           <p className="text-dim">
-            {users.length} accounts · {adminCount} admin{adminCount !== 1 ? 's' : ''} · {deptHeadCount} department head{deptHeadCount !== 1 ? 's' : ''} · staff PINs power the kiosk forgot-QR check-in
+            {users.length} accounts · {adminCount} admin{adminCount !== 1 ? 's' : ''} · {deptHeadCount} department head{deptHeadCount !== 1 ? 's' : ''} · {teacherCount} teacher{teacherCount !== 1 ? 's' : ''} · staff PINs power the kiosk forgot-QR check-in
           </p>
         </div>
         <div className="page-actions">
@@ -367,7 +368,7 @@ export function UsersPage() {
                     <span className={`pill ${pill.cls}`}>{pill.label}</span>
                   </td>
                   <td>
-                    {u.role === 'dept_head' ? (
+                    {(u.role === 'dept_head' || u.role === 'teacher') ? (
                       u.sections && u.sections.length ? (
                         <span className="chip-row" style={{ gap: 4 }}>
                           {u.sections.map((s) => (

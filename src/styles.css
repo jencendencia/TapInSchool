@@ -1864,6 +1864,38 @@ input[type='checkbox'] {
 }
 .settings-card h3 { font-size: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
 
+/* Portal address shown in Settings for teachers to connect */
+.portal-address {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.portal-address-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.portal-address-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.portal-address-url code {
+  font-size: 13.5px;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.1);
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+.portal-address .btn-ghost {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
 /* Unsaved-changes notice (Settings) */
 .settings-unsaved {
   display: flex;
@@ -1917,6 +1949,18 @@ input[type='checkbox'] {
 }
 .rate-bar-wrap { width: 120px; height: 8px; border-radius: 999px; background: #1e293b; overflow: hidden; }
 .rate-bar { height: 100%; border-radius: 999px; transition: width 0.3s ease; }
+
+/* SF1 School Register */
+.sf1-section { margin-bottom: 22px; }
+.sf1-table th { font-size: 12px; }
+.sf1-table .sub-hint { font-weight: 400; color: var(--text-faint); font-size: 10.5px; }
+.sf1-table td:nth-child(2), .sf1-table td:nth-child(8) { white-space: nowrap; }
+.sf1-summary { display: flex; gap: 12px; margin-top: 4px; }
+.sf1-summary-cell {
+  display: flex; gap: 8px; align-items: center;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 18px; background: var(--surface); font-size: 14px;
+}
 
 /* Register matrix (SF2-style) */
 .register-wrap { overflow: auto; max-height: 70vh; }

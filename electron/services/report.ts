@@ -28,6 +28,8 @@ import type {
   ReportQuery,
   ReportRegister,
   ReportTrends,
+  SchoolRegisterRow,
+  SchoolRegisterSection,
   SmsAuditDay,
   SmsFailureRow,
   SmsStatus,
@@ -250,6 +252,7 @@ export async function getReportData(query: ReportQuery): Promise<ReportData> {
   let smsAudit: { daily: SmsAuditDay[]; failures: SmsFailureRow[] } = { daily: [], failures: [] };
   let trends: ReportTrends = { weekly: [], dayOfWeek: [], gateHours: [] };
   let studentRecord: StudentRecord | null = null;
+  let schoolRegister: SchoolRegisterSection[] = [];
 
   const yearScope = { yearJoin, yearParams, secExpr };
   if (type === 'per-student') {
@@ -279,6 +282,8 @@ export async function getReportData(query: ReportQuery): Promise<ReportData> {
       maskPhones,
       ...yearScope,
     });
+  } else if (type === 'sf1') {
+    schoolRegister = await loadSchoolRegister({ ...yearScope, sectionWhere, sectionParams });
   }
 
   return {
@@ -324,7 +329,69 @@ export async function getReportData(query: ReportQuery): Promise<ReportData> {
     tardinessFrequency,
     smsAudit,
     trends,
+    schoolRegister,
   };
+}
+
+// ---- School Register (DepEd SF1, school-wide) -------------------------------
+// The admin's official enrolment register: every active learner in the selected
+// school year, grouped by grade/section and ordered by grade. No date range —
+// it's a snapshot of who is enrolled. Birthdate is the one official SF1 column
+// we don't store, so it renders blank on the form.
+async function loadSchoolRegister(args: {
+  yearJoin: string;
+  yearParams: unknown[];
+  secExpr: string;
+  sectionWhere: string;
+  sectionParams: unknown[];
+}): Promise<SchoolRegisterSection[]> {
+  const rows = await db.query<
+    {
+      student_id: number;
+      student_no: string;
+      full_name: string;
+      lrn: string;
+      gender: string;
+      guardian_address: string;
+      guardian_name: string;
+      parent_phone: string;
+      grade_section: string;
+    }[]
+  >(
+    `SELECT s.id student_id, s.student_no, s.full_name, s.lrn, s.gender,
+            s.guardian_address, s.guardian_name, s.parent_phone,
+            ${args.secExpr} grade_section
+     FROM students s ${args.yearJoin}
+     WHERE s.is_active = 1${args.sectionWhere}
+     ORDER BY ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name`,
+    [...args.yearParams, ...args.sectionParams],
+  );
+
+  const groups = new Map<string, SchoolRegisterSection>();
+  for (const r of rows) {
+    const sec = r.grade_section || '—';
+    let group = groups.get(sec);
+    if (!group) {
+      group = { gradeSection: sec, rows: [], male: 0, female: 0 };
+      groups.set(sec, group);
+    }
+    const isMale = /^m/i.test(r.gender);
+    if (isMale) group.male++;
+    else group.female++;
+    const row: SchoolRegisterRow = {
+      studentId: r.student_id,
+      studentNo: r.student_no,
+      lrn: r.lrn,
+      fullName: r.full_name,
+      sex: isMale ? 'M' : 'F',
+      address: r.guardian_address,
+      guardian: r.guardian_name,
+      contact: r.parent_phone,
+    };
+    group.rows.push(row);
+  }
+  // Keep grade order (the SQL already ordered by grade → section → name).
+  return [...groups.values()];
 }
 
 // ---------------------------------------------------------------------------

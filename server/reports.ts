@@ -20,6 +20,8 @@ import type {
   RegisterRow,
   SectionReport,
   SectionReportRow,
+  Sf1Report,
+  Sf1Row,
   TardinessReport,
   TardinessRow,
 } from './teacher-types';
@@ -364,4 +366,51 @@ export async function getRegisterReport(section: string, from: string, to: strin
     monthLabel: monthLabel(start, String(to)),
     rows,
   };
+}
+
+// ---- School Register (DepEd SF1) ---------------------------------------------
+// A snapshot of the section's enrolled learners — no date range. Birthdate is
+// the one official SF1 column we don't store, so it renders blank on the form.
+
+export async function getSf1Report(section: string): Promise<Sf1Report> {
+  const [students, schoolName, schoolYear] = await Promise.all([
+    db.query<
+      {
+        id: number;
+        student_no: string;
+        full_name: string;
+        lrn: string;
+        gender: string;
+        guardian_address: string;
+        guardian_name: string;
+        parent_phone: string;
+      }[]
+    >(
+      `SELECT id, student_no, full_name, lrn, gender, guardian_address, guardian_name, parent_phone
+       FROM students WHERE grade_section = ? AND is_active = 1 ORDER BY full_name`,
+      [section],
+    ),
+    readSchoolName(),
+    currentSchoolYearName(),
+  ]);
+
+  let male = 0;
+  let female = 0;
+  const rows: Sf1Row[] = students.map((s) => {
+    const isMale = /^m/i.test(s.gender);
+    if (isMale) male++;
+    else female++;
+    return {
+      studentId: s.id,
+      studentNo: s.student_no,
+      lrn: s.lrn,
+      fullName: s.full_name,
+      sex: isMale ? 'M' : 'F',
+      address: s.guardian_address,
+      guardian: s.guardian_name,
+      contact: s.parent_phone,
+    };
+  });
+
+  return { kind: 'sf1', section, schoolName, schoolYear, rows, male, female };
 }

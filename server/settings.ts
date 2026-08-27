@@ -24,6 +24,26 @@ export async function readBellSettings(): Promise<BellSettings> {
   }
 }
 
+/** School name + uploaded logo URL — the portal's login/sidebar branding.
+ *  logoUrl is the raw stored value (tapin-logo://…), which the portal rewrites
+ *  to its own /api/logo route before handing it to the browser. */
+export async function readSchoolBranding(): Promise<{ schoolName: string; logoUrl: string | null }> {
+  try {
+    const rows = await db.query<{ setting_key: string; setting_value: string }[]>(
+      `SELECT setting_key, setting_value FROM settings
+       WHERE setting_key IN ('school_name', 'logo_url')`,
+    );
+    const map = new Map(rows.map((r) => [r.setting_key, r.setting_value]));
+    const logoUrl = String(map.get('logo_url') ?? '').trim();
+    return {
+      schoolName: map.get('school_name')?.trim() || 'TapIn School',
+      logoUrl: logoUrl.startsWith('tapin-logo://') ? logoUrl : null,
+    };
+  } catch {
+    return { schoolName: 'TapIn School', logoUrl: null };
+  }
+}
+
 /** School name + current school year — used for the DepEd report letterheads. */
 export async function readSchoolInfo(): Promise<{ schoolName: string; schoolYear: string }> {
   try {

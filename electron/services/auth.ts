@@ -244,16 +244,16 @@ export async function listUsers(): Promise<User[]> {
     'SELECT id, username, password_hash, role, pin_hash, created_at FROM users ORDER BY role ASC, username ASC',
   );
   const users = rows.map(toUser);
-  // Attach the sections a dept_head manages (assigned here on this page).
-  const deptHeads = users.filter((u) => u.role === 'dept_head');
-  if (deptHeads.length) {
+  // Attach the sections each user manages (dept_head + teacher roles).
+  const sectionedUsers = users.filter((u) => u.role === 'dept_head' || u.role === 'teacher');
+  if (sectionedUsers.length) {
     try {
       const year = await currentSchoolYearName();
       const mappings = await db.query<{ teacher_id: number; grade_section: string }[]>(
         'SELECT teacher_id, grade_section FROM teacher_sections WHERE school_year = ?',
         [year],
       );
-      for (const u of deptHeads) {
+      for (const u of sectionedUsers) {
         u.sections = mappings.filter((m) => m.teacher_id === u.id).map((m) => m.grade_section);
       }
     } catch {

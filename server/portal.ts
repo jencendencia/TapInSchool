@@ -27,9 +27,11 @@ import { ensureSchema } from '../electron/db/schema';
 import { withJobLock } from '../electron/services/job-lock';
 import * as kioskBadges from '../electron/services/badges';
 import * as attendance from './attendance';
+import * as enrollment from './enrollment';
+import * as guardians from './guardians';
 import * as reports from './reports';
 import { csvText, defaultFileName, pdfHtml, xlsxBuffer } from './export-data';
-import { readSchoolInfo } from './settings';
+import { readSchoolInfo, readSchoolBranding } from './settings';
 import * as teacher from './teacher-service';
 import type { TeacherRole } from './teacher-types';
 import type { ReportData } from './teacher-types';
@@ -114,6 +116,68 @@ function allowLogin(ip: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// School branding (name + logo) for the portal UI — the login screen and the
+// sidebar show the school's own name and uploaded logo instead of the generic
+// TapIn brand. The logo is stored on disk as a tapin-logo:// file URL (an
+// Electron-only scheme), so the portal exposes it over plain HTTP instead.
+// ---------------------------------------------------------------------------
+
+/** The persisted logo file name (school-logo.<ext>) from a stored URL, or null. */
+function logoFileName(logoUrl: string): string | null {
+  const m = /^tapin-logo:\/\/logo\/([^?\s]+)/.exec(String(logoUrl ?? ''));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+/** The kiosk's userData logos dir, resolved for both embedded (Electron) and
+ *  standalone (`npm run portal`) runs. Mirrors electron/services/logo.ts. */
+function portalLogosDir(): string {
+  try {
+    const { app } = require('electron') as typeof import('electron');
+    if (app?.getPath) return path.join(app.getPath('userData'), 'logos');
+  } catch {
+    // Standalone node — no electron app; use the OS default userData location.
+  }
+  return path.join(process.env.APPDATA || process.env.HOME || '.', 'TapIn School', 'logos');
+}
+
+const LOGO_MIME: Record<string, string> = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+  gif: 'image/gif',
+};
+
+/** Serves the uploaded school logo file (GET /api/logo). */
+async function serveLogo(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  // The URL doesn't carry the file name — read it from settings.
+  const rows = await db
+    .query<{ setting_value: string }[]>("SELECT setting_value FROM settings WHERE setting_key = 'logo_url' LIMIT 1")
+    .catch(() => [] as { setting_value: string }[]);
+  const name = logoFileName(rows[0]?.setting_value ?? '');
+  if (!name) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('No logo uploaded');
+    return;
+  }
+  const dir = portalLogosDir();
+  const filePath = path.resolve(dir, name);
+  if (!filePath.startsWith(dir + path.sep) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Logo not found');
+    return;
+  }
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  res.writeHead(200, {
+    'Content-Type': LOGO_MIME[ext] ?? 'application/octet-stream',
+    // Never cache — a re-uploaded logo must show immediately (mirrors the
+    // Electron protocol handler's no-store behavior).
+    'Cache-Control': 'no-store',
+  });
+  fs.createReadStream(filePath).pipe(res);
+}
+
+// ---------------------------------------------------------------------------
 // RPC dispatch — mirrors the companion TeacherApi contract. The session
 // (cookie) is the identity; the client never supplies its own actor.
 // ---------------------------------------------------------------------------
@@ -121,6 +185,16 @@ type RpcHandler = (params: unknown[], session: Session) => Promise<unknown>;
 
 const rpcHandlers: Record<string, RpcHandler> = {
   logout: async () => undefined,
+
+  // ---- School branding (login + sidebar) -----------------------------------
+  getSchoolInfo: async () => {
+    const info = await readSchoolBranding();
+    return {
+      schoolName: info.schoolName,
+      // The browser can't load tapin-logo:// — point at the portal's own route.
+      logoUrl: info.logoUrl ? '/api/logo' : null,
+    };
+  },
 
   // ---- Teacher management (dept-head scoped) -------------------------------
   listTeachers: async (_p, s) => teacher.listTeachers(s),
@@ -162,6 +236,22 @@ const rpcHandlers: Record<string, RpcHandler> = {
   getAbsenteeReport: async (p) => reports.getAbsenteeReport(String(p[0]), String(p[1]), String(p[2])),
   getTardinessReport: async (p) => reports.getTardinessReport(String(p[0]), String(p[1]), String(p[2])),
   getRegisterReport: async (p) => reports.getRegisterReport(String(p[0]), String(p[1]), String(p[2])),
+  getSf1Report: async (p) => reports.getSf1Report(String(p[0])),
+
+  // ---- Enrollment (gated by settings.teacher_enrollment_enabled; the actor's
+  // sections are the scope — teachers can only touch their own rosters) -----
+  enrollmentEnabled: async () => enrollment.enrollmentEnabled(),
+  listSectionStudents: async (p, s) => enrollment.listSectionStudents(String(p[0]), s),
+  enrollStudent: async (p, s) => enrollment.enrollStudent(p[0] as Parameters<typeof enrollment.enrollStudent>[0], s),
+  updateEnrolledStudent: async (p, s) =>
+    enrollment.updateEnrolledStudent(Number(p[0]), p[1] as Parameters<typeof enrollment.updateEnrolledStudent>[1], s),
+  deleteEnrolledStudent: async (p, s) => enrollment.deleteEnrolledStudent(Number(p[0]), s),
+
+  // ---- Guardians (registry backing the enrollment form's dropdown) --------
+  listGuardians: async (p) => guardians.listGuardians(p[0] ? String(p[0]) : undefined),
+  findGuardiansByName: async (p) => guardians.findGuardiansByName(String(p[0] ?? '')),
+  createGuardian: async (p) =>
+    guardians.createGuardian(p[0] as Parameters<typeof guardians.createGuardian>[0], p[1] as { allowSameName?: boolean } | undefined),
 
   // The Connect-to-database dialog is desktop-only; the portal reads .env.
   connectDb: async () => {
@@ -220,10 +310,12 @@ async function handleExport(req: http.IncomingMessage, res: http.ServerResponse)
     return;
   }
 
+  const info = await readSchoolInfo();
+  const meta = { schoolName: info.schoolName, schoolYear: info.schoolYear };
   if (kind === 'csv') {
     res.writeHead(200, {
       'Content-Type': 'text/csv; charset=utf-8',
-      'Content-Disposition': `attachment; filename="${defaultFileName(data, 'csv')}"`,
+      'Content-Disposition': `attachment; filename="${defaultFileName(data, 'csv', info.schoolName)}"`,
     });
     res.end(csvText(data));
     return;
@@ -232,19 +324,17 @@ async function handleExport(req: http.IncomingMessage, res: http.ServerResponse)
     const buf = await xlsxBuffer(data);
     res.writeHead(200, {
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': `attachment; filename="${defaultFileName(data, 'xlsx')}"`,
+      'Content-Disposition': `attachment; filename="${defaultFileName(data, 'xlsx', info.schoolName)}"`,
     });
     res.end(buf);
     return;
   }
   if (kind === 'pdf') {
-    const info = await readSchoolInfo();
-    const meta = { schoolName: info.schoolName, schoolYear: info.schoolYear };
     const pdf = await pdfBytes(data, meta);
     if (pdf) {
       res.writeHead(200, {
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="${defaultFileName(data, 'pdf')}"`,
+        'Content-Disposition': `attachment; filename="${defaultFileName(data, 'pdf', info.schoolName)}"`,
       });
       res.end(pdf);
     } else {
@@ -423,6 +513,11 @@ const handler: http.RequestListener = async (req, res) => {
       return;
     }
 
+    if (url === '/api/logo' && method === 'GET') {
+      await serveLogo(req, res);
+      return;
+    }
+
     if (url === '/api/rpc' && method === 'POST') {
       const body = await readJsonBody(req);
       const rpcMethod = String(body?.method ?? '');
@@ -449,10 +544,21 @@ const handler: http.RequestListener = async (req, res) => {
         return;
       }
 
-      if (rpcMethod === 'countTeachers' || rpcMethod === 'getStatus' || rpcMethod === 'getDbConfig') {
+      if (
+        rpcMethod === 'countTeachers' ||
+        rpcMethod === 'getStatus' ||
+        rpcMethod === 'getDbConfig' ||
+        rpcMethod === 'getSchoolInfo'
+      ) {
         let result: unknown;
         if (rpcMethod === 'countTeachers') result = await teacher.countTeachers();
-        else if (rpcMethod === 'getStatus') result = { db: db.getStatus() };
+        else if (rpcMethod === 'getSchoolInfo') {
+          const info = await readSchoolBranding();
+          result = {
+            schoolName: info.schoolName,
+            logoUrl: info.logoUrl ? '/api/logo' : null,
+          };
+        } else if (rpcMethod === 'getStatus') result = { db: db.getStatus() };
         else {
           const cfg = currentConfig();
           const fromEnv = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'].some((k) => process.env[k] !== undefined);

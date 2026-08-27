@@ -9,8 +9,10 @@ import { ActivationPanel } from '../../components/ActivationPanel';
 import { useSchoolYear } from './schoolYear';
 
 // Reads an image file, downscales it to a small thumbnail and returns it as a
-// JPEG data URI (same pattern as the Students photo upload). Works in Electron
-// and browser mock mode alike — no external storage/upload server needed.
+// data URI. JPEG is used when the image is fully opaque (smaller files); PNG
+// when it has any transparency — JPEG has no alpha channel, so a transparent
+// logo would otherwise come out with BLACK where it should be see-through.
+// Works in Electron and browser mock mode alike.
 function fileToResizedDataUrl(file: File, maxSize = 320, quality = 0.78): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -32,7 +34,21 @@ function fileToResizedDataUrl(file: File, maxSize = 320, quality = 0.78): Promis
             return;
           }
           ctx.drawImage(img, 0, 0, w, h);
-          resolve(canvas.toDataURL('image/jpeg', quality));
+          // Check for any semi-transparent pixel — if found, keep PNG so the
+          // transparency survives; otherwise JPEG keeps the file small.
+          let hasAlpha = false;
+          try {
+            const data = ctx.getImageData(0, 0, w, h).data;
+            for (let i = 3; i < data.length; i += 4) {
+              if (data[i] < 255) {
+                hasAlpha = true;
+                break;
+              }
+            }
+          } catch {
+            hasAlpha = file.type === 'image/png' || file.type === 'image/webp' || file.type === 'image/gif';
+          }
+          resolve(hasAlpha ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', quality));
         } catch {
           reject(new Error('Could not process the image'));
         }
@@ -52,6 +68,8 @@ const [settings, setSettings] = useState<Settings | null>(null);
   const [schoolYears, setSchoolYears] = useState<SchoolYear[]>([]);
   const [newYear, setNewYear] = useState('');
   const [yearBusy, setYearBusy] = useState(false);
+  /** The TapIn Teacher portal addresses on this machine, shown to admins to hand to teachers. */
+  const [portalUrls, setPortalUrls] = useState<string[]>([]);
   /** B5: per-machine scheduled-jobs flag (this machine runs the background jobs). */
   const [jobsConfig, setJobsConfig] = useState<JobsConfig>({ runScheduledJobs: true });
   const [jobsBusy, setJobsBusy] = useState(false);
@@ -71,6 +89,7 @@ const [settings, setSettings] = useState<Settings | null>(null);
     });
     void api.listSchoolYears().then(setSchoolYears);
     void api.getJobsConfig().then(setJobsConfig);
+    void api.getStatus().then((st) => setPortalUrls(st.portal.urls));
   }, []);
 
   // Recompute the unsaved flag by diffing against the last saved snapshot, so
@@ -431,6 +450,47 @@ setTestingEmail(true);
             the computer that should do that work and turn it OFF on the kiosks. Takes effect immediately; this
             setting is per machine (not shared). Applies on every launch.
           </p>
+        </div>
+
+        <div className="settings-card">
+          <h3>Teacher portal (companion)</h3>
+          <label className="switch-row">
+            <span>Let teachers enroll students</span>
+            <span
+              className={`switch ${settings.teacher_enrollment_enabled ? 'on' : ''}`}
+              onClick={() => set('teacher_enrollment_enabled', !settings.teacher_enrollment_enabled)}
+            >
+              <span className="switch-knob" />
+            </span>
+          </label>
+          <p className="field-hint">
+            When ON, teachers and department heads can add, edit, and remove students in their own
+            sections from the TapIn Teacher portal. Turn it OFF to keep the admin dashboard the only place
+            students are managed.
+          </p>
+          {portalUrls.length > 0 && (
+            <div className="portal-address">
+              <span className="portal-address-label">🌐 Teachers connect to:</span>
+              {portalUrls.map((u) => (
+                <span key={u} className="portal-address-url">
+                  <code>{u}</code>
+                  <button
+                    className="btn-ghost"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(u);
+                      setToast('Portal address copied');
+                    }}
+                  >
+                    Copy
+                  </button>
+                </span>
+              ))}
+              <p className="field-hint">
+                Open this address in a browser on any computer on the same network — teachers and department
+                heads sign in there, no install needed.
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="settings-card">

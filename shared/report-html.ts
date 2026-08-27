@@ -62,10 +62,109 @@ const TYPE_TITLES: Record<ReportData['type'], string> = {
   'sms-audit': 'SMS Audit',
   trends: 'Attendance Trends',
   student: 'Student Attendance Record',
+  sf1: 'School Register (SF1)',
 };
+
+/** Official DepEd SF1 — School Form 1: School Register (school-wide). Each
+ *  grade/section gets its own table on the form, grouped and grade-ordered. */
+function schoolRegisterHtml(report: ReportData): string {
+  const esc2 = esc;
+  const sectionTables = report.schoolRegister
+    .map((g) => {
+      const body = g.rows
+        .map(
+          (r, i) => `<tr>
+      <td>${i + 1}</td>
+      <td class="lrn">${esc2(r.lrn || r.studentNo)}</td>
+      <td class="name">${esc2(r.fullName)}</td>
+      <td>${esc2(r.sex)}</td>
+      <td></td>
+      <td class="addr">${esc2(r.address)}</td>
+      <td>${esc2(r.guardian)}</td>
+      <td>${esc2(r.contact)}</td>
+      <td></td>
+    </tr>`,
+        )
+        .join('');
+      const total = g.male + g.female;
+      return `<h3 class="sec-title">Grade Level &amp; Section: ${esc2(g.gradeSection)}</h3>
+  <table class="sf1">
+    <thead><tr>
+      <th rowspan="2">No.</th>
+      <th rowspan="2">LRN</th>
+      <th rowspan="2">LEARNER'S NAME<br><span class="sub">(Last Name, First Name, Middle Name)</span></th>
+      <th rowspan="2">Sex</th>
+      <th rowspan="2">Birthdate</th>
+      <th rowspan="2">Address (Home)</th>
+      <th rowspan="2">Guardian</th>
+      <th rowspan="2">Contact No.</th>
+      <th rowspan="2">Remarks</th>
+    </tr></thead>
+    <tbody>${body}</tbody>
+    <tfoot><tr class="total"><td colspan="3">MALE: ${g.male} · FEMALE: ${g.female} · TOTAL: ${total}</td><td colspan="6"></td></tr></tfoot>
+  </table>`;
+    })
+    .join('');
+  const grandMale = report.schoolRegister.reduce((a, g) => a + g.male, 0);
+  const grandFemale = report.schoolRegister.reduce((a, g) => a + g.female, 0);
+  const grandTotal = grandMale + grandFemale;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>${esc(report.schoolName)} — School Register (SF1)</title>
+<style>
+  @page { size: A4 landscape; margin: 10mm; }
+  body { font-family: 'Times New Roman', Times, serif; color: #000; margin: 0; font-size: 10.5px; }
+  .letterhead { text-align: center; }
+  .letterhead .rep { font-weight: 700; font-size: 13px; }
+  .letterhead .school { font-weight: 700; font-size: 15px; margin-top: 3px; }
+  .title { text-align: center; font-weight: 700; font-size: 12px; text-transform: uppercase; margin: 8px 0 2px; }
+  .subtitle { text-align: center; font-size: 8px; font-style: italic; margin-bottom: 8px; }
+  .fields { font-size: 10px; margin-bottom: 8px; }
+  .fields .row { display: flex; gap: 6px 34px; flex-wrap: wrap; }
+  .sec-title { font-size: 11px; margin: 14px 0 4px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #000; padding: 3px 5px; text-align: center; }
+  th { font-size: 8.5px; }
+  .sub { font-size: 7px; font-weight: 400; }
+  .name { text-align: left; padding-left: 5px; }
+  .addr { text-align: left; padding-left: 5px; font-size: 9px; }
+  .lrn { font-size: 8.5px; }
+  tr.total td { font-weight: 700; text-align: left; background: #f1f5f9; }
+  .summary { display: inline-block; border: 1px solid #000; font-size: 9px; margin-top: 10px; }
+  .summary td { border: 1px solid #000; padding: 2px 12px; }
+  .summary .v { text-align: right; font-weight: 700; }
+  .sig { display: flex; justify-content: space-between; margin-top: 26px; text-align: center; }
+  .sig .line { margin-top: 22px; }
+  .sig .role { font-size: 8.5px; }
+  .pagebreak { page-break-before: always; }
+</style>
+</head><body>
+  <div class="letterhead">
+    <div class="rep">Republic of the Philippines</div>
+    <div>Department of Education</div>
+    <div class="school">${esc(report.schoolName)}</div>
+  </div>
+  <div class="title">School Form 1 (SF1) — School Register</div>
+  <div class="subtitle">(This is a report on the learners enrolled at the beginning of the school year. Please accomplish this form by filling up all the necessary data in the corresponding cells. Shaded areas are for Schools Division Offices (SDOs) only.)</div>
+  <div class="fields">
+    <div class="row"><span><b>School ID:</b> _______________</span><span><b>School Year:</b> ${esc(report.schoolYear)}</span><span><b>School:</b> ${esc(report.schoolName)}</span></div>
+    <div class="row"><span><b>Name of School:</b> ${esc(report.schoolName)}</span><span><b>Grade/Section:</b> All sections</span></div>
+  </div>
+  ${sectionTables}
+  <table class="summary">
+    <tr><td>MALE</td><td class="v">${grandMale}</td></tr>
+    <tr><td>FEMALE</td><td class="v">${grandFemale}</td></tr>
+    <tr><td>TOTAL</td><td class="v">${grandTotal}</td></tr>
+  </table>
+  <div class="sig">
+    <div>Prepared by:<div class="line">______________________________</div><div class="role">(Signature of Class Adviser over Printed Name)</div></div>
+    <div>Noted by:<div class="line">______________________________</div><div class="role">(Signature of School Head over Printed Name)</div></div>
+  </div>
+</body></html>`;
+}
 
 export function buildReportHtml(report: ReportData): string {
   const s = report.summary;
+  if (report.type === 'sf1') return schoolRegisterHtml(report);
   const landscape = report.type === 'register';
   const pageSize = landscape ? 'A4 landscape' : 'A4';
   const margin = landscape ? '9mm 8mm' : '14mm 12mm';
@@ -302,7 +401,7 @@ export function buildReportHtml(report: ReportData): string {
   <div class="banner"><h1>${esc(report.schoolName)}</h1><h2>${esc(TYPE_TITLES[report.type])}</h2></div>
   <p class="meta">Period: ${esc(report.from)} → ${esc(report.to)} · Generated ${esc(new Date(report.generatedAt).toLocaleString())}${yearNote}${sectionNote}${phoneNote}</p>
   ${body}
-  <p class="foot">Generated by TapIn School · Gate Attendance &amp; Parent Alerts</p>
+  <p class="foot">Generated by ${esc(report.schoolName)} · Gate Attendance &amp; Parent Alerts</p>
 </body>
 </html>`;
 }

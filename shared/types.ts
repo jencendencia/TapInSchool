@@ -338,6 +338,12 @@ export interface Settings {
   /** Internal: last date (YYYY-MM-DD) the absence detector ran. */
   absence_last_run: string;
 
+  // ---- Teacher portal (companion app enrollment) ---------------------------
+  /** When true, teachers/dept heads may enroll new students into their own
+   *  sections from the TapIn Teacher portal (companion app). Off = the admin
+   *  keeps the only student-management entry point. */
+  teacher_enrollment_enabled: boolean;
+
   // ---- Report email delivery (SMTP) -------------------------------------
   smtp_host: string;
   /** SMTP port — 587 (STARTTLS) is the default; 465 pairs with smtp_secure. */
@@ -382,6 +388,8 @@ export interface SystemStatus {
   sms: ProviderStatus;
   /** Offline scans still waiting to be replayed into MySQL. */
   queue: { pending: number };
+  /** The TapIn Teacher portal addresses on this machine (LAN URLs teachers open in a browser). */
+  portal: { urls: string[] };
 }
 
 // ---- Network database connection (title-bar Connect-to-database dialog) ----
@@ -498,7 +506,8 @@ export type ReportType =
   | 'tardiness'
   | 'sms-audit'
   | 'trends'
-  | 'student';
+  | 'student'
+  | 'sf1';
 
 export interface ReportQuery {
   /** Inclusive start date, YYYY-MM-DD. */
@@ -814,6 +823,33 @@ export interface ReportData {
   smsAudit: { daily: SmsAuditDay[]; failures: SmsFailureRow[] };
   /** Populated for type 'trends'. */
   trends: ReportTrends;
+  /** Populated for type 'sf1' — the school-wide School Register (DepEd SF1). */
+  schoolRegister: SchoolRegisterSection[];
+}
+
+/** One learner row inside the school-wide SF1 (School Form 1 — School Register). */
+export interface SchoolRegisterRow {
+  studentId: number;
+  studentNo: string;
+  /** Learners Reference Number (blank when the school didn't enter one). */
+  lrn: string;
+  fullName: string;
+  /** 'M' or 'F'. */
+  sex: string;
+  /** Home address (students.guardian_address). */
+  address: string;
+  /** Guardian name (students.guardian_name). */
+  guardian: string;
+  /** Contact number (students.parent_phone). */
+  contact: string;
+}
+
+/** One grade/section group of the school-wide SF1 register. */
+export interface SchoolRegisterSection {
+  gradeSection: string;
+  rows: SchoolRegisterRow[];
+  male: number;
+  female: number;
 }
 
 /**
@@ -1111,6 +1147,294 @@ export interface BadgeLeaderboardRow {
   punctualityBadges: number;
 }
 
+// ---- Teacher Companion: Subjects, Grading, Lesson Plans ------------------
+
+export interface SubjectInfo {
+  id: number;
+  subject_code: string;
+  subject_name: string;
+  grade_level: string;
+  description: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SubjectInputInfo {
+  subject_code: string;
+  subject_name: string;
+  grade_level?: string;
+  description?: string;
+  is_active?: boolean;
+}
+
+export interface TeacherSubjectInfo {
+  id: number;
+  teacher_id: number;
+  subject_id: number;
+  grade_section: string;
+  school_year: string;
+  created_at: string;
+}
+
+export interface TeacherSubjectInputInfo {
+  subject_id: number;
+  grade_section: string;
+  school_year?: string;
+}
+
+export interface SubjectAttendanceInputInfo {
+  student_id: number;
+  subject_id: number;
+  attendance_date: string;
+  status: 'PRESENT' | 'ABSENT' | 'LATE' | 'EXCUSED' | 'TARDY';
+  time_in?: string | null;
+  time_out?: string | null;
+  remarks?: string;
+}
+
+export interface SubjectAttendanceRowInfo {
+  id: number;
+  student_id: number;
+  subject_id: number;
+  teacher_subject_id: number;
+  attendance_date: string;
+  status: 'PRESENT' | 'ABSENT' | 'LATE' | 'EXCUSED' | 'TARDY';
+  time_in: string | null;
+  time_out: string | null;
+  remarks: string;
+  source: string;
+  created_at: string;
+}
+
+export interface SubjectAttendanceRosterInfo {
+  studentId: number;
+  studentNo: string;
+  fullName: string;
+  gender: string;
+  gradeSection: string;
+  lrn: string;
+  status: 'PRESENT' | 'ABSENT' | 'LATE' | 'EXCUSED' | 'TARDY' | 'NOT_MARKED';
+  timeIn: string | null;
+  timeOut: string | null;
+  remarks: string;
+}
+
+export interface SubjectSf2Info {
+  section: string;
+  subjectId: number;
+  subjectName: string;
+  subjectCode: string;
+  schoolYear: string;
+  monthLabel: string;
+  from: string;
+  to: string;
+  days: string[];
+  dayLetters: string[];
+  students: { id: number; studentNo: string; lrn: string; fullName: string; sex: string }[];
+  marks: { studentId: number; marks: string[]; present: number; absent: number; late: number; excused: number }[];
+  perDayPresent: number[];
+  perDayAbsent: number[];
+}
+
+export interface SubjectAttendanceSummaryInfo {
+  totalStudents: number;
+  totalSchoolDays: number;
+  avgAttendanceRate: number;
+  students: { studentId: number; fullName: string; present: number; absent: number; late: number; rate: number }[];
+}
+
+export interface GradingComponentInfo {
+  id: number;
+  subject_id: number;
+  grade_section: string;
+  school_year: string;
+  quarter: number;
+  component_type: 'WW' | 'PT' | 'QA';
+  component_name: string;
+  max_score: number;
+  weight_pct: number;
+  order_idx: number;
+  date_administered: string | null;
+  created_at: string;
+}
+
+export interface GradingComponentInputInfo {
+  subject_id: number;
+  grade_section: string;
+  school_year?: string;
+  quarter: number;
+  component_type: 'WW' | 'PT' | 'QA';
+  component_name: string;
+  max_score?: number;
+  weight_pct?: number;
+  order_idx?: number;
+  date_administered?: string | null;
+}
+
+export interface GradingScoreInfo {
+  id: number;
+  component_id: number;
+  student_id: number;
+  score: number;
+  recorded_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GradingSheetInfo {
+  subjectId: number;
+  subjectName: string;
+  subjectCode: string;
+  gradeSection: string;
+  schoolYear: string;
+  quarter: number;
+  components: {
+    ww: GradingComponentInfo[];
+    pt: GradingComponentInfo[];
+    qa: GradingComponentInfo[];
+  };
+  students: {
+    studentId: number;
+    studentNo: string;
+    fullName: string;
+    scores: { componentId: number; score: number }[];
+  }[];
+  computed: {
+    studentId: number;
+    wwRaw: number;
+    wwMax: number;
+    wwWeighted: number;
+    ptRaw: number;
+    ptMax: number;
+    ptWeighted: number;
+    qaRaw: number;
+    qaMax: number;
+    qaWeighted: number;
+    rawScore: number;
+    initialGrade: number;
+    transmutedGrade: number;
+    letterGrade: string;
+  }[];
+}
+
+export interface ClassRecordInfo {
+  id: number;
+  subject_id: number;
+  grade_section: string;
+  school_year: string;
+  quarter: number;
+  student_id: number;
+  ww_score: number | null;
+  ww_max: number | null;
+  pt_score: number | null;
+  pt_max: number | null;
+  qa_score: number | null;
+  qa_max: number | null;
+  raw_score: number | null;
+  initial_grade: number | null;
+  transmuted_grade: number | null;
+  letter_grade: string | null;
+  remarks: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ClassRecordRowInfo extends ClassRecordInfo {
+  full_name: string;
+  student_no: string;
+}
+
+export interface FinalGradeRowInfo {
+  studentId: number;
+  studentNo: string;
+  fullName: string;
+  grades: { quarter: number; transmutedGrade: number; letterGrade: string }[];
+  finalGrade: number;
+  finalLetter: string;
+  isHonor: boolean;
+}
+
+export interface TransmutationEntry {
+  range: string;
+  letter: string;
+  transmuted: number;
+}
+
+export interface IlawSectionInfo {
+  initiating: { motivation: string; review: string; preparation: string };
+  leading: { presentation: string; discussion: string; explanation: string };
+  assisting: { activity: string; application: string; practice: string };
+  widening: { evaluation: string; generalization: string; assignment: string; reflection: string };
+}
+
+export interface LessonPlanInfo {
+  id: number;
+  teacher_id: number;
+  subject_id: number;
+  grade_section: string;
+  school_year: string;
+  plan_date: string;
+  topic: string;
+  objectives: string;
+  grade_level: string;
+  quarter: number | null;
+  week_no: number | null;
+  ilaw_data: IlawSectionInfo;
+  ai_generated: boolean;
+  ai_prompt: string | null;
+  status: 'draft' | 'final' | 'archived';
+  materials: string;
+  references_text: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LessonPlanInputInfo {
+  subject_id: number;
+  grade_section: string;
+  school_year?: string;
+  plan_date: string;
+  topic: string;
+  objectives: string;
+  grade_level?: string;
+  quarter?: number;
+  week_no?: number;
+  ilaw_data: IlawSectionInfo;
+  materials?: string;
+  references_text?: string;
+  status?: 'draft' | 'final' | 'archived';
+}
+
+export interface LessonPlanFilter {
+  subjectId?: number;
+  gradeSection?: string;
+  status?: string;
+  from?: string;
+  to?: string;
+}
+
+export interface LessonPlanTemplateInfo {
+  id: number;
+  name: string;
+  subject_id: number | null;
+  grade_level: string;
+  ilaw_data: IlawSectionInfo;
+  is_public: boolean;
+  created_by: number | null;
+  use_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LessonPlanTemplateInputInfo {
+  name: string;
+  subject_id?: number;
+  grade_level?: string;
+  ilaw_data: IlawSectionInfo;
+  is_public?: boolean;
+}
+
 // ---- Auto-update (electron-updater → GitHub Releases) ----------------------
 
 export type UpdateStatusKind =
@@ -1348,8 +1672,52 @@ export interface TapinApi {
   getAppVersion(): Promise<string>;
   onUpdateStatus(cb: (status: UpdateStatus) => void): () => void;
 
+  // ---- Teacher Companion: Subjects, Grading, Lesson Plans (events) --------
+
   // ---- App activation (license server) ------------------------------------
   checkLicense(): Promise<LicenseStatus>;
   activateLicense(licenseKey: string): Promise<ActivationResult>;
   getMachineId(): Promise<string>;
+
+  // ---- Teacher Companion: Subjects, Grading, Lesson Plans -----------------
+  listSubjects(search?: string): Promise<SubjectInfo[]>;
+  getSubject(id: number): Promise<SubjectInfo | null>;
+  createSubject(input: SubjectInputInfo): Promise<SubjectInfo>;
+  updateSubject(id: number, patch: Partial<SubjectInputInfo>): Promise<SubjectInfo>;
+  deleteSubject(id: number): Promise<void>;
+
+  listTeacherSubjects(teacherId: number, schoolYear?: string): Promise<TeacherSubjectInfo[]>;
+  assignTeacherSubject(teacherId: number, input: TeacherSubjectInputInfo, schoolYear?: string): Promise<TeacherSubjectInfo>;
+  removeTeacherSubject(id: number): Promise<void>;
+
+  markSubjectAttendance(teacherId: number, input: SubjectAttendanceInputInfo, schoolYear?: string): Promise<SubjectAttendanceRowInfo>;
+  markBulkSubjectAttendance(teacherId: number, subjectId: number, date: string, marks: { student_id: number; status: string; remarks?: string }[], schoolYear?: string): Promise<number>;
+  getSubjectRoster(subjectId: number, gradeSection: string, date: string, schoolYear?: string): Promise<SubjectAttendanceRosterInfo[]>;
+  getSubjectSf2(subjectId: number, gradeSection: string, from: string, to: string, schoolYear?: string): Promise<SubjectSf2Info>;
+  getSubjectAttendanceSummary(subjectId: number, gradeSection: string, from: string, to: string): Promise<SubjectAttendanceSummaryInfo>;
+
+  listGradingComponents(subjectId: number, gradeSection: string, schoolYear: string, quarter: number): Promise<GradingComponentInfo[]>;
+  createGradingComponent(input: GradingComponentInputInfo): Promise<GradingComponentInfo>;
+  updateGradingComponent(id: number, patch: Partial<GradingComponentInputInfo>): Promise<GradingComponentInfo>;
+  deleteGradingComponent(id: number): Promise<void>;
+  setGradingScore(componentId: number, studentId: number, score: number, recordedBy?: number): Promise<GradingScoreInfo>;
+  setBulkGradingScores(componentId: number, scores: { student_id: number; score: number }[], recordedBy?: number): Promise<number>;
+  getGradingSheet(subjectId: number, gradeSection: string, schoolYear: string, quarter: number): Promise<GradingSheetInfo>;
+  recomputeClassRecords(subjectId: number, gradeSection: string, schoolYear: string, quarter: number, recordedBy?: number): Promise<ClassRecordInfo[]>;
+  getClassRecords(subjectId: number, gradeSection: string, schoolYear: string, quarter: number): Promise<ClassRecordRowInfo[]>;
+  getFinalGrades(subjectId: number, gradeSection: string, schoolYear: string): Promise<FinalGradeRowInfo[]>;
+  getTransmutationTable(): Promise<TransmutationEntry[]>;
+
+  listLessonPlans(teacherId: number, filters?: LessonPlanFilter): Promise<LessonPlanInfo[]>;
+  getLessonPlan(id: number): Promise<LessonPlanInfo | null>;
+  createLessonPlan(teacherId: number, input: LessonPlanInputInfo): Promise<LessonPlanInfo>;
+  updateLessonPlan(id: number, patch: Partial<LessonPlanInputInfo>): Promise<LessonPlanInfo>;
+  deleteLessonPlan(id: number): Promise<void>;
+  buildAiLessonPlanPrompt(topic: string, gradeLevel: string, subjectName: string, objectives: string): Promise<string>;
+  formatIlawAsText(ilawData: IlawSectionInfo): Promise<string>;
+
+  listLessonPlanTemplates(teacherId: number, subjectId?: number): Promise<LessonPlanTemplateInfo[]>;
+  createLessonPlanTemplate(teacherId: number, input: LessonPlanTemplateInputInfo): Promise<LessonPlanTemplateInfo>;
+  useLessonPlanTemplate(templateId: number): Promise<void>;
+  deleteLessonPlanTemplate(id: number): Promise<void>;
 }

@@ -57,7 +57,12 @@ export async function saveLogo(dataUrl: string): Promise<string> {
   // (handles a format change, e.g. png -> jpg).
   await clearLogoFiles(dir);
   await fs.writeFile(path.join(dir, `${LOGO_BASE}.${ext}`), buffer);
-  return `${URL_PREFIX}${LOGO_BASE}.${ext}`;
+  // A version query param busts Chromium's image cache: re-uploading the same
+  // format would otherwise keep the URL identical (tapin-logo://logo/school-
+  // logo.png), so the kiosk/sidebar/login would show the OLD picture until a
+  // restart. The protocol handler reads url.pathname only, so the query is
+  // ignored for file resolution — this is purely a cache key.
+  return `${URL_PREFIX}${LOGO_BASE}.${ext}?v=${Date.now()}`;
 }
 
 /** Removes every persisted logo file (used when the logo is cleared). */

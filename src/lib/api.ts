@@ -50,6 +50,7 @@ import type {
   ReportRegister,
   ReportTrends,
   ReportType,
+  SchoolRegisterSection,
   ScanMode,
   ScanResult,
   ScanSource,
@@ -203,6 +204,7 @@ school_name: 'TapIn School',
   absence_detect: true,
   absence_sms: true,
   absence_last_run: '',
+  teacher_enrollment_enabled: false,
   smtp_host: '',
   smtp_port: 587,
   smtp_secure: false,
@@ -660,6 +662,7 @@ class MockApi implements TapinApi {
       db: { online: true, detail: 'MySQL connected (mock)' },
       sms: { provider: 'simulator', online: true, detail: 'Simulator active — no real SMS sent (mock)' },
       queue: { pending: 0 },
+      portal: { urls: [`http://${window.location.hostname || 'localhost'}:4000`] },
     };
     this.statusCbs.forEach((cb) => cb(status));
   }
@@ -670,6 +673,7 @@ class MockApi implements TapinApi {
       db: { online: true, detail: 'MySQL connected (mock mode)' },
       sms: { provider: this.settings.sms_provider, online: true, detail: 'Simulator active (mock)' },
       queue: { pending: 0 },
+      portal: { urls: [`http://${window.location.hostname || 'localhost'}:4000`] },
     };
   }
 
@@ -2047,6 +2051,7 @@ async deleteSchoolYear(name: string): Promise<void> {
     const smsAudit: ReportData['smsAudit'] = { daily: [], failures: [] };
     let trends: ReportTrends = { weekly: [], dayOfWeek: [], gateHours: [] };
     let studentRecord: StudentRecord | null = null;
+    let schoolRegister: SchoolRegisterSection[] = [];
 
     if (type === 'per-student') {
       for (const s of activeSection) {
@@ -2338,6 +2343,34 @@ async deleteSchoolYear(name: string): Promise<void> {
           out: logs.filter((l) => l.entry_type === 'OUT' && scanOf(l).getHours() === hour).length,
         })),
       };
+    } else if (type === 'sf1') {
+      // School Register (SF1): every active learner grouped by grade/section.
+      const groups = new Map<string, SchoolRegisterSection>();
+      for (const s of activeSection) {
+        const sec = secOf(s) || '—';
+        let g = groups.get(sec);
+        if (!g) {
+          g = { gradeSection: sec, rows: [], male: 0, female: 0 };
+          groups.set(sec, g);
+        }
+        const isMale = /^m/i.test(s.gender);
+        if (isMale) g.male++;
+        else g.female++;
+        g.rows.push({
+          studentId: s.id,
+          studentNo: s.student_no,
+          lrn: s.lrn,
+          fullName: s.full_name,
+          sex: isMale ? 'M' : 'F',
+          address: s.guardian_address,
+          guardian: s.guardian_name,
+          contact: s.parent_phone,
+        });
+      }
+      const gradeNum = (label: string) => Number.parseInt(String(label).replace(/\D+/g, ''), 10) || 0;
+      schoolRegister = [...groups.values()].sort(
+        (a, b) => gradeNum(a.gradeSection) - gradeNum(b.gradeSection) || a.gradeSection.localeCompare(b.gradeSection),
+      );
     }
 
     return {
@@ -2383,6 +2416,7 @@ async deleteSchoolYear(name: string): Promise<void> {
       tardinessFrequency,
       smsAudit,
       trends,
+      schoolRegister,
     };
   }
 
@@ -2672,6 +2706,94 @@ async activateLicense(licenseKey: string): Promise<ActivationResult> {
   async getMachineId(): Promise<string> {
     return 'browser-mock';
   }
+
+  // ---- Teacher Companion: Subjects, Grading, Lesson Plans (mock) ---------
+  async listSubjects(): Promise<import('../../shared/types').SubjectInfo[]> { return []; }
+  async getSubject(): Promise<import('../../shared/types').SubjectInfo | null> { return null; }
+  async createSubject(input: import('../../shared/types').SubjectInputInfo): Promise<import('../../shared/types').SubjectInfo> {
+    return { id: 1, ...input, grade_level: input.grade_level ?? '', description: input.description ?? '', is_active: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+  }
+  async updateSubject(id: number, patch: Partial<import('../../shared/types').SubjectInputInfo>): Promise<import('../../shared/types').SubjectInfo> {
+    return { id, subject_code: 'MOCK', subject_name: 'Mock Subject', grade_level: '', description: '', is_active: true, created_at: '', updated_at: '', ...patch };
+  }
+  async deleteSubject(): Promise<void> {}
+
+  async listTeacherSubjects(): Promise<import('../../shared/types').TeacherSubjectInfo[]> { return []; }
+  async assignTeacherSubject(_tid: number, input: import('../../shared/types').TeacherSubjectInputInfo): Promise<import('../../shared/types').TeacherSubjectInfo> {
+    return { id: 1, teacher_id: _tid, subject_id: input.subject_id, grade_section: input.grade_section, school_year: input.school_year ?? '', created_at: new Date().toISOString() };
+  }
+  async removeTeacherSubject(): Promise<void> {}
+
+  async markSubjectAttendance(): Promise<import('../../shared/types').SubjectAttendanceRowInfo> {
+    return { id: 1, student_id: 0, subject_id: 0, teacher_subject_id: 0, attendance_date: '', status: 'PRESENT', time_in: null, time_out: null, remarks: '', source: 'MANUAL', created_at: '' };
+  }
+  async markBulkSubjectAttendance(): Promise<number> { return 0; }
+  async getSubjectRoster(): Promise<import('../../shared/types').SubjectAttendanceRosterInfo[]> { return []; }
+  async getSubjectSf2(): Promise<import('../../shared/types').SubjectSf2Info> {
+    return { section: '', subjectId: 0, subjectName: '', subjectCode: '', schoolYear: '', monthLabel: '', from: '', to: '', days: [], dayLetters: [], students: [], marks: [], perDayPresent: [], perDayAbsent: [] };
+  }
+  async getSubjectAttendanceSummary(): Promise<import('../../shared/types').SubjectAttendanceSummaryInfo> {
+    return { totalStudents: 0, totalSchoolDays: 0, avgAttendanceRate: 0, students: [] };
+  }
+
+  async listGradingComponents(): Promise<import('../../shared/types').GradingComponentInfo[]> { return []; }
+  async createGradingComponent(input: import('../../shared/types').GradingComponentInputInfo): Promise<import('../../shared/types').GradingComponentInfo> {
+    return { id: 1, ...input, grade_section: input.grade_section, school_year: input.school_year ?? '', component_name: input.component_name, max_score: input.max_score ?? 100, weight_pct: input.weight_pct ?? 0, order_idx: input.order_idx ?? 0, date_administered: input.date_administered ?? null, created_at: '' };
+  }
+  async updateGradingComponent(id: number, patch: Partial<import('../../shared/types').GradingComponentInputInfo>): Promise<import('../../shared/types').GradingComponentInfo> {
+    return { id, subject_id: 0, grade_section: '', school_year: '', quarter: 1, component_type: 'WW', component_name: '', max_score: 100, weight_pct: 0, order_idx: 0, date_administered: null, created_at: '', ...patch };
+  }
+  async deleteGradingComponent(): Promise<void> {}
+  async setGradingScore(): Promise<import('../../shared/types').GradingScoreInfo> {
+    return { id: 1, component_id: 0, student_id: 0, score: 0, recorded_by: null, created_at: '', updated_at: '' };
+  }
+  async setBulkGradingScores(): Promise<number> { return 0; }
+  async getGradingSheet(): Promise<import('../../shared/types').GradingSheetInfo> {
+    return { subjectId: 0, subjectName: '', subjectCode: '', gradeSection: '', schoolYear: '', quarter: 1, components: { ww: [], pt: [], qa: [] }, students: [], computed: [] };
+  }
+  async recomputeClassRecords(): Promise<import('../../shared/types').ClassRecordInfo[]> { return []; }
+  async getClassRecords(): Promise<import('../../shared/types').ClassRecordRowInfo[]> { return []; }
+  async getFinalGrades(): Promise<import('../../shared/types').FinalGradeRowInfo[]> { return []; }
+  async getTransmutationTable(): Promise<import('../../shared/types').TransmutationEntry[]> {
+    return [
+      { range: '98-100', letter: 'A+', transmuted: 100 },
+      { range: '95-97', letter: 'A', transmuted: 98 },
+      { range: '92-94', letter: 'A-', transmuted: 95 },
+      { range: '89-91', letter: 'B+', transmuted: 92 },
+      { range: '86-88', letter: 'B', transmuted: 89 },
+      { range: '83-85', letter: 'B-', transmuted: 86 },
+      { range: '80-82', letter: 'C+', transmuted: 83 },
+      { range: '77-79', letter: 'C', transmuted: 80 },
+      { range: '74-76', letter: 'C-', transmuted: 77 },
+      { range: '71-73', letter: 'D+', transmuted: 74 },
+      { range: '68-70', letter: 'D', transmuted: 71 },
+      { range: '65-67', letter: 'D-', transmuted: 68 },
+      { range: '62-64', letter: 'E+', transmuted: 65 },
+      { range: '59-61', letter: 'E', transmuted: 62 },
+      { range: 'Below 59', letter: 'E-', transmuted: 49 },
+    ];
+  }
+
+  async listLessonPlans(): Promise<import('../../shared/types').LessonPlanInfo[]> { return []; }
+  async getLessonPlan(): Promise<import('../../shared/types').LessonPlanInfo | null> { return null; }
+  async createLessonPlan(_tid: number, input: import('../../shared/types').LessonPlanInputInfo): Promise<import('../../shared/types').LessonPlanInfo> {
+    return { id: 1, teacher_id: _tid, ...input, grade_level: input.grade_level ?? '', quarter: input.quarter ?? null, week_no: input.week_no ?? null, ai_generated: false, ai_prompt: null, status: input.status ?? 'draft', materials: input.materials ?? '', references_text: input.references_text ?? '', school_year: input.school_year ?? '', created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+  }
+  async updateLessonPlan(id: number, patch: Partial<import('../../shared/types').LessonPlanInputInfo>): Promise<import('../../shared/types').LessonPlanInfo> {
+    return { id, teacher_id: 0, subject_id: 0, grade_section: '', school_year: '', plan_date: '', topic: '', objectives: '', grade_level: '', quarter: null, week_no: null, ilaw_data: { initiating: { motivation: '', review: '', preparation: '' }, leading: { presentation: '', discussion: '', explanation: '' }, assisting: { activity: '', application: '', practice: '' }, widening: { evaluation: '', generalization: '', assignment: '', reflection: '' } }, ai_generated: false, ai_prompt: null, status: 'draft', materials: '', references_text: '', created_at: '', updated_at: '', ...patch };
+  }
+  async deleteLessonPlan(): Promise<void> {}
+  async buildAiLessonPlanPrompt(topic: string, gradeLevel: string, subjectName: string, objectives: string): Promise<string> {
+    return `Generate ILAW lesson plan for ${subjectName}, ${gradeLevel}, Topic: ${topic}, Objectives: ${objectives}`;
+  }
+  async formatIlawAsText(): Promise<string> { return 'ILAW lesson plan text preview'; }
+
+  async listLessonPlanTemplates(): Promise<import('../../shared/types').LessonPlanTemplateInfo[]> { return []; }
+  async createLessonPlanTemplate(_tid: number, input: import('../../shared/types').LessonPlanTemplateInputInfo): Promise<import('../../shared/types').LessonPlanTemplateInfo> {
+    return { id: 1, name: input.name, subject_id: input.subject_id ?? null, grade_level: input.grade_level ?? '', ilaw_data: input.ilaw_data, is_public: input.is_public ?? false, created_by: _tid, use_count: 0, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+  }
+  async useLessonPlanTemplate(): Promise<void> {}
+  async deleteLessonPlanTemplate(): Promise<void> {}
 }
 
 // ---------------------------------------------------------------------------

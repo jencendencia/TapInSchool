@@ -221,10 +221,38 @@ export interface RegisterReport {
   rows: RegisterRow[];
 }
 
+/** One learner row of the SF1 (School Form 1 — School Register). */
+export interface Sf1Row {
+  studentId: number;
+  studentNo: string;
+  lrn: string;
+  fullName: string;
+  /** 'M' or 'F'. */
+  sex: string;
+  /** Home address (students.guardian_address). */
+  address: string;
+  /** Guardian name (students.guardian_name). */
+  guardian: string;
+  /** Contact number (students.parent_phone). */
+  contact: string;
+}
+
+/** School Register (SF1) for ONE section — the advisers' form. */
+export interface Sf1Report {
+  kind: 'sf1';
+  section: string;
+  schoolName: string;
+  schoolYear: string;
+  rows: Sf1Row[];
+  male: number;
+  female: number;
+}
+
 /** Any report payload — carried into the export endpoint. */
 export type ReportData =
   | SectionReport
   | PerSectionReport
   | AbsenteeReport
   | TardinessReport
-  | RegisterReport;
+  | RegisterReport
+  | Sf1Report;

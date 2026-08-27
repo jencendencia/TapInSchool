@@ -13,6 +13,7 @@ import type {
   ReportDrilldownMetric,
   ReportDrilldownRow,
   ReportType,
+  SchoolRegisterSection,
   Student,
 } from '../../../shared/types';
 import { api } from '../../lib/api';
@@ -36,6 +37,7 @@ const TYPE_LABELS: Record<ReportType, string> = {
   'sms-audit': 'SMS audit',
   trends: 'Trends',
   student: 'Student record',
+  sf1: 'School Register (SF1)',
 };
 
 const TYPE_OPTIONS: { value: ReportType; hint: string }[] = [
@@ -48,6 +50,7 @@ const TYPE_OPTIONS: { value: ReportType; hint: string }[] = [
   { value: 'tardiness', hint: 'Every flagged-late arrival with minutes late' },
   { value: 'sms-audit', hint: 'SMS delivery per day + failures' },
   { value: 'trends', hint: 'Weekly / day-of-week / gate-hour patterns' },
+  { value: 'sf1', hint: "DepEd School Form 1 — the school-wide register of enrolled learners (no date range)" },
 ];
 
 function pct(v: number | null): string {
@@ -727,6 +730,74 @@ function TrendsView({ report }: { report: ReportData }) {
   );
 }
 
+function Sf1View({ report }: { report: ReportData }) {
+  const grandMale = report.schoolRegister.reduce((a, g) => a + g.male, 0);
+  const grandFemale = report.schoolRegister.reduce((a, g) => a + g.female, 0);
+  return (
+    <>
+      <p className="field-hint" style={{ marginTop: 0 }}>
+        DepEd School Form 1 (SF1) — School Register. Every active learner for the selected school year,
+        grouped by section. No date range: it's a snapshot of who is enrolled.
+      </p>
+      {report.schoolRegister.length === 0 ? (
+        <div className="report-empty">No active students{report.section ? ` in ${report.section}` : ''}.</div>
+      ) : (
+        <>
+          {report.schoolRegister.map((g) => <Sf1SectionTable key={g.gradeSection} group={g} />)}
+          <div className="sf1-summary">
+            <div className="sf1-summary-cell"><span className="text-dim">MALE</span> <b>{grandMale}</b></div>
+            <div className="sf1-summary-cell"><span className="text-dim">FEMALE</span> <b>{grandFemale}</b></div>
+            <div className="sf1-summary-cell"><span className="text-dim">TOTAL</span> <b>{grandMale + grandFemale}</b></div>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function Sf1SectionTable({ group }: { group: SchoolRegisterSection }) {
+  const total = group.male + group.female;
+  return (
+    <div className="sf1-section">
+      <h3 className="report-section-title">Grade Level &amp; Section: {group.gradeSection}
+        <span className="text-dim" style={{ fontWeight: 400, marginLeft: 10 }}>MALE {group.male} · FEMALE {group.female} · TOTAL {total}</span>
+      </h3>
+      <div className="table-wrap">
+        <table className="table sf1-table">
+          <thead>
+            <tr>
+              <th>No.</th>
+              <th>LRN</th>
+              <th>Learner's Name <span className="sub-hint">(Last Name, First Name, Middle Name)</span></th>
+              <th>Sex</th>
+              <th>Birthdate</th>
+              <th>Address (Home)</th>
+              <th>Guardian</th>
+              <th>Contact No.</th>
+              <th>Remarks</th>
+            </tr>
+          </thead>
+          <tbody>
+            {group.rows.map((r, i) => (
+              <tr key={r.studentId}>
+                <td className="num">{i + 1}</td>
+                <td className="mono">{r.lrn || r.studentNo}</td>
+                <td>{r.fullName}</td>
+                <td>{r.sex}</td>
+                <td className="text-dim">—</td>
+                <td>{r.address || '—'}</td>
+                <td>{r.guardian || '—'}</td>
+                <td className="mono">{r.contact || '—'}</td>
+                <td></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ---- Page ------------------------------------------------------------------
 
 export function ReportsPage() {
@@ -903,18 +974,22 @@ export function ReportsPage() {
       </div>
 
       <div className="toolbar">
-        <label className="report-range-label text-dim">
-          From
-          <input type="date" value={from} max={to} onChange={(e) => { setFrom(e.target.value); }} />
-        </label>
-        <label className="report-range-label text-dim">
-          To
-          <input type="date" value={to} min={from} onChange={(e) => { setTo(e.target.value); }} />
-        </label>
-        <button className="btn-ghost" onClick={() => { setFrom(fmtDayOffset(6)); setTo(fmtDayOffset(0)); }} title="Reset to last 7 days">
-          ↺ Last 7 days
-        </button>
-        <span className="toolbar-divider" />
+        {type !== 'sf1' && (
+          <>
+            <label className="report-range-label text-dim">
+              From
+              <input type="date" value={from} max={to} onChange={(e) => { setFrom(e.target.value); }} />
+            </label>
+            <label className="report-range-label text-dim">
+              To
+              <input type="date" value={to} min={from} onChange={(e) => { setTo(e.target.value); }} />
+            </label>
+            <button className="btn-ghost" onClick={() => { setFrom(fmtDayOffset(6)); setTo(fmtDayOffset(0)); }} title="Reset to last 7 days">
+              ↺ Last 7 days
+            </button>
+            <span className="toolbar-divider" />
+          </>
+        )}
         <label className="report-range-label text-dim">
           Report
           <select value={type} onChange={(e) => setType(e.target.value as ReportType)}>
@@ -966,6 +1041,7 @@ export function ReportsPage() {
           {type === 'tardiness' && <TardinessView report={report} />}
           {type === 'sms-audit' && <SmsAuditView report={report} />}
           {type === 'trends' && <TrendsView report={report} />}
+          {type === 'sf1' && <Sf1View report={report} />}
         </div>
       )}
 

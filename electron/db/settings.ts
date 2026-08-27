@@ -32,6 +32,8 @@ school_name: process.env.SCHOOL_NAME || 'TapIn School',
     absence_detect: true,
     absence_sms: true,
     absence_last_run: '',
+    // Teachers may enroll students into their sections via the companion portal.
+    teacher_enrollment_enabled: false,
     // Pre-configured for Gmail (SMTP + STARTTLS on 587). The admin only needs
     // to enter their Gmail address in smtp_user and an App Password in
     // smtp_password — everything else is already correct for Gmail/Workspace.
@@ -73,6 +75,7 @@ const KEYS = [
   'absence_detect',
   'absence_sms',
   'absence_last_run',
+  'teacher_enrollment_enabled',
   'smtp_host',
   'smtp_port',
   'smtp_secure',
