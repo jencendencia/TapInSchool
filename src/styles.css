@@ -2913,6 +2913,47 @@ input[type='checkbox'] {
   margin-top: 8px;
 }
 
+/* ---- Guardian detail modal ------------------------------------------------ */
+.guardian-name-btn {
+  all: unset;
+  cursor: pointer;
+  display: inline-flex;
+  border-radius: 8px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  transition: background 0.15s;
+}
+.guardian-name-btn:hover { background: var(--surface-2); }
+.guardian-detail { display: flex; flex-direction: column; gap: 16px; }
+.guardian-detail-header {
+  display: flex; align-items: flex-start; gap: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.guardian-detail-info { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.guardian-detail-info h3 { margin: 0; font-size: 18px; }
+.guardian-detail-info p { margin: 0; font-size: 13px; }
+.guardian-detail-section-title {
+  font-size: 13px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-dim); margin: 0;
+}
+.guardian-detail-students {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.guardian-detail-student-card {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.guardian-detail-student-info {
+  display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0;
+}
+.guardian-detail-student-name { font-weight: 650; font-size: 14px; }
+.guardian-detail-empty { font-size: 13px; padding: 12px 0; }
+
 /* ---- GSM multi-modem settings -------------------------------------------- */
 .gsm-modem-row {
   background: var(--surface-2, rgba(255,255,255,0.04));

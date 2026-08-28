@@ -9,7 +9,7 @@ import { api } from '../../lib/api';
 import { Avatar, Modal, Spinner, Toast } from '../../components/shared';
 import { GuardianForm } from '../../components/GuardianForm';
 
-type ModalState = { type: 'add' } | { type: 'edit'; guardian: Guardian } | null;
+type ModalState = { type: 'add' } | { type: 'edit'; guardian: Guardian } | { type: 'detail'; guardian: Guardian } | null;
 
 export function GuardiansPage() {
   const [guardians, setGuardians] = useState<Guardian[] | null>(null);
@@ -110,10 +110,12 @@ export function GuardiansPage() {
             {guardians.map((g) => (
               <tr key={g.id}>
                 <td>
-                  <div className="cell-student">
-                    <Avatar name={g.full_name} showPhoto={false} size={34} />
-                    <span>{g.full_name}</span>
-                  </div>
+                  <button className="guardian-name-btn" onClick={() => setModal({ type: 'detail', guardian: g })}>
+                    <div className="cell-student">
+                      <Avatar name={g.full_name} showPhoto={false} size={34} />
+                      <span>{g.full_name}</span>
+                    </div>
+                  </button>
                 </td>
                 <td className="mono">{g.mobile || '—'}</td>
                 <td>{g.address || '—'}</td>
@@ -164,8 +166,76 @@ export function GuardiansPage() {
           <GuardianForm initial={modal.guardian} onSaved={handleSaved} onCancel={() => setModal(null)} />
         </Modal>
       )}
+      {modal?.type === 'detail' && (
+        <GuardianDetailModal guardian={modal.guardian} students={students} onClose={() => setModal(null)} />
+      )}
 
       {toast && <Toast message={toast} />}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Guardian detail modal — shows guardian info + linked students
+// ---------------------------------------------------------------------------
+
+function GuardianDetailModal({
+  guardian,
+  students,
+  onClose,
+}: {
+  guardian: Guardian;
+  students: Student[];
+  onClose: () => void;
+}) {
+  const linked = students.filter((s) => s.guardian_id === guardian.id);
+
+  return (
+    <Modal title={`${guardian.full_name}`} onClose={onClose}>
+      <div className="guardian-detail">
+        <div className="guardian-detail-header">
+          <Avatar name={guardian.full_name} showPhoto={false} size={52} />
+          <div className="guardian-detail-info">
+            <h3>{guardian.full_name}</h3>
+            <p className="text-dim">
+              {guardian.mobile ? `📱 ${guardian.mobile}` : 'No mobile number'}
+            </p>
+            {guardian.address && <p className="text-dim">📍 {guardian.address}</p>}
+            <p className="text-dim">
+              {guardian.is_active ? '🟢 Active' : '⚪ Inactive'}
+              {' · '}
+              QR: <code className="qr-payload sm">{guardian.qr_hash_payload}</code>
+            </p>
+          </div>
+        </div>
+
+        <h4 className="guardian-detail-section-title">
+          Linked Students ({linked.length})
+        </h4>
+
+        {linked.length > 0 ? (
+          <div className="guardian-detail-students">
+            {linked.map((s) => (
+              <div key={s.id} className="guardian-detail-student-card">
+                <Avatar name={s.full_name} showPhoto={false} size={36} />
+                <div className="guardian-detail-student-info">
+                  <span className="guardian-detail-student-name">{s.full_name}</span>
+                  <span className="text-dim">
+                    {s.student_no} · {s.grade_section}
+                  </span>
+                </div>
+                <span className={`pill ${s.is_active ? 'pill-success' : 'pill-dim'}`}>
+                  {s.is_active ? 'Active' : 'Inactive'}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-dim guardian-detail-empty">
+            No students linked to this guardian yet.
+          </p>
+        )}
+      </div>
+    </Modal>
   );
 }
