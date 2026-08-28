@@ -16,6 +16,7 @@ export function SmsOutboxPage() {
   const [offset, setOffset] = useState(0);
   const [expanded, setExpanded] = useState<SmsLogRow | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [resendingAll, setResendingAll] = useState(false);
 
   const load = useCallback(() => {
     void api
@@ -42,12 +43,38 @@ export function SmsOutboxPage() {
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const page = Math.floor(offset / PAGE_SIZE) + 1;
 
+  const retryAllFailed = async () => {
+    setResendingAll(true);
+    try {
+      const count = await api.retryAllFailedSms();
+      if (count > 0) {
+        notify(`${count} failed SMS re-queued for retry.`);
+      } else {
+        notify('No failed SMS to re-queue.');
+      }
+      load();
+    } catch (err) {
+      notify(`Error: ${(err as Error).message}`);
+    } finally {
+      setResendingAll(false);
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-head">
         <div>
           <h2>SMS Outbox</h2>
           <p className="text-dim">{total} messages</p>
+        </div>
+        <div className="page-actions">
+          <button
+            className="btn-ghost"
+            disabled={resendingAll}
+            onClick={() => void retryAllFailed()}
+          >
+            {resendingAll ? 'Re-queuing…' : '↻ Resend All Failed'}
+          </button>
         </div>
       </div>
 

@@ -1271,6 +1271,13 @@ export function registerIpc(scanner: ScannerHook): void {
     return row;
   });
 
+  ipcMain.handle('tapin:retryAllFailedSms', async (): Promise<number> => {
+    const result = await db.execute(
+      "UPDATE sms_logs SET status = 'PENDING', attempts = 0, error = NULL WHERE status = 'FAILED'",
+    );
+    return (result as { affectedRows: number }).affectedRows ?? 0;
+  });
+
   // ---- Reports (PDF / Excel export) ----------------------------------------
   ipcMain.handle('tapin:getReport', async (_e, query: ReportQuery): Promise<ReportData> => {
     return getReportData(query);

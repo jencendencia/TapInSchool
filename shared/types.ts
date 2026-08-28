@@ -1582,6 +1582,8 @@ export interface TapinApi {
 
   listSms(filter?: SmsFilter): Promise<Paged<SmsLogRow>>;
   retrySms(id: number): Promise<SmsLog>;
+  /** Re-queue all FAILED SMS for retry (resets attempts + error). */
+  retryAllFailedSms(): Promise<number>;
 
   getSettings(): Promise<Settings>;
   updateSettings(patch: Partial<Settings>): Promise<Settings>;

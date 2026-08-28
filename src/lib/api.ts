@@ -1429,6 +1429,19 @@ class MockApi implements TapinApi {
     throw new Error('SMS not found');
   }
 
+  async retryAllFailedSms(): Promise<number> {
+    let count = 0;
+    for (const row of this.sms) {
+      if (row.status === 'FAILED') {
+        row.status = 'PENDING';
+        row.attempts = 0;
+        row.error = null;
+        count++;
+      }
+    }
+    return count;
+  }
+
   async getSettings(): Promise<Settings> {
     return { ...this.settings };
   }

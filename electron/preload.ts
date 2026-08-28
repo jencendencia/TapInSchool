@@ -111,6 +111,7 @@ const api: TapinApi = {
 
   listSms: (filter?: SmsFilter) => ipcRenderer.invoke('tapin:listSms', filter) as Promise<{ rows: SmsLogRow[]; total: number }>,
   retrySms: (id: number) => ipcRenderer.invoke('tapin:retrySms', id) as Promise<SmsLog>,
+  retryAllFailedSms: () => ipcRenderer.invoke('tapin:retryAllFailedSms') as Promise<number>,
 
   getSettings: () => ipcRenderer.invoke('tapin:getSettings') as Promise<Settings>,
   updateSettings: (patch: Partial<Settings>) =>
