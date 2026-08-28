@@ -317,11 +317,59 @@ function Donut({ inCount, outCount }: { inCount: number; outCount: number }) {
   );
 }
 
+function SmsQueueMonitor({ stats }: { stats: OverviewStats }) {
+  const { smsSentToday, smsPendingToday, smsFailedToday } = stats;
+  const total = smsSentToday + smsPendingToday + smsFailedToday;
+  const pct = total > 0 ? Math.round((smsSentToday / total) * 100) : 0;
+  const hasPending = smsPendingToday > 0;
+
+  return (
+    <div className="sms-queue-monitor">
+      <div className="sms-queue-head">
+        <h3>SMS Queue</h3>
+        {hasPending && <span className="live-badge"><span className="live-dot" /> LIVE</span>}
+      </div>
+      {total > 0 ? (
+        <>
+          <div className="sms-queue-bar-wrap">
+            <div className="sms-queue-bar">
+              <div className="sms-queue-bar-fill" style={{ width: `${pct}%` }} />
+              <div className="sms-queue-bar-failed" style={{ width: `${(smsFailedToday / total) * 100}%` }} />
+            </div>
+            <span className="sms-queue-pct">{pct}%</span>
+          </div>
+          <div className="sms-queue-counts">
+            <span className="sms-qc sms-qc-sent">✓ {smsSentToday} sent</span>
+            {hasPending && <span className="sms-qc sms-qc-pending">⏳ {smsPendingToday} queued</span>}
+            {smsFailedToday > 0 && <span className="sms-qc sms-qc-failed">✕ {smsFailedToday} failed</span>}
+          </div>
+          {hasPending && (
+            <p className="sms-queue-eta text-dim">
+              Est. ~{Math.ceil(smsPendingToday / 0.8)}s remaining (2 modems)
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="text-dim" style={{ padding: '8px 0' }}>No SMS activity today</p>
+      )}
+    </div>
+  );
+}
+
 export function OverviewPage() {
   const [stats, setStats] = useState<OverviewStats | null>(null);
 
+  // Auto-refresh: poll every 3s while there are pending SMS, otherwise 30s.
   useEffect(() => {
-    void api.getOverview().then(setStats);
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = () => {
+      void api.getOverview().then((s) => {
+        setStats(s);
+        timer = setTimeout(poll, s.smsPendingToday > 0 ? 3_000 : 30_000);
+      });
+    };
+    poll();
+    return () => clearTimeout(timer);
   }, []);
 
   if (!stats) return <Spinner label="Loading overview…" />;
@@ -356,6 +404,8 @@ export function OverviewPage() {
         <StatCard label="Not scanned today" value={stats.absentToday} accent="#F43F5E" sub={`of ${stats.activeStudents} active`} />
         <StatCard label="Active students" value={stats.activeStudents} accent="#E2E8F0" sub={`of ${stats.totalStudents} enrolled`} />
       </div>
+
+      <SmsQueueMonitor stats={stats} />
 
       <div className="chart-grid">
         <MultiLineChart series={hourlySeries} label="Scans by hour (today)" />

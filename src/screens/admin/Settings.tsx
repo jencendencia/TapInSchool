@@ -1,7 +1,7 @@
 // Settings: global toggles, debounce timeout, SMS provider + port selection,
 // school years, and SMTP email config for report delivery.
 import { useEffect, useRef, useState } from 'react';
-import type { JobsConfig, SchoolYear, Settings } from '../../../shared/types';
+import type { GsmModem, JobsConfig, SchoolYear, Settings } from '../../../shared/types';
 import { api } from '../../lib/api';
 import { Spinner, Toast } from '../../components/shared';
 import { UpdatePanel } from '../../components/UpdatePanel';
@@ -420,6 +420,13 @@ setTestingEmail(true);
               <span className="switch-knob" />
             </span>
           </label>
+          {settings.absence_sms && (
+            <div className="field">
+              <label>Absence SMS send time</label>
+              <input type="time" value={settings.absence_sms_time} onChange={(e) => set('absence_sms_time', e.target.value)} />
+              <p className="field-hint">Absence detection runs after dismissal, but SMS to parents is only sent at this time (e.g. 18:00). Absence records are still created immediately.</p>
+            </div>
+          )}
 <p className="field-hint">One message per student per day, using the template above with “was marked absent today”.</p>
         </div>
 
@@ -536,46 +543,7 @@ setTestingEmail(true);
             </select>
           </div>
           {settings.sms_provider === 'gsm' && (
-            <>
-              <label className="switch-row">
-                <span>Auto-detect GSM modem port</span>
-                <span className={`switch ${settings.gsm_auto_port ? 'on' : ''}`} onClick={() => set('gsm_auto_port', !settings.gsm_auto_port)}>
-                  <span className="switch-knob" />
-                </span>
-              </label>
-              {settings.gsm_auto_port ? (
-                <div className="field">
-                  <label>Detected modem</label>
-                  <input
-                    value={settings.gsm_com_port || ''}
-                    readOnly
-                    placeholder="Plug in the modem — port detected automatically"
-                  />
-                  <p className="field-hint">
-                    The app probes each serial port with an AT command and uses the first modem found,
-                    updating this field automatically. Plugging the modem in while the app is running is
-                    picked up within seconds.
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <div className="field">
-                    <label>Serial COM port</label>
-                    <input value={settings.gsm_com_port} onChange={(e) => set('gsm_com_port', e.target.value)} placeholder="COM3 or /dev/ttyUSB0" />
-                  </div>
-                  <div className="field">
-                    <label>Baud rate</label>
-                    <select value={settings.gsm_baud} onChange={(e) => set('gsm_baud', Number(e.target.value))}>
-                      <option value={9600}>9600</option>
-                      <option value={115200}>115200</option>
-                    </select>
-                  </div>
-                </>
-              )}
-              <p className="field-hint">
-                Requires the serialport native module rebuilt for Electron: <code>npm run rebuild:serial</code>
-              </p>
-            </>
+            <GsmModemSettings settings={settings} set={set} />
           )}
           {settings.sms_provider === 'cloud' && (
             <>
@@ -739,5 +707,93 @@ setTestingEmail(true);
 
       {toast && <Toast message={toast} />}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GSM multi-modem settings sub-panel
+// ---------------------------------------------------------------------------
+
+function GsmModemSettings({
+  settings,
+  set,
+}: {
+  settings: Settings;
+  set: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
+}) {
+  let modems: GsmModem[] = [];
+  try { modems = JSON.parse(settings.gsm_modems || '[]'); } catch { modems = []; }
+  if (!Array.isArray(modems)) modems = [];
+
+  const updateModems = (next: GsmModem[]) => set('gsm_modems', JSON.stringify(next));
+
+  const addModem = () => {
+    const label = `Modem ${modems.length + 1}`;
+    updateModems([...modems, { port: 'COM' + (modems.length + 3), baud: 9600, label, enabled: true }]);
+  };
+
+  const removeModem = (idx: number) => {
+    updateModems(modems.filter((_, i) => i !== idx));
+  };
+
+  const toggleModem = (idx: number) => {
+    const next = modems.map((m, i) => i === idx ? { ...m, enabled: !m.enabled } : m);
+    updateModems(next);
+  };
+
+  const updateField = (idx: number, field: keyof GsmModem, value: string | number | boolean) => {
+    const next = modems.map((m, i) => i === idx ? { ...m, [field]: value } : m);
+    updateModems(next);
+  };
+
+  return (
+    <>
+      <p className="field-hint" style={{ marginTop: -4, marginBottom: 8 }}>
+        Connect multiple GSM modems (e.g. 2× SIM800C) for parallel SMS sending.
+        The queue worker dispatches messages across all enabled modems simultaneously.
+      </p>
+      {modems.map((m, idx) => (
+        <div key={idx} className="gsm-modem-row">
+          <div className="gsm-modem-header">
+            <label className="switch-row" style={{ margin: 0 }}>
+              <span style={{ fontWeight: 600 }}>{m.label || `Modem ${idx + 1}`}</span>
+              <span className={`switch ${m.enabled ? 'on' : ''}`} onClick={() => toggleModem(idx)}>
+                <span className="switch-knob" />
+              </span>
+            </label>
+            <button type="button" className="btn-icon danger" title="Remove modem" onClick={() => removeModem(idx)}>
+              🗑
+            </button>
+          </div>
+          {m.enabled && (
+            <div className="gsm-modem-fields">
+              <div className="field">
+                <label>Label</label>
+                <input value={m.label} onChange={(e) => updateField(idx, 'label', e.target.value)} placeholder="Modem 1" />
+              </div>
+              <div className="field">
+                <label>COM port</label>
+                <input value={m.port} onChange={(e) => updateField(idx, 'port', e.target.value)} placeholder="COM3" />
+              </div>
+              <div className="field">
+                <label>Baud rate</label>
+                <select value={m.baud} onChange={(e) => updateField(idx, 'baud', Number(e.target.value))}>
+                  <option value={9600}>9600</option>
+                  <option value={115200}>115200</option>
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+      <div className="page-actions" style={{ marginTop: 8 }}>
+        <button type="button" className="btn-ghost" onClick={addModem}>
+          + Add modem
+        </button>
+      </div>
+      <p className="field-hint" style={{ marginTop: 8 }}>
+        Requires the serialport native module rebuilt for Electron: <code>npm run rebuild:serial</code>
+      </p>
+    </>
   );
 }

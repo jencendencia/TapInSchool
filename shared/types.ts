@@ -294,6 +294,18 @@ export interface UserInput {
 
 export type SmsProviderId = 'simulator' | 'gsm' | 'cloud';
 
+/** A single GSM modem entry in the multi-modem pool. */
+export interface GsmModem {
+  /** Serial port path, e.g. 'COM3' or '/dev/ttyUSB0'. */
+  port: string;
+  /** Baud rate (usually 9600 or 115200). */
+  baud: number;
+  /** Human-readable label shown in the admin UI, e.g. 'Modem 1'. */
+  label: string;
+  /** Whether this modem is active in the send pool. */
+  enabled: boolean;
+}
+
 export type CloudProviderId = 'semaphore' | 'messagebird' | 'philsms' | 'generic';
 
 /** How often the automatic adviser reports are emailed. */
@@ -322,6 +334,9 @@ export interface Settings {
   gsm_baud: number;
   /** When true, the GSM provider locates the modem by probing serial ports. */
   gsm_auto_port: boolean;
+  /** JSON array of GsmModem entries for multi-modem parallel sending.
+   *  When non-empty, the pool supersedes the single gsm_com_port/gsm_baud. */
+  gsm_modems: string;
   /** Kiosk scan-result photo layout: round avatar / zoomed square / full-bleed. */
   kiosk_photo_style: KioskPhotoStyle;
   cloud_provider: CloudProviderId;
@@ -335,6 +350,9 @@ export interface Settings {
   bell_grace_minutes: number;
   absence_detect: boolean;
   absence_sms: boolean;
+  /** Local 'HH:MM' time to send absence SMS to parents (e.g. '18:00').
+   *  The absence detector waits until this time before enqueueing SMS. */
+  absence_sms_time: string;
   /** Internal: last date (YYYY-MM-DD) the absence detector ran. */
   absence_last_run: string;
 

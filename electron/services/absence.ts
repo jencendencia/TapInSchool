@@ -56,6 +56,16 @@ function isPastCutoff(settings: Settings): boolean {
   return now.getHours() * 60 + now.getMinutes() >= outMin + DETECT_BUFFER_MIN;
 }
 
+/** True once the configured absence_sms_time has been reached (local clock).
+ *  Used to defer SMS enqueueing until the admin-specified time (e.g. 18:00)
+ *  while absence DETECTION can still run after the dismissal buffer. */
+function isPastSmsTime(settings: Settings): boolean {
+  const smsTime = settings.absence_sms_time ? parseTime(settings.absence_sms_time) : NaN;
+  if (Number.isNaN(smsTime)) return true; // no time set → send immediately
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes() >= smsTime;
+}
+
 /** Flags every active student for one day and enqueues absence SMS. */
 async function runForDay(day: Date, settings: Settings): Promise<{ absent: number; late: number; sms: number }> {
   const dayStr = fmtDay(day);
@@ -103,8 +113,10 @@ async function runForDay(day: Date, settings: Settings): Promise<{ absent: numbe
   const smsEnabled = settings.absence_sms;
   // Parents are only notified for the current day — a backfilled day (e.g.
   // the kiosk was off yesterday) is recorded silently so no one gets a
-  // misleading "absent today" message for a past date.
-  const smsToday = smsEnabled && dayStr === fmtDay(new Date());
+  // misleading "absent today" message for a past date.  SMS is also gated
+  // on the admin-configured absence_sms_time so notifications go out at
+  // the expected hour (e.g. 18:00) rather than immediately after dismissal.
+  const smsToday = smsEnabled && dayStr === fmtDay(new Date()) && isPastSmsTime(settings);
 
   const upsert = async (
     student: { id: number; full_name: string; grade_section: string; parent_phone: string },

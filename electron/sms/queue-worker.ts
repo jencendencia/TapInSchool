@@ -43,33 +43,40 @@ export class SmsQueueWorker {
         // claim them. Rows left IN_PROGRESS by a peer that died mid-dispatch
         // are picked up here too (they're not PENDING anymore, so no other
         // claimer touches them) and are either finished or re-queued below.
+        // Batch size: 6 rows — the GSM provider's round-robin pool sends them
+        // in parallel across multiple modems (2 modems ≈ 3 each simultaneously).
         await db.execute(
-          "UPDATE sms_logs SET status = 'IN_PROGRESS' WHERE status = 'PENDING' ORDER BY id ASC LIMIT 3",
+          "UPDATE sms_logs SET status = 'IN_PROGRESS' WHERE status = 'PENDING' ORDER BY id ASC LIMIT 6",
         );
         const rows = await db.query<SmsLog[]>(
           "SELECT * FROM sms_logs WHERE status = 'IN_PROGRESS' ORDER BY id ASC",
         );
         if (rows.length === 0) return;
-        for (const row of rows) {
-          try {
-            await provider.send(settings, row.parent_phone, row.message);
-            await db.execute(
-              "UPDATE sms_logs SET status = 'SENT', provider = ?, sent_at = NOW(), attempts = attempts + 1, error = NULL WHERE id = ?",
-              [provider.id, row.id],
-            );
-          } catch (err) {
-            const attempts = row.attempts + 1;
-            const failed = attempts >= 5;
-            await db.execute('UPDATE sms_logs SET attempts = ?, error = ?, status = ? WHERE id = ?', [
-              attempts,
-              (err as Error).message.slice(0, 500),
-              failed ? 'FAILED' : 'PENDING',
-              row.id,
-            ]);
-            // Brief back-off so a dead GSM module isn't hammered every second.
-            await new Promise((r) => setTimeout(r, 800));
-          }
-        }
+        // Dispatch in parallel — the GSM provider's send() is already
+        // serialized per-modem instance, so concurrent calls fan out across
+        // different modems for parallel throughput.
+        await Promise.all(
+          rows.map(async (row) => {
+            try {
+              await provider.send(settings, row.parent_phone, row.message);
+              await db.execute(
+                "UPDATE sms_logs SET status = 'SENT', provider = ?, sent_at = NOW(), attempts = attempts + 1, error = NULL WHERE id = ?",
+                [provider.id, row.id],
+              );
+            } catch (err) {
+              const attempts = row.attempts + 1;
+              const failed = attempts >= 5;
+              await db.execute('UPDATE sms_logs SET attempts = ?, error = ?, status = ? WHERE id = ?', [
+                attempts,
+                (err as Error).message.slice(0, 500),
+                failed ? 'FAILED' : 'PENDING',
+                row.id,
+              ]);
+              // Brief back-off so a dead GSM module isn't hammered every second.
+              await new Promise((r) => setTimeout(r, 800));
+            }
+          }),
+        );
         if (this.onActivity) {
           this.onActivity(await getRecentActivity(5));
         }
