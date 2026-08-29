@@ -164,25 +164,29 @@ export class CloudProvider implements SmsProvider {
   private static readonly SEND_TIMEOUT_MS = 15000;
 
   async send(settings: Settings, phone: string, message: string): Promise<void> {
+    const controller = new AbortController();
     // A provider that hangs (unreachable host, captive portal, stalled DNS)
     // must not wedge the SMS queue worker: the worker holds the queue lock
     // for the whole tick, so a forever-pending fetch would stall dispatch
     // AND hold a pool connection indefinitely.
     const work = (async (): Promise<void> => {
       if (settings.cloud_provider === 'semaphore') {
-        await this.sendSemaphore(settings, phone, message);
+        await this.sendSemaphore(settings, phone, message, controller.signal);
       } else if (settings.cloud_provider === 'messagebird') {
-        await this.sendMessageBird(settings, phone, message);
+        await this.sendMessageBird(settings, phone, message, controller.signal);
       } else if (settings.cloud_provider === 'philsms') {
-        await this.sendPhilSms(settings, phone, message);
+        await this.sendPhilSms(settings, phone, message, controller.signal);
       } else {
-        await this.sendGeneric(settings, phone, message);
+        await this.sendGeneric(settings, phone, message, controller.signal);
       }
     })();
     let timer: NodeJS.Timeout | null = null;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(
-        () => reject(new Error('SMS provider send timed out (15s)')),
+        () => {
+          controller.abort();
+          reject(new Error('SMS provider send timed out (15s)'));
+        },
         CloudProvider.SEND_TIMEOUT_MS,
       );
     });
@@ -193,7 +197,7 @@ export class CloudProvider implements SmsProvider {
     }
   }
 
-  private async sendSemaphore(settings: Settings, phone: string, message: string): Promise<void> {
+  private async sendSemaphore(settings: Settings, phone: string, message: string, signal: AbortSignal): Promise<void> {
     const body = new URLSearchParams({
       apikey: settings.cloud_api_key,
       number: phone,
@@ -204,11 +208,12 @@ export class CloudProvider implements SmsProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
+      signal,
     });
     if (!res.ok) throw new Error(`Semaphore HTTP ${res.status}: ${await res.text()}`);
   }
 
-  private async sendPhilSms(settings: Settings, phone: string, message: string): Promise<void> {
+  private async sendPhilSms(settings: Settings, phone: string, message: string, signal: AbortSignal): Promise<void> {
     const res = await fetch(`${PHILSMS_BASE}/sms/send`, {
       method: 'POST',
       headers: {
@@ -223,6 +228,7 @@ export class CloudProvider implements SmsProvider {
         type: /[^\x00-\x7F]/.test(message) ? 'unicode' : 'plain',
         message,
       }),
+      signal,
     });
     const body = (await res.json().catch(() => null)) as { status?: string; message?: string } | null;
     // PhilSMS returns 200 (and sometimes 4xx/5xx) with a JSON error body, so the
@@ -233,7 +239,7 @@ export class CloudProvider implements SmsProvider {
     }
   }
 
-  private async sendMessageBird(settings: Settings, phone: string, message: string): Promise<void> {
+  private async sendMessageBird(settings: Settings, phone: string, message: string, signal: AbortSignal): Promise<void> {
     const res = await fetch('https://rest.messagebird.com/messages', {
       method: 'POST',
       headers: {
@@ -245,11 +251,12 @@ export class CloudProvider implements SmsProvider {
         recipients: [phone],
         body: message,
       }),
+      signal,
     });
     if (!res.ok) throw new Error(`MessageBird HTTP ${res.status}: ${await res.text()}`);
   }
 
-  private async sendGeneric(settings: Settings, phone: string, message: string): Promise<void> {
+  private async sendGeneric(settings: Settings, phone: string, message: string, signal: AbortSignal): Promise<void> {
     const res = await fetch(settings.cloud_endpoint, {
       method: 'POST',
       headers: {
@@ -257,6 +264,7 @@ export class CloudProvider implements SmsProvider {
         ...(settings.cloud_api_key ? { Authorization: `Bearer ${settings.cloud_api_key}` } : {}),
       },
       body: JSON.stringify({ to: phone, message, sender: settings.cloud_sender }),
+      signal,
     });
     if (!res.ok) throw new Error(`Cloud API HTTP ${res.status}: ${await res.text()}`);
   }

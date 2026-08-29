@@ -6,21 +6,23 @@ import type { BellSettings } from './bell-times';
 
 export async function readBellSettings(): Promise<BellSettings> {
   if (!db.isOnline()) {
-    return { bell_time_in: '', bell_time_out: '', bell_grace_minutes: 0 };
+    return { am_time_in: '', am_time_out: '', pm_time_in: '', pm_time_out: '', bell_grace_minutes: 0 };
   }
   try {
     const rows = await db.query<{ setting_key: string; setting_value: string }[]>(
       `SELECT setting_key, setting_value FROM settings
-       WHERE setting_key IN ('bell_time_in', 'bell_time_out', 'bell_grace_minutes')`,
+       WHERE setting_key IN ('am_time_in', 'am_time_out', 'pm_time_in', 'pm_time_out', 'bell_grace_minutes')`,
     );
     const map = new Map(rows.map((r) => [r.setting_key, r.setting_value]));
     return {
-      bell_time_in: map.get('bell_time_in') ?? '',
-      bell_time_out: map.get('bell_time_out') ?? '',
+      am_time_in: map.get('am_time_in') ?? '',
+      am_time_out: map.get('am_time_out') ?? '',
+      pm_time_in: map.get('pm_time_in') ?? '',
+      pm_time_out: map.get('pm_time_out') ?? '',
       bell_grace_minutes: Number(map.get('bell_grace_minutes')) || 0,
     };
   } catch {
-    return { bell_time_in: '', bell_time_out: '', bell_grace_minutes: 0 };
+    return { am_time_in: '', am_time_out: '', pm_time_in: '', pm_time_out: '', bell_grace_minutes: 0 };
   }
 }
 

@@ -82,7 +82,7 @@ class Database extends EventEmitter {
     // default). 20 machines × 3 = 60 slots vs 100 at the old 5. Overridable
     // per machine via DB_POOL (e.g. a busy admin PC can raise it). Queries
     // queue inside the pool rather than failing when the limit is hit.
-    const poolLimit = Math.max(1, Math.min(50, Number(process.env.DB_POOL) || 3));
+    const poolLimit = Math.max(1, Math.min(50, Number(process.env.DB_POOL) || 4));
     try {
       const pool = createPool({
         ...cfg,

@@ -32,6 +32,7 @@ import type {
   ScanMode,
   ScanResult,
   ScanSource,
+  SessionMode,
   SchoolYear,
   Section,
   SectionInput,
@@ -68,6 +69,8 @@ const api: TapinApi = {
     ipcRenderer.invoke('tapin:processScan', payload, source) as Promise<ScanResult>,
   getScanMode: () => ipcRenderer.invoke('tapin:getScanMode') as Promise<ScanMode>,
   setScanMode: (mode: ScanMode) => ipcRenderer.invoke('tapin:setScanMode', mode) as Promise<ScanMode>,
+  getSessionMode: () => ipcRenderer.invoke('tapin:getSessionMode') as Promise<SessionMode>,
+  setSessionMode: (mode: SessionMode) => ipcRenderer.invoke('tapin:setSessionMode', mode) as Promise<SessionMode>,
   getRecentActivity: (limit = 5) =>
     ipcRenderer.invoke('tapin:getRecentActivity', limit) as Promise<ActivityItem[]>,
   setKioskMode: (active: boolean) => ipcRenderer.invoke('tapin:setKioskMode', active),

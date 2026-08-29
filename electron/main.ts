@@ -55,6 +55,7 @@ let workerActive = false;
 function startWorkerServices(): void {
   if (workerActive) return;
   workerActive = true;
+  getProvider(settingsStore.get().sms_provider).start?.(() => settingsStore.get());
   // Automatic DB backups (P0-3.2): boot snapshot + every 12 h, with rotation.
   startBackupService();
   // Automated absence detection (Phase 2, 4.2): nightly LATE/ABSENT flags +
@@ -72,6 +73,7 @@ function startWorkerServices(): void {
 function stopWorkerServices(): void {
   if (!workerActive) return;
   workerActive = false;
+  getProvider(settingsStore.get().sms_provider).stop?.();
   queueWorker.stop();
   stopBackupService();
   stopAbsenceService();

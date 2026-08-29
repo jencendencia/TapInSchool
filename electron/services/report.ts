@@ -204,21 +204,77 @@ export async function getReportData(query: ReportQuery): Promise<ReportData> {
     atRiskCount = rows.filter((r) => r.present_days / schoolDays < 0.8).length;
   }
 
+  // Compute midpoint for morning/afternoon split using AM/PM times.
+  const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+  const amOut = settings.am_time_out ? parseHHMM(settings.am_time_out) : NaN;
+  let midMin = !Number.isNaN(amOut) ? amOut : 720;
+  if (Number.isNaN(amOut)) {
+    const amIn = settings.am_time_in ? parseHHMM(settings.am_time_in) : NaN;
+    const pmOut = settings.pm_time_out ? parseHHMM(settings.pm_time_out) : NaN;
+    if (!Number.isNaN(amIn) && !Number.isNaN(pmOut)) midMin = Math.round((amIn + pmOut) / 2);
+  }
+  const midH = String(Math.floor(midMin / 60)).padStart(2, '0');
+  const midM = String(midMin % 60).padStart(2, '0');
+  const midTime = `${midH}:${midM}:00`;
+  // Per-session late/early cutoffs for AM and PM.
+  const toHms = (mins: number) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}:00`;
+  const grace = Math.max(0, Number(settings.bell_grace_minutes) || 0);
+  const amInMin = settings.am_time_in ? parseHHMM(settings.am_time_in) : NaN;
+  const amOutMin = settings.am_time_out ? parseHHMM(settings.am_time_out) : NaN;
+  const pmInMin = settings.pm_time_in ? parseHHMM(settings.pm_time_in) : NaN;
+  const pmOutMin = settings.pm_time_out ? parseHHMM(settings.pm_time_out) : NaN;
+  const amLateCutoff = Number.isNaN(amInMin) ? '' : toHms(amInMin + grace);
+  const pmLateCutoff = Number.isNaN(pmInMin) ? '' : toHms(pmInMin + grace);
+  const amEarlyCutoff = Number.isNaN(amOutMin) ? '' : toHms(amOutMin);
+  const pmEarlyCutoff = Number.isNaN(pmOutMin) ? '' : toHms(pmOutMin);
+
   const dailyRows = await db.query<
-    { day: string; scans: number; ins: number; outs: number; late: number; early: number }[]
+    { day: string; scans: number; ins: number; outs: number;
+      morning_in: number; morning_out: number; afternoon_in: number; afternoon_out: number;
+      late: number; am_late: number; pm_late: number;
+      early: number; am_early: number; pm_early: number }[]
   >(
     `SELECT DATE_FORMAT(scanned_at, '%Y-%m-%d') day,
             COUNT(*) scans,
             COALESCE(SUM(entry_type = 'IN'), 0) ins,
             COALESCE(SUM(entry_type = 'OUT'), 0) outs,
+            COALESCE(SUM(entry_type = 'IN' AND TIME(scanned_at) < ?), 0) morning_in,
+            COALESCE(SUM(entry_type = 'OUT' AND TIME(scanned_at) < ?), 0) morning_out,
+            COALESCE(SUM(entry_type = 'IN' AND TIME(scanned_at) >= ?), 0) afternoon_in,
+            COALESCE(SUM(entry_type = 'OUT' AND TIME(scanned_at) >= ?), 0) afternoon_out,
             COALESCE(SUM(entry_type = 'IN' AND ? <> '' AND TIME(scanned_at) > ?), 0) late,
-            COALESCE(SUM(entry_type = 'OUT' AND ? <> '' AND TIME(scanned_at) < ?), 0) early
+            COALESCE(SUM(entry_type = 'IN' AND ? <> '' AND TIME(scanned_at) > ? AND TIME(scanned_at) < ?), 0) am_late,
+            COALESCE(SUM(entry_type = 'IN' AND ? <> '' AND TIME(scanned_at) > ? AND TIME(scanned_at) >= ?), 0) pm_late,
+            COALESCE(SUM(entry_type = 'OUT' AND ? <> '' AND TIME(scanned_at) < ?), 0) early,
+            COALESCE(SUM(entry_type = 'OUT' AND ? <> '' AND TIME(scanned_at) < ? AND TIME(scanned_at) < ?), 0) am_early,
+            COALESCE(SUM(entry_type = 'OUT' AND ? <> '' AND TIME(scanned_at) < ? AND TIME(scanned_at) >= ?), 0) pm_early
      FROM attendance_logs
      WHERE scanned_at BETWEEN ? AND ?
      GROUP BY DATE_FORMAT(scanned_at, '%Y-%m-%d')
      ORDER BY day`,
-    [late, late, early, early, fromDt, toDt],
+    [midTime, midTime, midTime, midTime,
+     late, late,
+     amLateCutoff, amLateCutoff, midTime,
+     pmLateCutoff, pmLateCutoff, midTime,
+     early, early,
+     amEarlyCutoff, amEarlyCutoff, midTime,
+     pmEarlyCutoff, pmEarlyCutoff, midTime,
+     fromDt, toDt],
   );
+  // AM/PM absent: students with zero AM scans / zero PM scans per day.
+  const amPresentRows = await db.query<{ day: string; c: number }[]>(
+    `SELECT DATE_FORMAT(scanned_at, '%Y-%m-%d') day, COUNT(DISTINCT student_id) c
+     FROM attendance_logs WHERE scanned_at BETWEEN ? AND ? AND TIME(scanned_at) < ?
+     GROUP BY day`, [fromDt, toDt, midTime],
+  );
+  const pmPresentRows = await db.query<{ day: string; c: number }[]>(
+    `SELECT DATE_FORMAT(scanned_at, '%Y-%m-%d') day, COUNT(DISTINCT student_id) c
+     FROM attendance_logs WHERE scanned_at BETWEEN ? AND ? AND TIME(scanned_at) >= ?
+     GROUP BY day`, [fromDt, toDt, midTime],
+  );
+  const amPresentByDay = new Map(amPresentRows.map((r) => [r.day, r.c]));
+  const pmPresentByDay = new Map(pmPresentRows.map((r) => [r.day, r.c]));
+
   const byDay = new Map(dailyRows.map((r) => [r.day, r]));
   const daily = [];
   // Absence is scan-derived per REPORTS_PLAN §2 (user decision): an active
@@ -228,14 +284,26 @@ export async function getReportData(query: ReportQuery): Promise<ReportData> {
     const key = fmtDay(d);
     const r = byDay.get(key);
     const presentDay = presentByDay.get(key) ?? 0;
+    const amP = amPresentByDay.get(key) ?? 0;
+    const pmP = pmPresentByDay.get(key) ?? 0;
     daily.push({
       day: key,
       scans: r?.scans ?? 0,
       in: r?.ins ?? 0,
       out: r?.outs ?? 0,
+      morningIn: r?.morning_in ?? 0,
+      morningOut: r?.morning_out ?? 0,
+      afternoonIn: r?.afternoon_in ?? 0,
+      afternoonOut: r?.afternoon_out ?? 0,
       late: r?.late ?? 0,
+      amLate: r?.am_late ?? 0,
+      pmLate: r?.pm_late ?? 0,
       early: r?.early ?? 0,
+      amEarly: r?.am_early ?? 0,
+      pmEarly: r?.pm_early ?? 0,
       absent: r ? Math.max(0, activeStudents - presentDay) : 0,
+      amAbsent: r ? Math.max(0, activeStudents - amP) : 0,
+      pmAbsent: r ? Math.max(0, activeStudents - pmP) : 0,
       present: presentDay,
     });
   }
@@ -256,7 +324,7 @@ export async function getReportData(query: ReportQuery): Promise<ReportData> {
 
   const yearScope = { yearJoin, yearParams, secExpr };
   if (type === 'per-student') {
-    perStudent = await loadPerStudent({ ...yearScope, section, maskPhones, late, fromDt, toDt, schoolDays, sectionWhere, sectionParams });
+    perStudent = await loadPerStudent({ ...yearScope, section, maskPhones, late, fromDt, toDt, schoolDays, midTime, sectionWhere, sectionParams });
   } else if (type === 'per-section') {
     perSection = await loadPerSection({ ...yearScope, late, early, fromDt, toDt, schoolDays });
   } else if (type === 'register') {
@@ -751,15 +819,24 @@ function phoneOf(phone: string, maskPhones: boolean): string {
 }
 
 async function loadPerStudent(
-  args: StudentScope & { late: string; fromDt: string; toDt: string; schoolDays: number },
+  args: StudentScope & { late: string; fromDt: string; toDt: string; schoolDays: number; midTime: string },
 ): Promise<PerStudentRow[]> {
+  const mid = args.midTime; // e.g. '12:00:00'
   const lateSub = args.late
-    ? `LEFT JOIN (SELECT student_id, SUM(TIMESTAMPDIFF(MINUTE, TIMESTAMP(DATE(scanned_at), ?), scanned_at)) late_mins
-                  FROM attendance_logs WHERE scanned_at BETWEEN ? AND ? AND entry_type = 'IN' AND TIME(scanned_at) > ?
-                  GROUP BY student_id) lm ON lm.student_id = s.id`
+    ? `LEFT JOIN (
+         SELECT student_id,
+                SUM(TIMESTAMPDIFF(MINUTE, TIMESTAMP(DATE(scanned_at), ?), scanned_at)) late_mins,
+                SUM(CASE WHEN TIME(scanned_at) < ? THEN TIMESTAMPDIFF(MINUTE, TIMESTAMP(DATE(scanned_at), ?), scanned_at) ELSE 0 END) late_mins_am,
+                SUM(CASE WHEN TIME(scanned_at) >= ? THEN TIMESTAMPDIFF(MINUTE, TIMESTAMP(DATE(scanned_at), ?), scanned_at) ELSE 0 END) late_mins_pm
+         FROM attendance_logs WHERE scanned_at BETWEEN ? AND ? AND entry_type = 'IN' AND TIME(scanned_at) > ?
+         GROUP BY student_id
+       ) lm ON lm.student_id = s.id`
     : '';
   const lateMinsSel = args.late ? 'COALESCE(lm.late_mins, 0)' : '0';
-  const lateParams = args.late ? [args.late, args.fromDt, args.toDt, args.late] : [];
+  const lateMinsAmSel = args.late ? 'COALESCE(lm.late_mins_am, 0)' : '0';
+  const lateMinsPmSel = args.late ? 'COALESCE(lm.late_mins_pm, 0)' : '0';
+  // Params for lateSub: cutoff, mid, cutoff, mid, cutoff, fromDt, toDt, cutoff
+  const lateParams = args.late ? [args.late, mid, args.late, mid, args.late, args.fromDt, args.toDt, args.late] : [];
   const rows = await db.query<
     {
       student_id: number;
@@ -769,9 +846,19 @@ async function loadPerStudent(
       parent_phone: string;
       present_days: number;
       late_days: number;
+      late_days_am: number;
+      late_days_pm: number;
       total_in: number;
+      total_in_am: number;
+      total_in_pm: number;
       total_out: number;
+      total_out_am: number;
+      total_out_pm: number;
+      present_days_am: number;
+      present_days_pm: number;
       late_mins: number;
+      late_mins_am: number;
+      late_mins_pm: number;
       sms_count: number;
       last_status: string | null;
     }[]
@@ -779,9 +866,19 @@ async function loadPerStudent(
     `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
             COUNT(DISTINCT CASE WHEN a.id IS NOT NULL THEN DATE(a.scanned_at) END) present_days,
             COUNT(DISTINCT CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ? THEN DATE(a.scanned_at) END) late_days,
+            COUNT(DISTINCT CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ? AND TIME(a.scanned_at) < ? THEN DATE(a.scanned_at) END) late_days_am,
+            COUNT(DISTINCT CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ? AND TIME(a.scanned_at) >= ? THEN DATE(a.scanned_at) END) late_days_pm,
             COALESCE(SUM(a.entry_type = 'IN'), 0) total_in,
+            COALESCE(SUM(a.entry_type = 'IN' AND TIME(a.scanned_at) < ?), 0) total_in_am,
+            COALESCE(SUM(a.entry_type = 'IN' AND TIME(a.scanned_at) >= ?), 0) total_in_pm,
             COALESCE(SUM(a.entry_type = 'OUT'), 0) total_out,
+            COALESCE(SUM(a.entry_type = 'OUT' AND TIME(a.scanned_at) < ?), 0) total_out_am,
+            COALESCE(SUM(a.entry_type = 'OUT' AND TIME(a.scanned_at) >= ?), 0) total_out_pm,
+            COUNT(DISTINCT CASE WHEN a.id IS NOT NULL AND TIME(a.scanned_at) < ? THEN DATE(a.scanned_at) END) present_days_am,
+            COUNT(DISTINCT CASE WHEN a.id IS NOT NULL AND TIME(a.scanned_at) >= ? THEN DATE(a.scanned_at) END) present_days_pm,
             ${lateMinsSel} late_mins,
+            ${lateMinsAmSel} late_mins_am,
+            ${lateMinsPmSel} late_mins_pm,
             COALESCE(ssm.sms_count, 0) sms_count,
             ssm.last_status last_status
      FROM students s ${args.yearJoin}
@@ -794,27 +891,67 @@ async function loadPerStudent(
      WHERE s.is_active = 1${args.sectionWhere}
      GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
      ORDER BY ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name`,
-    // Placeholder order follows the SQL text: SELECT-clause late cutoffs first,
-    // then the yearJoin (FROM), then the rest of the joins + section filter.
-    [args.late, args.late, ...args.yearParams, args.fromDt, args.toDt, ...lateParams, args.fromDt, args.toDt, ...args.sectionParams],
+    // Placeholder order: late cutoffs (×4 for late/late_am/late_pm + original), midTime for am/pm splits, lateSub params, sms subquery.
+    [
+      // late_days: ? <> '' AND TIME > ?
+      args.late, args.late,
+      // late_days_am: ? <> '' AND TIME > ? AND TIME < ?
+      args.late, args.late, mid,
+      // late_days_pm: ? <> '' AND TIME > ? AND TIME >= ?
+      args.late, args.late, mid,
+      // total_in_am: TIME < ?
+      mid,
+      // total_in_pm: TIME >= ?
+      mid,
+      // total_out_am: TIME < ?
+      mid,
+      // total_out_pm: TIME >= ?
+      mid,
+      // present_days_am: TIME < ?
+      mid,
+      // present_days_pm: TIME >= ?
+      mid,
+      // yearJoin params, FROM...BETWEEN
+      ...args.yearParams, args.fromDt, args.toDt,
+      // lateSub params
+      ...lateParams,
+      // sms subquery BETWEEN
+      args.fromDt, args.toDt,
+      // sectionWhere params
+      ...args.sectionParams,
+    ],
   );
   const schoolDays = args.schoolDays;
-  return rows.map((r) => ({
-    studentId: r.student_id,
-    studentNo: r.student_no,
-    fullName: r.full_name,
-    gradeSection: r.grade_section,
-    parentPhone: phoneOf(r.parent_phone, args.maskPhones),
-    daysPresent: r.present_days,
-    daysLate: r.late_days,
-    daysAbsent: Math.max(0, schoolDays - r.present_days),
-    attendanceRate: schoolDays > 0 ? (r.present_days / schoolDays) * 100 : null,
-    totalIn: r.total_in,
-    totalOut: r.total_out,
-    totalMinutesLate: r.late_mins ?? 0,
-    smsCount: r.sms_count,
-    lastSmsStatus: (r.last_status as SmsStatus) || null,
-  }));
+  return rows.map((r) => {
+    const absentAm = Math.max(0, schoolDays - r.present_days_am);
+    const absentPm = Math.max(0, schoolDays - r.present_days_pm);
+    return {
+      studentId: r.student_id,
+      studentNo: r.student_no,
+      fullName: r.full_name,
+      gradeSection: r.grade_section,
+      parentPhone: phoneOf(r.parent_phone, args.maskPhones),
+      daysPresent: r.present_days,
+      daysLate: r.late_days,
+      daysLateAm: r.late_days_am,
+      daysLatePm: r.late_days_pm,
+      daysAbsent: Math.max(0, schoolDays - r.present_days),
+      daysAbsentAm: absentAm,
+      daysAbsentPm: absentPm,
+      attendanceRate: schoolDays > 0 ? (r.present_days / schoolDays) * 100 : null,
+      totalIn: r.total_in,
+      totalInAm: r.total_in_am,
+      totalInPm: r.total_in_pm,
+      totalOut: r.total_out,
+      totalOutAm: r.total_out_am,
+      totalOutPm: r.total_out_pm,
+      totalMinutesLate: r.late_mins ?? 0,
+      totalMinutesLateAm: r.late_mins_am ?? 0,
+      totalMinutesLatePm: r.late_mins_pm ?? 0,
+      smsCount: r.sms_count,
+      lastSmsStatus: (r.last_status as SmsStatus) || null,
+    };
+  });
 }
 
 async function loadPerSection(args: {
@@ -827,6 +964,30 @@ async function loadPerSection(args: {
   yearParams: unknown[];
   secExpr: string;
 }): Promise<PerSectionRow[]> {
+  // Compute the midpoint between AM session end and PM session start
+  // to split scans into AM vs PM.
+  const settings = settingsStore.get();
+  const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+  const regAmOut = settings.am_time_out ? parseHHMM(settings.am_time_out) : NaN;
+  let midMin = !Number.isNaN(regAmOut) ? regAmOut : 720;
+  if (Number.isNaN(regAmOut)) {
+    const regAmIn = settings.am_time_in ? parseHHMM(settings.am_time_in) : NaN;
+    const regPmOut = settings.pm_time_out ? parseHHMM(settings.pm_time_out) : NaN;
+    if (!Number.isNaN(regAmIn) && !Number.isNaN(regPmOut)) midMin = Math.round((regAmIn + regPmOut) / 2);
+  }
+  const midStr = `${String(Math.floor(midMin / 60)).padStart(2, '0')}:${String(midMin % 60).padStart(2, '0')}:00`;
+  // AM/PM late cutoffs
+  const regGrace = Math.max(0, Number(settings.bell_grace_minutes) || 0);
+  const regAmInMin = settings.am_time_in ? parseHHMM(settings.am_time_in) : NaN;
+  const regPmInMin = settings.pm_time_in ? parseHHMM(settings.pm_time_in) : NaN;
+  const regAmOutMin = settings.am_time_out ? parseHHMM(settings.am_time_out) : NaN;
+  const regPmOutMin = settings.pm_time_out ? parseHHMM(settings.pm_time_out) : NaN;
+  const toHms = (mins: number) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}:00`;
+  const amLateCut = Number.isNaN(regAmInMin) ? '' : toHms(regAmInMin + regGrace);
+  const pmLateCut = Number.isNaN(regPmInMin) ? '' : toHms(regPmInMin + regGrace);
+  const amEarlyCut = Number.isNaN(regAmOutMin) ? '' : toHms(regAmOutMin);
+  const pmEarlyCut = Number.isNaN(regPmOutMin) ? '' : toHms(regPmOutMin);
+
   const enrolledRows = await db.query<{ grade_section: string; c: number }[]>(
     `SELECT ${args.secExpr} grade_section, COUNT(*) c FROM students s ${args.yearJoin}
      WHERE s.is_active = 1 GROUP BY ${args.secExpr}`,
@@ -846,6 +1007,51 @@ async function loadPerSection(args: {
      WHERE a.scanned_at BETWEEN ? AND ? GROUP BY ${args.secExpr}`,
     [...args.yearParams, args.late, args.late, args.early, args.early, args.fromDt, args.toDt],
   );
+  // AM/PM flag counts
+  const amFlagRows = await db.query<{ grade_section: string; late_am: number; early_am: number }[]>(
+    `SELECT ${args.secExpr} grade_section,
+            COUNT(DISTINCT CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ? AND TIME(a.scanned_at) < ? THEN a.student_id END) late_am,
+            COUNT(DISTINCT CASE WHEN a.entry_type = 'OUT' AND ? <> '' AND TIME(a.scanned_at) < ? AND TIME(a.scanned_at) < ? THEN a.student_id END) early_am
+     FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
+     WHERE a.scanned_at BETWEEN ? AND ? GROUP BY ${args.secExpr}`,
+    [...args.yearParams, amLateCut, amLateCut, midStr, amEarlyCut, amEarlyCut, midStr, args.fromDt, args.toDt],
+  );
+  const pmFlagRows = await db.query<{ grade_section: string; late_pm: number; early_pm: number }[]>(
+    `SELECT ${args.secExpr} grade_section,
+            COUNT(DISTINCT CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ? AND TIME(a.scanned_at) >= ? THEN a.student_id END) late_pm,
+            COUNT(DISTINCT CASE WHEN a.entry_type = 'OUT' AND ? <> '' AND TIME(a.scanned_at) < ? AND TIME(a.scanned_at) >= ? THEN a.student_id END) early_pm
+     FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
+     WHERE a.scanned_at BETWEEN ? AND ? GROUP BY ${args.secExpr}`,
+    [...args.yearParams, pmLateCut, pmLateCut, midStr, pmEarlyCut, pmEarlyCut, midStr, args.fromDt, args.toDt],
+  );
+  // AM/PM present counts
+  const amPresentRows = await db.query<{ grade_section: string; present: number }[]>(
+    `SELECT ${args.secExpr} grade_section, COUNT(DISTINCT a.student_id) present
+     FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
+     WHERE a.scanned_at BETWEEN ? AND ? AND TIME(a.scanned_at) < ?
+     GROUP BY ${args.secExpr}`,
+    [...args.yearParams, args.fromDt, args.toDt, midStr],
+  );
+  const pmPresentRows = await db.query<{ grade_section: string; present: number }[]>(
+    `SELECT ${args.secExpr} grade_section, COUNT(DISTINCT a.student_id) present
+     FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
+     WHERE a.scanned_at BETWEEN ? AND ? AND TIME(a.scanned_at) >= ?
+     GROUP BY ${args.secExpr}`,
+    [...args.yearParams, args.fromDt, args.toDt, midStr],
+  );
+  // IN/OUT totals and AM/PM splits
+  const inoutRows = await db.query<{ grade_section: string; total_in: number; total_out: number; in_am: number; in_pm: number; out_am: number; out_pm: number }[]>(
+    `SELECT ${args.secExpr} grade_section,
+            COUNT(CASE WHEN a.entry_type = 'IN' THEN 1 END) total_in,
+            COUNT(CASE WHEN a.entry_type = 'OUT' THEN 1 END) total_out,
+            COUNT(CASE WHEN a.entry_type = 'IN' AND TIME(a.scanned_at) < ? THEN 1 END) in_am,
+            COUNT(CASE WHEN a.entry_type = 'IN' AND TIME(a.scanned_at) >= ? THEN 1 END) in_pm,
+            COUNT(CASE WHEN a.entry_type = 'OUT' AND TIME(a.scanned_at) < ? THEN 1 END) out_am,
+            COUNT(CASE WHEN a.entry_type = 'OUT' AND TIME(a.scanned_at) >= ? THEN 1 END) out_pm
+     FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
+     WHERE a.scanned_at BETWEEN ? AND ? GROUP BY ${args.secExpr}`,
+    [...args.yearParams, midStr, midStr, midStr, midStr, args.fromDt, args.toDt],
+  );
   const daySectionPresent = await db.query<{ grade_section: string; present: number }[]>(
     `SELECT ${args.secExpr} grade_section, COUNT(DISTINCT a.student_id) present
      FROM students s ${args.yearJoin} JOIN attendance_logs a ON a.student_id = s.id
@@ -859,6 +1065,11 @@ async function loadPerSection(args: {
   const enrolled = new Map(enrolledRows.map((r) => [r.grade_section, r.c]));
   const present = new Map(presentRows.map((r) => [r.grade_section, r.present]));
   const flags = new Map(flagRows.map((r) => [r.grade_section, r]));
+  const amFlags = new Map(amFlagRows.map((r) => [r.grade_section, r]));
+  const pmFlags = new Map(pmFlagRows.map((r) => [r.grade_section, r]));
+  const amPresent = new Map(amPresentRows.map((r) => [r.grade_section, r.present]));
+  const pmPresent = new Map(pmPresentRows.map((r) => [r.grade_section, r.present]));
+  const inout = new Map(inoutRows.map((r) => [r.grade_section, r]));
   const sections = new Set([...enrolled.keys(), ...present.keys()]);
   return [...sections]
     .sort((a, b) => gradeNum(a) - gradeNum(b) || a.localeCompare(b))
@@ -868,14 +1079,31 @@ async function loadPerSection(args: {
       const sumPres = sumBySection.get(gradeSection) ?? 0;
       const rate =
         enrolledCount > 0 && args.schoolDays > 0 ? (sumPres / (enrolledCount * args.schoolDays)) * 100 : null;
+      const presentAm = amPresent.get(gradeSection) ?? 0;
+      const presentPm = pmPresent.get(gradeSection) ?? 0;
+      const io = inout.get(gradeSection);
       return {
         gradeSection,
         enrolled: enrolledCount,
         present: presentCount,
         absent: Math.max(0, enrolledCount - presentCount),
         late: flags.get(gradeSection)?.late ?? 0,
+        lateAm: amFlags.get(gradeSection)?.late_am ?? 0,
+        latePm: pmFlags.get(gradeSection)?.late_pm ?? 0,
         early: flags.get(gradeSection)?.early ?? 0,
+        earlyAm: amFlags.get(gradeSection)?.early_am ?? 0,
+        earlyPm: pmFlags.get(gradeSection)?.early_pm ?? 0,
         attendanceRate: rate,
+        presentAm,
+        presentPm,
+        absentAm: Math.max(0, enrolledCount - presentAm),
+        absentPm: Math.max(0, enrolledCount - presentPm),
+        totalIn: io?.total_in ?? 0,
+        totalInAm: io?.in_am ?? 0,
+        totalInPm: io?.in_pm ?? 0,
+        totalOut: io?.total_out ?? 0,
+        totalOutAm: io?.out_am ?? 0,
+        totalOutPm: io?.out_pm ?? 0,
       };
     });
 }
@@ -898,32 +1126,84 @@ async function loadRegister(args: {
   const toDt = `${fmtDay(windowTo)} 23:59:59`;
 
   const studentRows = await db.query<{ student_id: number; student_no: string; full_name: string; grade_section: string }[]>(
-    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section
-     FROM students s ${args.yearJoin}
-     WHERE s.is_active = 1${args.sectionWhere}
-     ORDER BY ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name`,
+    `SELECT * FROM (
+      SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section
+      FROM students s ${args.yearJoin}
+      WHERE s.is_active = 1${args.sectionWhere}
+    ) sub GROUP BY sub.student_id
+    ORDER BY ${gradeOrd('sub.grade_section')}, sub.grade_section, sub.full_name`,
     [...args.yearParams, ...args.sectionParams],
   );
+  // Compute the midpoint between am_time_out and pm_time_in to split
+  // morning vs afternoon scans.  Falls back to '12:00:00' when not configured.
+  const settings = settingsStore.get();
+  const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+  const regAmOut = settings.am_time_out ? parseHHMM(settings.am_time_out) : NaN;
+  let midMin = !Number.isNaN(regAmOut) ? regAmOut : 720;
+  if (Number.isNaN(regAmOut)) {
+    const regAmIn = settings.am_time_in ? parseHHMM(settings.am_time_in) : NaN;
+    const regPmOut = settings.pm_time_out ? parseHHMM(settings.pm_time_out) : NaN;
+    if (!Number.isNaN(regAmIn) && !Number.isNaN(regPmOut)) midMin = Math.round((regAmIn + regPmOut) / 2);
+  }
+  const midH = String(Math.floor(midMin / 60)).padStart(2, '0');
+  const midM = String(midMin % 60).padStart(2, '0');
+  const midTime = `${midH}:${midM}:00`;
+  // Per-session late/early cutoffs for AM and PM.
+  const regGrace = Math.max(0, Number(settings.bell_grace_minutes) || 0);
+  const regAmInMin = settings.am_time_in ? parseHHMM(settings.am_time_in) : NaN;
+  const regPmInMin = settings.pm_time_in ? parseHHMM(settings.pm_time_in) : NaN;
+  const regAmOutMin = settings.am_time_out ? parseHHMM(settings.am_time_out) : NaN;
+  const regPmOutMin = settings.pm_time_out ? parseHHMM(settings.pm_time_out) : NaN;
+  const regToHms = (mins: number) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}:00`;
+  const amLateCutoff = Number.isNaN(regAmInMin) ? '' : regToHms(regAmInMin + regGrace);
+  const pmLateCutoff = Number.isNaN(regPmInMin) ? '' : regToHms(regPmInMin + regGrace);
+  const amEarlyCutoff = Number.isNaN(regAmOutMin) ? '' : regToHms(regAmOutMin);
+  const pmEarlyCutoff = Number.isNaN(regPmOutMin) ? '' : regToHms(regPmOutMin);
+
   const scanRows = await db.query<
-    { student_id: number; day: string; first_in: string | null; last_out: string | null }[]
+    { student_id: number; day: string; first_in: string | null; last_out: string | null;
+      morning_in: string | null; morning_out: string | null;
+      afternoon_in: string | null; afternoon_out: string | null;
+      am_late: number; pm_late: number; am_early: number; pm_early: number }[]
   >(
     `SELECT s.id student_id, DATE_FORMAT(a.scanned_at, '%Y-%m-%d') day,
             DATE_FORMAT(MIN(CASE WHEN a.entry_type = 'IN' THEN a.scanned_at END), '%H:%i') first_in,
-            DATE_FORMAT(MAX(CASE WHEN a.entry_type = 'OUT' THEN a.scanned_at END), '%H:%i') last_out
+            DATE_FORMAT(MAX(CASE WHEN a.entry_type = 'OUT' THEN a.scanned_at END), '%H:%i') last_out,
+            DATE_FORMAT(MIN(CASE WHEN a.entry_type = 'IN' AND TIME(a.scanned_at) < ? THEN a.scanned_at END), '%H:%i') morning_in,
+            DATE_FORMAT(MAX(CASE WHEN a.entry_type = 'OUT' AND TIME(a.scanned_at) < ? THEN a.scanned_at END), '%H:%i') morning_out,
+            DATE_FORMAT(MIN(CASE WHEN a.entry_type = 'IN' AND TIME(a.scanned_at) >= ? THEN a.scanned_at END), '%H:%i') afternoon_in,
+            DATE_FORMAT(MAX(CASE WHEN a.entry_type = 'OUT' AND TIME(a.scanned_at) >= ? THEN a.scanned_at END), '%H:%i') afternoon_out,
+            SUM(CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ? AND TIME(a.scanned_at) < ? THEN 1 ELSE 0 END) am_late,
+            SUM(CASE WHEN a.entry_type = 'IN' AND ? <> '' AND TIME(a.scanned_at) > ? AND TIME(a.scanned_at) >= ? THEN 1 ELSE 0 END) pm_late,
+            SUM(CASE WHEN a.entry_type = 'OUT' AND ? <> '' AND TIME(a.scanned_at) < ? AND TIME(a.scanned_at) < ? THEN 1 ELSE 0 END) am_early,
+            SUM(CASE WHEN a.entry_type = 'OUT' AND ? <> '' AND TIME(a.scanned_at) < ? AND TIME(a.scanned_at) >= ? THEN 1 ELSE 0 END) pm_early
      FROM students s ${args.yearJoin}
      LEFT JOIN attendance_logs a ON a.student_id = s.id AND a.scanned_at BETWEEN ? AND ?
-     -- a.id IS NOT NULL drops the LEFT-JOIN rows for students with zero scans
-     -- in the window - those would have day = NULL and crash the matrix
-     -- renderer (null.slice). Absent students still appear via the students list.
      WHERE s.is_active = 1 AND a.id IS NOT NULL${args.sectionWhere}
-     -- GROUP BY must use the SAME expression as the SELECT day column, else
-     -- MySQL rejects the query under sql_mode=only_full_group_by (errno 1055).
      GROUP BY s.id, DATE_FORMAT(a.scanned_at, '%Y-%m-%d')`,
-    [...args.yearParams, fromDt, toDt, ...args.sectionParams],
+    [midTime, midTime, midTime, midTime,
+     amLateCutoff, amLateCutoff, midTime,
+     pmLateCutoff, pmLateCutoff, midTime,
+     amEarlyCutoff, amEarlyCutoff, midTime,
+     pmEarlyCutoff, pmEarlyCutoff, midTime,
+     ...args.yearParams, fromDt, toDt, ...args.sectionParams],
   );
   const scanWithDay = scanRows.filter((r) => r.day !== null);
   const days = [...new Set(scanWithDay.map((r) => r.day as string))].sort();
-  const rows: RegisterRow[] = scanWithDay.map((r) => ({ studentId: r.student_id, day: r.day as string, firstIn: r.first_in, lastOut: r.last_out }));
+  const rows: RegisterRow[] = scanWithDay.map((r) => ({
+    studentId: r.student_id,
+    day: r.day as string,
+    firstIn: r.first_in,
+    lastOut: r.last_out,
+    morningIn: r.morning_in,
+    morningOut: r.morning_out,
+    afternoonIn: r.afternoon_in,
+    afternoonOut: r.afternoon_out,
+    amLate: (r.am_late ?? 0) > 0,
+    pmLate: (r.pm_late ?? 0) > 0,
+    amEarly: (r.am_early ?? 0) > 0,
+    pmEarly: (r.pm_early ?? 0) > 0,
+  }));
   return {
     windowFrom: fmtDay(windowFrom),
     windowTo: fmtDay(windowTo),
@@ -942,6 +1222,20 @@ async function loadRegister(args: {
 async function loadAbsentee(
   args: StudentScope & { fromDt: string; toDt: string },
 ): Promise<AbsenteeRow[]> {
+  // Compute the midpoint for AM/PM session split.
+  const settings = settingsStore.get();
+  const parseHM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+  const amOutMin = settings.am_time_out ? parseHM(settings.am_time_out) : NaN;
+  let midMin = !Number.isNaN(amOutMin) ? amOutMin : 720;
+  if (Number.isNaN(amOutMin)) {
+    const amInMin = settings.am_time_in ? parseHM(settings.am_time_in) : NaN;
+    const pmOutMin = settings.pm_time_out ? parseHM(settings.pm_time_out) : NaN;
+    if (!Number.isNaN(amInMin) && !Number.isNaN(pmOutMin)) midMin = Math.round((amInMin + pmOutMin) / 2);
+  }
+  const midHH = String(Math.floor(midMin / 60)).padStart(2, '0');
+  const midMM = String(midMin % 60).padStart(2, '0');
+  const midTime = `${midHH}:${midMM}`;
+
   const rows = await db.query<
     {
       student_id: number;
@@ -951,20 +1245,29 @@ async function loadAbsentee(
       parent_phone: string;
       day: string;
       sms_sent: number;
+      am_present: number;
+      pm_present: number;
     }[]
   >(
     `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone, d.day,
+            COALESCE(sc.am_present, 0) am_present, COALESCE(sc.pm_present, 0) pm_present,
             EXISTS(SELECT 1 FROM sms_logs sm JOIN attendance_logs al ON al.id = sm.attendance_id
                    WHERE al.student_id = s.id AND DATE(al.scanned_at) = d.day) sms_sent
      FROM students s ${args.yearJoin}
      JOIN (SELECT DISTINCT DATE(scanned_at) day FROM attendance_logs WHERE scanned_at BETWEEN ? AND ?) d
+     LEFT JOIN (
+       SELECT student_id, DATE(scanned_at) day,
+              MAX(CASE WHEN TIME(scanned_at) < ? THEN 1 ELSE 0 END) am_present,
+              MAX(CASE WHEN TIME(scanned_at) >= ? THEN 1 ELSE 0 END) pm_present
+       FROM attendance_logs
+       WHERE scanned_at BETWEEN ? AND ?
+       GROUP BY student_id, DATE(scanned_at)
+     ) sc ON sc.student_id = s.id AND sc.day = d.day
      WHERE s.is_active = 1${args.sectionWhere}
-       AND NOT EXISTS (SELECT 1 FROM attendance_logs a
-                       WHERE a.student_id = s.id AND a.scanned_at BETWEEN ? AND ? AND DATE(a.scanned_at) = d.day)
+       AND (COALESCE(sc.am_present, 0) = 0 OR COALESCE(sc.pm_present, 0) = 0)
      ORDER BY d.day DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name
      LIMIT ${DETAIL_ROW_CAP}`,
-    // Text order: yearJoin, derived-days BETWEEN, section filter, NOT-EXISTS BETWEEN.
-    [...args.yearParams, args.fromDt, args.toDt, ...args.sectionParams, args.fromDt, args.toDt],
+    [...args.yearParams, args.fromDt, args.toDt, midTime, midTime, args.fromDt, args.toDt, ...args.sectionParams],
   );
   return rows.map((r) => ({
     studentId: r.student_id,
@@ -974,12 +1277,27 @@ async function loadAbsentee(
     parentPhone: phoneOf(r.parent_phone, args.maskPhones),
     day: r.day,
     smsSent: r.sms_sent === 1,
+    session: r.am_present === 0 && r.pm_present === 0 ? 'FULL' : r.am_present === 0 ? 'AM' : 'PM',
   }));
 }
 
 async function loadAbsenteeTotals(
   args: StudentScope & { fromDt: string; toDt: string },
 ): Promise<AbsenteeTotalsRow[]> {
+  // Compute the midpoint for AM/PM session split.
+  const settings = settingsStore.get();
+  const parseHM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+  const amOutMin = settings.am_time_out ? parseHM(settings.am_time_out) : NaN;
+  let midMin = !Number.isNaN(amOutMin) ? amOutMin : 720;
+  if (Number.isNaN(amOutMin)) {
+    const amInMin = settings.am_time_in ? parseHM(settings.am_time_in) : NaN;
+    const pmOutMin = settings.pm_time_out ? parseHM(settings.pm_time_out) : NaN;
+    if (!Number.isNaN(amInMin) && !Number.isNaN(pmOutMin)) midMin = Math.round((amInMin + pmOutMin) / 2);
+  }
+  const midHH = String(Math.floor(midMin / 60)).padStart(2, '0');
+  const midMM = String(midMin % 60).padStart(2, '0');
+  const midTime = `${midHH}:${midMM}`;
+
   const rows = await db.query<
     {
       student_id: number;
@@ -988,19 +1306,30 @@ async function loadAbsenteeTotals(
       grade_section: string;
       parent_phone: string;
       days_absent: number;
+      days_absent_am: number;
+      days_absent_pm: number;
     }[]
   >(
-    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone, COUNT(*) days_absent
+    `SELECT s.id student_id, s.student_no, s.full_name, ${args.secExpr} grade_section, s.parent_phone,
+            COUNT(*) days_absent,
+            SUM(CASE WHEN COALESCE(sc.am_present, 0) = 0 THEN 1 ELSE 0 END) days_absent_am,
+            SUM(CASE WHEN COALESCE(sc.pm_present, 0) = 0 THEN 1 ELSE 0 END) days_absent_pm
      FROM students s ${args.yearJoin}
      JOIN (SELECT DISTINCT DATE(scanned_at) day FROM attendance_logs WHERE scanned_at BETWEEN ? AND ?) d
+     LEFT JOIN (
+       SELECT student_id, DATE(scanned_at) day,
+              MAX(CASE WHEN TIME(scanned_at) < ? THEN 1 ELSE 0 END) am_present,
+              MAX(CASE WHEN TIME(scanned_at) >= ? THEN 1 ELSE 0 END) pm_present
+       FROM attendance_logs
+       WHERE scanned_at BETWEEN ? AND ?
+       GROUP BY student_id, DATE(scanned_at)
+     ) sc ON sc.student_id = s.id AND sc.day = d.day
      WHERE s.is_active = 1${args.sectionWhere}
-       AND NOT EXISTS (SELECT 1 FROM attendance_logs a
-                       WHERE a.student_id = s.id AND a.scanned_at BETWEEN ? AND ? AND DATE(a.scanned_at) = d.day)
+       AND (COALESCE(sc.am_present, 0) = 0 OR COALESCE(sc.pm_present, 0) = 0)
      GROUP BY s.id, s.student_no, s.full_name, ${args.secExpr}, s.parent_phone
      ORDER BY days_absent DESC, ${gradeOrd(args.secExpr)}, ${args.secExpr}, s.full_name
      LIMIT ${DETAIL_ROW_CAP}`,
-    // Text order: yearJoin, derived-days BETWEEN, section filter, NOT-EXISTS BETWEEN.
-    [...args.yearParams, args.fromDt, args.toDt, ...args.sectionParams, args.fromDt, args.toDt],
+    [...args.yearParams, args.fromDt, args.toDt, midTime, midTime, args.fromDt, args.toDt, ...args.sectionParams],
   );
   return rows.map((r) => ({
     studentId: r.student_id,
@@ -1009,6 +1338,8 @@ async function loadAbsenteeTotals(
     gradeSection: r.grade_section,
     parentPhone: phoneOf(r.parent_phone, args.maskPhones),
     daysAbsent: r.days_absent,
+    daysAbsentAm: r.days_absent_am,
+    daysAbsentPm: r.days_absent_pm,
   }));
 }
 
@@ -1154,9 +1485,17 @@ async function loadStudentRecord(
   const byDay = new Map<string, StudentScanRow[]>();
   const presentDays = new Set<string>();
   const lateDays = new Set<string>();
+  const lateDaysAm = new Set<string>();
+  const lateDaysPm = new Set<string>();
   let totalIn = 0;
+  let totalInAm = 0;
+  let totalInPm = 0;
   let totalOut = 0;
+  let totalOutAm = 0;
+  let totalOutPm = 0;
   let totalMinutesLate = 0;
+  let totalMinutesLateAm = 0;
+  let totalMinutesLatePm = 0;
   for (const r of scans) {
     const row: StudentScanRow = {
       id: r.id,
@@ -1164,6 +1503,7 @@ async function loadStudentRecord(
       entryType: r.entry_type,
       flag: r.flag as StudentScanRow['flag'],
       source: r.source as StudentScanRow['source'],
+      ...(r.mins_late != null ? { minsLate: r.mins_late } : {}),
     };
     if (!byDay.has(r.day)) byDay.set(r.day, []);
     byDay.get(r.day)!.push(row);
@@ -1178,24 +1518,81 @@ async function loadStudentRecord(
     }
     presentDays.add(r.day);
   }
+  // We'll compute AM/PM totals after we know the midpoint (below).
 
   // One row per calendar day: present/late/absent plus the day's scans.
   const from = parseDay(args.fromDt.slice(0, 10))!;
   const to = parseDay(args.toDt.slice(0, 10))!;
+  // Midpoint for morning/afternoon split using AM/PM times
+  const studentSettings = settingsStore.get();
+  const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+  const stdAmOut = studentSettings.am_time_out ? parseHHMM(studentSettings.am_time_out) : NaN;
+  let midMin = !Number.isNaN(stdAmOut) ? stdAmOut : 720;
+  if (Number.isNaN(stdAmOut)) {
+    const stdAmIn = studentSettings.am_time_in ? parseHHMM(studentSettings.am_time_in) : NaN;
+    const stdPmOut = studentSettings.pm_time_out ? parseHHMM(studentSettings.pm_time_out) : NaN;
+    if (!Number.isNaN(stdAmIn) && !Number.isNaN(stdPmOut)) midMin = Math.round((stdAmIn + stdPmOut) / 2);
+  }
+  const midHH = String(Math.floor(midMin / 60)).padStart(2, '0');
+  const midMM = String(midMin % 60).padStart(2, '0');
+  const midStr = `${midHH}:${midMM}`;
+
+  // Compute AM/PM IN/OUT totals and late day splits using the midpoint.
+  for (const [day, dayScans] of byDay) {
+    for (const sc of dayScans) {
+      const isAm = sc.time < midStr;
+      if (sc.entryType === 'IN') {
+        if (isAm) totalInAm++; else totalInPm++;
+        if (sc.flag === 'LATE') {
+          if (isAm) lateDaysAm.add(day); else lateDaysPm.add(day);
+          if (sc.minsLate != null) {
+            if (isAm) totalMinutesLateAm += sc.minsLate; else totalMinutesLatePm += sc.minsLate;
+          }
+        }
+      } else {
+        if (isAm) totalOutAm++; else totalOutPm++;
+      }
+    }
+  }
+
   const days: StudentDayRow[] = [];
   for (let d = new Date(from); d.getTime() <= to.getTime(); d = addDays(d, 1)) {
     const key = fmtDay(d);
     const dayScans = byDay.get(key) ?? [];
+    const am = dayScans.filter((s) => s.time < midStr);
+    const pm = dayScans.filter((s) => s.time >= midStr);
     days.push({
       day: key,
       schoolDay: (args.presentByDay.get(key) ?? 0) > 0,
       present: dayScans.length > 0,
       late: dayScans.some((s) => s.flag === 'LATE'),
       early: dayScans.some((s) => s.flag === 'EARLY'),
+      amLate: am.some((s) => s.entryType === 'IN' && s.flag === 'LATE'),
+      pmLate: pm.some((s) => s.entryType === 'IN' && s.flag === 'LATE'),
+      amEarly: am.some((s) => s.entryType === 'OUT' && s.flag === 'EARLY'),
+      pmEarly: pm.some((s) => s.entryType === 'OUT' && s.flag === 'EARLY'),
+      amPresent: am.length > 0,
+      pmPresent: pm.length > 0,
       firstIn: dayScans.find((s) => s.entryType === 'IN')?.time ?? null,
       lastOut: [...dayScans].reverse().find((s) => s.entryType === 'OUT')?.time ?? null,
+      morningIn: am.find((s) => s.entryType === 'IN')?.time ?? null,
+      morningOut: [...am].reverse().find((s) => s.entryType === 'OUT')?.time ?? null,
+      afternoonIn: pm.find((s) => s.entryType === 'IN')?.time ?? null,
+      afternoonOut: [...pm].reverse().find((s) => s.entryType === 'OUT')?.time ?? null,
       scans: dayScans,
     });
+  }
+
+  // Compute AM/PM absent days (school days with zero AM / zero PM scans).
+  let daysAbsentAm = 0;
+  let daysAbsentPm = 0;
+  for (let d = new Date(from); d.getTime() <= to.getTime(); d = addDays(d, 1)) {
+    const key = fmtDay(d);
+    const isSchoolDay = (args.presentByDay.get(key) ?? 0) > 0;
+    if (!isSchoolDay) continue;
+    const dayScans = byDay.get(key) ?? [];
+    if (!dayScans.some((s) => s.time < midStr)) daysAbsentAm++;
+    if (!dayScans.some((s) => s.time >= midStr)) daysAbsentPm++;
   }
 
   return {
@@ -1207,11 +1604,21 @@ async function loadStudentRecord(
     summary: {
       daysPresent: presentDays.size,
       daysLate: lateDays.size,
+      daysLateAm: lateDaysAm.size,
+      daysLatePm: lateDaysPm.size,
       daysAbsent: Math.max(0, args.schoolDays - presentDays.size),
+      daysAbsentAm,
+      daysAbsentPm,
       attendanceRate: args.schoolDays > 0 ? (presentDays.size / args.schoolDays) * 100 : null,
       totalIn,
+      totalInAm,
+      totalInPm,
       totalOut,
+      totalOutAm,
+      totalOutPm,
       totalMinutesLate,
+      totalMinutesLateAm,
+      totalMinutesLatePm,
       smsCount: smsRow?.c ?? 0,
       lastSmsStatus: (smsRow?.last_status as SmsStatus) || null,
     },

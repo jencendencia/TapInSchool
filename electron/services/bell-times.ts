@@ -2,10 +2,11 @@
 //
 // Single source of truth for how the configurable school bell times turn a
 // scan into a quality flag:
-//   - IN  scan at/after bell_time_in + grace minutes  -> LATE
-//   - OUT scan before bell_time_out                   -> EARLY
-// An empty bell_time string disables that flag. Flags are computed on the fly
-// from the scan timestamp (no attendance_logs column), so changing bell times
+//   - AM IN  scan at/after am_time_in + grace minutes  -> LATE
+//   - AM OUT scan before am_time_out                   -> EARLY
+//   - PM IN  scan at/after pm_time_in + grace minutes  -> LATE
+//   - PM OUT scan before pm_time_out                   -> EARLY
+// Flags are computed on the fly from the scan timestamp, so changing bell times
 // retroactively re-labels history — which is the desired behavior for reports.
 import type { AttendanceFlag, EntryType, Settings } from '../../shared/types';
 
@@ -28,15 +29,24 @@ function minutesOfDay(d: Date): number {
   return d.getHours() * 60 + d.getMinutes();
 }
 
+/** The AM/PM boundary: any scan at or after am_time_out is PM, before it is AM. */
+export function midpointMinutes(settings: Settings): number {
+  const amOut = settings.am_time_out ? parseTime(settings.am_time_out) : NaN;
+  if (!Number.isNaN(amOut)) return amOut;
+  // Fallback: midpoint of am_time_in and pm_time_out
+  const amIn = settings.am_time_in ? parseTime(settings.am_time_in) : NaN;
+  const pmOut = settings.pm_time_out ? parseTime(settings.pm_time_out) : NaN;
+  if (!Number.isNaN(amIn) && !Number.isNaN(pmOut)) return Math.round((amIn + pmOut) / 2);
+  return 720;
+}
+
 /**
  * The late / early cutoffs as 'HH:MM:SS' strings (or '' when disabled).
- * These match the semantics of computeScanFlag() and can be passed directly to
- * SQL TIME(scanned_at) comparisons so list/overview queries label rows the
- * exact same way the live scan path does.
+ * Uses am_time_in + grace for late, pm_time_out for early.
  */
 export function flagCutoffs(settings: Settings): { late: string; early: string } {
-  const inMin = settings.bell_time_in ? parseTime(settings.bell_time_in) : NaN;
-  const outMin = settings.bell_time_out ? parseTime(settings.bell_time_out) : NaN;
+  const inMin = settings.am_time_in ? parseTime(settings.am_time_in) : NaN;
+  const outMin = settings.pm_time_out ? parseTime(settings.pm_time_out) : NaN;
   const grace = Math.max(0, Number(settings.bell_grace_minutes) || 0);
   return {
     late: Number.isNaN(inMin) ? '' : toHms(inMin + grace),
@@ -44,12 +54,23 @@ export function flagCutoffs(settings: Settings): { late: string; early: string }
   };
 }
 
-/** Computes the flag for a scan at the given local time. */
+/** Computes the flag for a scan at the given local time using AM/PM session bell times. */
 export function computeScanFlag(entryType: EntryType, d: Date, settings: Settings): AttendanceFlag {
-  const { late, early } = flagCutoffs(settings);
+  const grace = Math.max(0, Number(settings.bell_grace_minutes) || 0);
   const m = minutesOfDay(d);
-  if (entryType === 'IN' && late && m > parseTime(late)) return 'LATE';
-  if (entryType === 'OUT' && early && m < parseTime(early)) return 'EARLY';
+  const mid = midpointMinutes(settings);
+  const isAm = m < mid;
+  if (isAm) {
+    const amInMin = settings.am_time_in ? parseTime(settings.am_time_in) : NaN;
+    const amOutMin = settings.am_time_out ? parseTime(settings.am_time_out) : NaN;
+    if (entryType === 'IN' && !Number.isNaN(amInMin) && m > amInMin + grace) return 'LATE';
+    if (entryType === 'OUT' && !Number.isNaN(amOutMin) && m < amOutMin) return 'EARLY';
+  } else {
+    const pmInMin = settings.pm_time_in ? parseTime(settings.pm_time_in) : NaN;
+    const pmOutMin = settings.pm_time_out ? parseTime(settings.pm_time_out) : NaN;
+    if (entryType === 'IN' && !Number.isNaN(pmInMin) && m > pmInMin + grace) return 'LATE';
+    if (entryType === 'OUT' && !Number.isNaN(pmOutMin) && m < pmOutMin) return 'EARLY';
+  }
   return '';
 }
 

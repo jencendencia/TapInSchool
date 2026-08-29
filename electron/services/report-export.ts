@@ -162,10 +162,10 @@ export async function buildReportWorkbook(report: ReportData): Promise<Buffer> {
     let rowIdx = pairGrid(ws, 5, pairs);
     rowIdx += 2;
     const headerRowIdx = rowIdx;
-    headerRow(ws, headerRowIdx, ['Day', 'Scans', 'IN', 'OUT', 'Late', 'Early', 'Absent', 'Present'], [true]);
-    const dataRows = report.daily.map((d) => [d.day, d.scans, d.in, d.out, d.late, d.early, d.absent, d.present]);
+    headerRow(ws, headerRowIdx, ['Day', 'Scans', 'AM IN', 'AM OUT', 'PM IN', 'PM OUT', 'AM Late', 'AM Early', 'PM Late', 'PM Early', 'AM Absent', 'PM Absent', 'Present'], [true]);
+    const dataRows = report.daily.map((d) => [d.day, d.scans, d.morningIn, d.morningOut, d.afternoonIn, d.afternoonOut, d.amLate, d.amEarly, d.pmLate, d.pmEarly, d.amAbsent, d.pmAbsent, d.present]);
     const end = bodyRows(ws, headerRowIdx + 1, dataRows, [true]);
-    const totals = ['TOTAL', s.scans, s.in, s.out, s.late, s.early, s.absent, ''];
+    const totals = ['TOTAL', s.scans, '', '', '', '', '', '', '', '', '', '', ''];
     totals.forEach((v, i) => {
       const c = ws.getCell(end, i + 1);
       c.value = v;
@@ -187,29 +187,60 @@ export async function buildReportWorkbook(report: ReportData): Promise<Buffer> {
     bodyRows(ws, headerRowIdx + 1, rows, [true, true, false, false, false, false, false, false, false, false, false, true]);
     ws.views = [{ state: 'frozen', ySplit: headerRowIdx }];
   } else if (report.type === 'per-section') {
-    for (let c = 1; c <= 7; c++) ws.getColumn(c).width = [22, 10, 10, 10, 10, 10, 10][c - 1];
-    banner(ws, report, 'Per-Section Rollup', 7);
+    const colCount = 15;
+    const widths = [22, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10];
+    for (let c = 1; c <= colCount; c++) ws.getColumn(c).width = widths[c - 1];
+    banner(ws, report, 'Per-Section Rollup', colCount);
     const headerRowIdx = 5;
-    headerRow(ws, headerRowIdx, ['Section', 'Enrolled', 'Present', 'Absent', 'Late', 'Early', 'Rate'], [true]);
+    headerRow(ws, headerRowIdx, ['Section', 'Enrolled', 'Present AM', 'Present PM', 'Absent AM', 'Absent PM', 'Late AM', 'Late PM', 'Early AM', 'Early PM', 'Rate', 'IN AM', 'IN PM', 'OUT AM', 'OUT PM'], [true]);
     const rows = report.perSection.map((r) => [
-      r.gradeSection, r.enrolled, r.present, r.absent, r.late, r.early, pct(r.attendanceRate),
+      r.gradeSection, r.enrolled, r.presentAm, r.presentPm, r.absentAm, r.absentPm,
+      r.lateAm, r.latePm, r.earlyAm, r.earlyPm, pct(r.attendanceRate),
+      r.totalInAm, r.totalInPm, r.totalOutAm, r.totalOutPm,
     ]);
     bodyRows(ws, headerRowIdx + 1, rows, [true]);
     ws.views = [{ state: 'frozen', ySplit: headerRowIdx }];
   } else if (report.type === 'register') {
     const days = report.register.days;
-    const colCount = 2 + days.length;
+    // 4 columns per day: AM IN, AM OUT, PM IN, PM OUT
+    const colCount = 2 + days.length * 4;
     ws.getColumn(1).width = 24;
     ws.getColumn(2).width = 16;
-    days.forEach((_, i) => (ws.getColumn(3 + i).width = 11));
+    days.forEach((_, i) => {
+      ws.getColumn(3 + i * 4).width = 8;   // AM IN
+      ws.getColumn(4 + i * 4).width = 8;   // AM OUT
+      ws.getColumn(5 + i * 4).width = 8;   // PM IN
+      ws.getColumn(6 + i * 4).width = 8;   // PM OUT
+    });
     banner(ws, report, `Daily Register${report.register.capped ? ' (last 35 days)' : ''}`, colCount);
     const headerRowIdx = 5;
-    const headers = ['Student', 'Section', ...days.map((d) => (d || '—').slice(5).replace('-', '/'))];
-    const leftAligned = [true, true, ...days.map(() => false)];
-    headerRow(ws, headerRowIdx, headers, leftAligned);
+    // Row 1: Student | Section | day labels (colspan 4)
+    const headers1 = ['Student', 'Section'];
+    for (const d of days) {
+      headers1.push((d || '—').slice(5).replace('-', '/'), '', '', '');
+    }
+    headerRow(ws, headerRowIdx, headers1, [true, true, ...days.map(() => false).flatMap(() => [false, false, false, false])]);
+    // Merge day label cells
+    for (let i = 0; i < days.length; i++) {
+      ws.mergeCells(headerRowIdx, 3 + i * 4, headerRowIdx, 6 + i * 4);
+    }
+    // Row 2: AM IN | AM OUT | PM IN | PM OUT sub-headers
+    const subRow = headerRowIdx + 1;
+    ws.getCell(subRow, 1).value = '';
+    ws.getCell(subRow, 1).border = border();
+    ws.getCell(subRow, 2).value = '';
+    ws.getCell(subRow, 2).border = border();
+    for (let i = 0; i < days.length; i++) {
+      for (let j = 0; j < 4; j++) {
+        const c = ws.getCell(subRow, 3 + i * 4 + j);
+        c.value = j < 2 ? `AM ${j === 0 ? 'IN' : 'OUT'}` : `PM ${j === 2 ? 'IN' : 'OUT'}`;
+        c.font = { ...FONT, bold: true, size: 8, color: { argb: j < 2 ? 'FFD97706' : 'FF6366F1' } };
+        c.alignment = { horizontal: 'center' };
+        c.border = border();
+      }
+    }
     const byKey = new Map(report.register.rows.map((r) => [`${r.studentId}:${r.day}`, r] as const));
-    const lateCutoff = report.cutoffs.late;
-    let r = headerRowIdx + 1;
+    let r = subRow + 1;
     for (const st of report.register.students) {
       ws.getRow(r).height = 18;
       const nameC = ws.getCell(r, 1);
@@ -223,42 +254,50 @@ export async function buildReportWorkbook(report: ReportData): Promise<Buffer> {
       secC.border = border();
       days.forEach((d, i) => {
         const row = byKey.get(`${st.studentId}:${d}`);
-        const c = ws.getCell(r, 3 + i);
-        c.border = border();
-        if (!row) {
-          c.value = 'ABSENT';
-          c.font = { ...FONT, bold: true, color: { argb: 'FFB91C1C' } };
-          c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: ABS_BG } };
-        } else {
-          const late = lateCutoff && row.firstIn ? row.firstIn > lateCutoff : false;
-          c.value = `${row.firstIn ?? '—'}/${row.lastOut ?? '—'}${late ? ' *' : ''}`;
-          c.font = { ...FONT, bold: late };
-          if (late) c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: LATE_BG } };
-        }
-        c.alignment = { horizontal: 'center' };
+        const vals = row
+          ? [row.morningIn ?? '—', row.morningOut ?? '—', row.afternoonIn ?? '—', row.afternoonOut ?? '—']
+          : ['ABSENT', 'ABSENT', 'ABSENT', 'ABSENT'];
+        vals.forEach((v, j) => {
+          const c = ws.getCell(r, 3 + i * 4 + j);
+          c.border = border();
+          c.value = v;
+          c.alignment = { horizontal: 'center' };
+          if (!row) {
+            c.font = { ...FONT, bold: true, color: { argb: 'FFB91C1C' } };
+            c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: ABS_BG } };
+          } else if ((j === 0 && row.amLate) || (j === 2 && row.pmLate)) {
+            c.font = { ...FONT, bold: true };
+            c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: LATE_BG } };
+          } else if ((j === 1 && row.amEarly) || (j === 3 && row.pmEarly)) {
+            c.font = { ...FONT, bold: true };
+            c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF38BDF8' } };
+          } else {
+            c.font = { ...FONT };
+          }
+        });
       });
       r++;
     }
-    ws.views = [{ state: 'frozen', xSplit: 2, ySplit: headerRowIdx }];
+    ws.views = [{ state: 'frozen', xSplit: 2, ySplit: headerRowIdx + 1 }];
   } else if (report.type === 'absentee') {
-    for (let c = 1; c <= 5; c++) ws.getColumn(c).width = [12, 24, 16, 14, 9][c - 1];
-    banner(ws, report, 'Absentee List', 5);
+    for (let c = 1; c <= 6; c++) ws.getColumn(c).width = [12, 24, 12, 12, 14, 9][c - 1];
+    banner(ws, report, 'Absentee List', 6);
     let rowIdx = 5;
     const tHead = rowIdx;
-    headerRow(ws, tHead, ['Student', 'Section', 'Days absent', 'Phone'], [true, true, false, true]);
+    headerRow(ws, tHead, ['Student', 'Section', 'Absent AM', 'Absent PM', 'Phone'], [true, true, false, false, true]);
     rowIdx = bodyRows(
       ws,
       tHead + 1,
-      report.absenteeTotals.map((a) => [a.fullName, a.gradeSection, a.daysAbsent, a.parentPhone]),
-      [true, true, false, true],
+      report.absenteeTotals.map((a) => [a.fullName, a.gradeSection, a.daysAbsentAm, a.daysAbsentPm, a.parentPhone]),
+      [true, true, false, false, true],
     );
     rowIdx += 2;
     const dHead = rowIdx;
-    headerRow(ws, dHead, ['Day', 'Student', 'Section', 'Phone', 'SMS sent'], [true, true, true, true]);
+    headerRow(ws, dHead, ['Day', 'Student', 'Section', 'Session', 'Phone', 'SMS sent'], [true, true, true, true]);
     bodyRows(
       ws,
       dHead + 1,
-      report.absentee.map((a) => [a.day, a.fullName, a.gradeSection, a.parentPhone, a.smsSent ? 'Yes' : 'No']),
+      report.absentee.map((a) => [a.day, a.fullName, a.gradeSection, a.session === 'FULL' ? 'Full day' : a.session === 'AM' ? 'AM' : 'PM', a.parentPhone, a.smsSent ? 'Yes' : 'No']),
       [true, true, true, true],
     );
     ws.views = [{ state: 'frozen', ySplit: tHead }];
@@ -321,13 +360,16 @@ export async function buildReportWorkbook(report: ReportData): Promise<Buffer> {
       rowIdx += 2;
       const dHead = rowIdx;
       const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-      headerRow(ws, dHead, ['Day', 'Weekday', 'Status', 'IN', 'OUT', 'Late', 'Early', 'Scans'], [true]);
+      headerRow(ws, dHead, ['Day', 'Weekday', 'Status', 'AM IN', 'AM OUT', 'PM IN', 'PM OUT', 'Late', 'Early', 'Scans'], [true]);
       rowIdx = bodyRows(
         ws,
         dHead + 1,
         rec.days.map((d) => {
           const status = !d.present ? (d.schoolDay ? 'ABSENT' : '—') : d.late ? 'LATE' : 'PRESENT';
-          return [d.day, dow[new Date(d.day + 'T00:00:00').getDay()], status, d.firstIn ?? '—', d.lastOut ?? '—', d.late ? 'YES' : '', d.early ? 'YES' : '', d.scans.length];
+          return [d.day, dow[new Date(d.day + 'T00:00:00').getDay()], status,
+            d.morningIn ?? '—', d.morningOut ?? '—',
+            d.afternoonIn ?? '—', d.afternoonOut ?? '—',
+            d.late ? 'YES' : '', d.early ? 'YES' : '', d.scans.length];
         }),
         [true],
       );

@@ -8,9 +8,10 @@
 //
 // The mode deliberately RESETS to 'auto' on every app start: a forced mode
 // left over from yesterday must not silently mis-record today's scans.
-import type { EntryType, ScanMode } from '../../shared/types';
+import type { EntryType, ScanMode, SessionMode } from '../../shared/types';
 
 let current: ScanMode = 'auto';
+let session: SessionMode = 'auto';
 
 export function getScanMode(): ScanMode {
   return current;
@@ -19,6 +20,15 @@ export function getScanMode(): ScanMode {
 export function setScanMode(mode: ScanMode): ScanMode {
   current = mode === 'in' || mode === 'out' ? mode : 'auto';
   return current;
+}
+
+export function getSessionMode(): SessionMode {
+  return session;
+}
+
+export function setSessionMode(mode: SessionMode): SessionMode {
+  session = mode === 'am' || mode === 'pm' ? mode : 'auto';
+  return session;
 }
 
 /** The forced entry type for a mode — undefined when 'auto' (use the toggle). */

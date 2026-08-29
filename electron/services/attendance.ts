@@ -12,9 +12,9 @@ import { db } from '../db/connection';
 import { settingsStore } from '../db/settings';
 import { withRetry } from './db-retry';
 import { maskPhone } from './qr';
-import { computeScanFlag, flagSelectParams, flagSelectSql, parseTime } from './bell-times';
+import { computeScanFlag, flagSelectParams, flagSelectSql, midpointMinutes } from './bell-times';
 import { buildSmsMessage, resolveTemplate } from '../sms/message-builder';
-import { forcedEntryType, getScanMode } from './scan-mode';
+import { forcedEntryType, getScanMode, getSessionMode } from './scan-mode';
 import {
   enqueueScanEvent,
   enqueueVisitorScanEvent,
@@ -39,6 +39,7 @@ import type {
   GuardianDayReport,
   ScanResult,
   ScanSource,
+  SessionMode,
   Student,
   Visitor,
 } from '../../shared/types';
@@ -51,14 +52,8 @@ export interface ScanEventBus {
 // Context-aware scan messages: the toggle engine supports 4 scans per day
 // (IN/OUT morning, IN/OUT afternoon). The message reflects which session
 // the student is in based on the bell times.
-function scanMessage(entryType: EntryType, settings: { bell_time_in: string; bell_time_out: string }): string {
-  const inMin = settings.bell_time_in ? parseTime(settings.bell_time_in) : NaN;
-  const outMin = settings.bell_time_out ? parseTime(settings.bell_time_out) : NaN;
-  // Midpoint between bell_time_in and bell_time_out = the lunch break.
-  // If bell times are not set, fall back to noon (12:00 = 720 min).
-  const mid = !Number.isNaN(inMin) && !Number.isNaN(outMin)
-    ? Math.round((inMin + outMin) / 2)
-    : 720;
+function scanMessage(entryType: EntryType, settings: { am_time_in: string; am_time_out: string; pm_time_in: string; pm_time_out: string }): string {
+  const mid = midpointMinutes(settings as any);
   const now = new Date().getHours() * 60 + new Date().getMinutes();
   const isAfternoon = now >= mid;
   if (entryType === 'IN') {
@@ -67,17 +62,20 @@ function scanMessage(entryType: EntryType, settings: { bell_time_in: string; bel
   return isAfternoon ? 'Checked OUT — see you tomorrow!' : 'Checked OUT — enjoy your break!';
 }
 
-// Serializes ALL scan processing (scanner, webcam, manual) so debounce/toggle
-// checks and inserts can never interleave for the same student.
-let scanChain: Promise<unknown> = Promise.resolve();
-
-// Set once the online path has committed the attendance insert. The offline
-// fallback must NOT run after a commit — it would duplicate the log + SMS.
-let onlineScanCommitted = false;
+// Serializes scans for the same payload while allowing different students to
+// proceed concurrently. This keeps a slow student lookup from blocking the
+// whole gate without allowing duplicate same-student toggles to interleave.
+const scanChains = new Map<string, Promise<unknown>>();
 
 export function enqueueScan(payload: string, source: ScanSource, bus: ScanEventBus): Promise<ScanResult> {
-  const run = scanChain.then(() => processScan(payload, source, bus));
-  scanChain = run.catch(() => undefined);
+  const key = (payload || '').trim();
+  const previous = scanChains.get(key) ?? Promise.resolve();
+  const run = previous.then(() => processScan(payload, source, bus));
+  const settled = run.catch(() => undefined);
+  scanChains.set(key, settled);
+  void settled.then(() => {
+    if (scanChains.get(key) === settled) scanChains.delete(key);
+  });
   return run;
 }
 
@@ -90,21 +88,24 @@ export async function processScan(payload: string, source: ScanSource, bus: Scan
   // Kiosk gate-direction mode: 'auto' → undefined (toggle engine decides);
   // 'in'/'out' → every scan is forced to that entry type.
   const forcedType = forcedEntryType(getScanMode());
+  // Capture the session with the scan request. Manual PIN/search can take
+  // long enough for the UI mode to change before the DB insert completes.
+  const session = getSessionMode();
 
-  onlineScanCommitted = false;
+  const scanState = { onlineCommitted: false };
   if (!db.isOnline()) {
-    return processScanOffline(trimmed, source, bus, forcedType);
+    return processScanOffline(trimmed, source, bus, forcedType, session);
   }
   try {
-    return await processScanOnline(trimmed, source, bus, forcedType);
+    return await processScanOnline(trimmed, source, bus, forcedType, session, scanState);
   } catch (err) {
     // A query failed while nominally online (connection dropped mid-scan) —
     // fall back to the local snapshot so the scan is still recorded. Only do
     // this when nothing has been committed yet (avoid duplicating a log whose
     // attendance insert already succeeded).
-    if (isConnectionError(err) && !onlineScanCommitted) {
+    if (isConnectionError(err) && !scanState.onlineCommitted) {
       console.error('[tapin] online scan failed, using offline queue:', err);
-      return processScanOffline(trimmed, source, bus, forcedType);
+      return processScanOffline(trimmed, source, bus, forcedType, session);
     }
     throw err;
   }
@@ -168,7 +169,9 @@ async function processScanOnline(
   trimmed: string,
   source: ScanSource,
   bus: ScanEventBus,
-  forcedType?: EntryType,
+  forcedType: EntryType | undefined,
+  session: SessionMode = 'auto',
+  scanState: { onlineCommitted: boolean },
 ): Promise<ScanResult> {
   const settings = settingsStore.get();
 
@@ -238,12 +241,12 @@ async function processScanOnline(
   }
 
   // --- Debounce (FR-5): ignore the same student within debounce_seconds ----
-  const recent = await db.query<{ id: number; scanned_at: Date }[]>(
-    'SELECT id, scanned_at FROM attendance_logs WHERE student_id = ? AND scanned_at >= CURDATE() ORDER BY scanned_at DESC LIMIT 1',
+  const lastToday = await db.query<{ id: number; scanned_at: Date; entry_type: EntryType }[]>(
+    'SELECT id, scanned_at, entry_type FROM attendance_logs WHERE student_id = ? AND scanned_at >= CURDATE() ORDER BY scanned_at DESC LIMIT 1',
     [student.id],
   );
-  if (recent[0]) {
-    const elapsedMs = Date.now() - new Date(recent[0].scanned_at).getTime();
+  if (lastToday[0]) {
+    const elapsedMs = Date.now() - new Date(lastToday[0].scanned_at).getTime();
     if (elapsedMs < settings.debounce_seconds * 1000) {
       const wait = Math.max(1, Math.ceil((settings.debounce_seconds * 1000 - elapsedMs) / 1000));
       const result: ScanResult = {
@@ -260,10 +263,6 @@ async function processScanOnline(
   // 'auto': the last scan today decides (IN → next OUT, else IN). A forced
   // gate mode (kiosk toggle) overrides the toggle so gate staff can record a
   // correct check-OUT for a student who forgot their morning swipe.
-  const lastToday = await db.query<{ entry_type: 'IN' | 'OUT' }[]>(
-    'SELECT entry_type FROM attendance_logs WHERE student_id = ? AND scanned_at >= CURDATE() ORDER BY scanned_at DESC LIMIT 1',
-    [student.id],
-  );
   const entryType = forcedType ?? (lastToday[0]?.entry_type === 'IN' ? 'OUT' : 'IN');
 
   // --- Commit log + SMS (FR-1, FR-3) in ONE transaction (C1) ----------------
@@ -283,13 +282,39 @@ async function processScanOnline(
         // keeps the kiosk's own time — it has no server to ask (see offline.ts).
         const tsRows = (await conn.query('SELECT NOW(3) AS ts'))[0] as Array<{ ts: string }>;
         const serverTs = String(tsRows[0]?.ts ?? '');
-        const scannedAt = serverTs ? new Date(serverTs) : new Date();
+        let scannedAt = serverTs ? new Date(serverTs) : new Date();
+
+        // Session mode override: when the gate staff manually selects AM or PM,
+        // adjust the scan timestamp so it falls within the correct session.
+        if (session === 'am' || session === 'pm') {
+          const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+          const amOut = settings.am_time_out ? parseHHMM(settings.am_time_out) : 720;
+          const pmIn = settings.pm_time_in ? parseHHMM(settings.pm_time_in) : 780;
+          if (session === 'am') {
+            // Place scan in the middle of the AM session (between am_time_in and am_time_out)
+            const amIn = settings.am_time_in ? parseHHMM(settings.am_time_in) : 420;
+            const targetMin = Math.round((amIn + amOut) / 2);
+            scannedAt = new Date(scannedAt);
+            scannedAt.setHours(Math.floor(targetMin / 60), targetMin % 60, 0, 0);
+          } else {
+            // Place scan in the middle of the PM session (between pm_time_in and pm_time_out)
+            const pmOut = settings.pm_time_out ? parseHHMM(settings.pm_time_out) : 960;
+            const targetMin = Math.round((pmIn + pmOut) / 2);
+            scannedAt = new Date(scannedAt);
+            scannedAt.setHours(Math.floor(targetMin / 60), targetMin % 60, 0, 0);
+          }
+        }
+
         const flag = computeScanFlag(entryType, scannedAt, settings);
+        // Format scannedAt as MySQL DATETIME(3) string
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const fmtTs = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+        const scanTs = session === 'am' || session === 'pm' ? fmtTs(scannedAt) : serverTs;
         // Type the INSERT result so insertId is available (mysql2's default
         // QueryResult union doesn't expose it).
         const [insertRes] = await conn.execute<ResultSetHeader>(
           'INSERT INTO attendance_logs (student_id, entry_type, source, scanned_at) VALUES (?, ?, ?, ?)',
-          [student.id, entryType, source, serverTs || scannedAt],
+          [student.id, entryType, source, scanTs],
         );
         const log: AttendanceLog = {
           id: insertRes.insertId,
@@ -324,7 +349,7 @@ async function processScanOnline(
     }),
   );
   if (!committed) throw new Error('Database is offline');
-  onlineScanCommitted = true;
+  scanState.onlineCommitted = true;
   const { log, smsQueued } = committed;
 
   const result: ScanResult = {
@@ -343,8 +368,7 @@ async function processScanOnline(
   recordScan(cached.id, entryType, Date.now());
 
   bus.onScanResult(result);
-  const activityItems = await getRecentActivity(5);
-  bus.onActivity(activityItems);
+  void getRecentActivity(5).then((activityItems) => bus.onActivity(activityItems)).catch(() => undefined);
   return result;
 }
 
@@ -416,6 +440,7 @@ async function processScanOffline(
   source: ScanSource,
   bus: ScanEventBus,
   forcedType?: EntryType,
+  session: SessionMode = 'auto',
 ): Promise<ScanResult> {
   const settings = settingsStore.get();
   // Visitor QR (VP-…) offline? Check the cached visitors.
@@ -539,7 +564,26 @@ async function processScanOffline(
   // --- Toggle engine (FR-4) from the local snapshot --------------------------
   // Same forced-mode override as the online path.
   const entryType = forcedType ?? (lastToday?.type === 'IN' ? 'OUT' : 'IN');
-  const scannedAtDate = new Date(now);
+  let scannedAtDate = new Date(now);
+
+  // Session mode override for offline path.
+  if (session === 'am' || session === 'pm') {
+    const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+    const amOut = settings.am_time_out ? parseHHMM(settings.am_time_out) : 720;
+    const pmIn = settings.pm_time_in ? parseHHMM(settings.pm_time_in) : 780;
+    if (session === 'am') {
+      const amIn = settings.am_time_in ? parseHHMM(settings.am_time_in) : 420;
+      const targetMin = Math.round((amIn + amOut) / 2);
+      scannedAtDate = new Date(scannedAtDate);
+      scannedAtDate.setHours(Math.floor(targetMin / 60), targetMin % 60, 0, 0);
+    } else {
+      const pmOut = settings.pm_time_out ? parseHHMM(settings.pm_time_out) : 960;
+      const targetMin = Math.round((pmIn + pmOut) / 2);
+      scannedAtDate = new Date(scannedAtDate);
+      scannedAtDate.setHours(Math.floor(targetMin / 60), targetMin % 60, 0, 0);
+    }
+  }
+
   const flag = computeScanFlag(entryType, scannedAtDate, settings);
   const scannedAt = toLocalMysqlTime(scannedAtDate);
 

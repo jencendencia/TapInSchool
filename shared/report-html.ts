@@ -26,30 +26,30 @@ function stdTable(headers: string[], rows: string[][], alignFirstLeft = true): s
   return `<table class="${alignFirstLeft ? 'left1' : ''}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
-/** Renders the SF2-style register matrix (rows = students, cols = days). */
+/** Renders the SF2-style register matrix (rows = students, cols = days, 4 sub-cols: AM IN/OUT, PM IN/OUT). */
 function registerTable(report: ReportData): string {
-  const { register, cutoffs } = report;
+  const { register } = report;
   if (!register.days.length) {
     return '<table><tbody><tr><td class="empty">No scans in the selected window.</td></tr></tbody></table>';
   }
-  const lateCutoff = cutoffs.late;
   const dayLabel = (day: string) => (day || '—').slice(5).replace('-', '/'); // MM/DD
-  const cellFor = (row: RegisterRow | undefined): string => {
-    if (!row) return '<td class="abs">A</td>';
-    const late = lateCutoff && row.firstIn ? row.firstIn > lateCutoff : false;
-    const inTxt = row.firstIn ? (late ? `${esc(row.firstIn)}*` : esc(row.firstIn)) : '—';
-    const outTxt = row.lastOut ? esc(row.lastOut) : '—';
-    return `<td class="${late ? 'late' : ''}">${inTxt}/${outTxt}</td>`;
+  const absTd = '<td class="abs">A</td>';
+  const timeTd = (t: string | null, isLate = false) => `<td class="${isLate ? 'late' : ''}">${t ? esc(t) : '—'}</td>`;
+  const cellsFor = (row: RegisterRow | undefined): string => {
+    if (!row) return absTd + absTd + absTd + absTd;
+    return timeTd(row.morningIn, row.amLate) + timeTd(row.morningOut, row.amEarly) + timeTd(row.afternoonIn, row.pmLate) + timeTd(row.afternoonOut, row.pmEarly);
   };
   const byKey = new Map(register.rows.map((r) => [`${r.studentId}:${r.day}`, r] as const));
+  const subHdr = '<th class="sub am">AM IN</th><th class="sub am">AM OUT</th><th class="sub pm">PM IN</th><th class="sub pm">PM OUT</th>';
+  const head1 = `<th class="name" rowspan="2">Student</th>${register.days.map((d) => `<th class="day" colspan="4">${dayLabel(d)}</th>`).join('')}`;
+  const head2 = register.days.map(() => subHdr).join('');
   const body = register.students
     .map((s) => {
-      const cells = register.days.map((d) => cellFor(byKey.get(`${s.studentId}:${d}`))).join('');
+      const cells = register.days.map((d) => cellsFor(byKey.get(`${s.studentId}:${d}`))).join('');
       return `<tr><td class="name">${esc(s.fullName)}<br><span class="sub">${esc(s.studentNo)} · ${esc(s.gradeSection)}</span></td>${cells}</tr>`;
     })
     .join('');
-  const head = `<th class="name">Student</th>${register.days.map((d) => `<th class="day">${dayLabel(d)}</th>`).join('')}`;
-  return `<table class="register left1"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  return `<table class="register left1"><thead><tr>${head1}</tr><tr>${head2}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
 const TYPE_TITLES: Record<ReportData['type'], string> = {
@@ -176,13 +176,13 @@ export function buildReportHtml(report: ReportData): string {
   if (report.type === 'summary') {
     const rows = report.daily.map(
       (d) =>
-        `<tr><td>${esc(d.day)}</td><td>${d.scans}</td><td>${d.in}</td><td>${d.out}</td><td>${d.late}</td><td>${d.early}</td><td>${d.absent}</td><td>${d.present}</td></tr>`,
+        `<tr><td>${esc(d.day)}</td><td>${d.scans}</td><td>${d.morningIn}</td><td>${d.morningOut}</td><td>${d.afternoonIn}</td><td>${d.afternoonOut}</td><td>${d.amLate}</td><td>${d.amEarly}</td><td>${d.pmLate}</td><td>${d.pmEarly}</td><td>${d.amAbsent}</td><td>${d.pmAbsent}</td><td>${d.present}</td></tr>`,
     );
     const totals =
       report.daily.length > 0
-        ? `<tr class="total"><td>TOTAL</td><td>${s.scans}</td><td>${s.in}</td><td>${s.out}</td><td>${s.late}</td><td>${s.early}</td><td>${s.absent}</td><td></td></tr>`
+        ? `<tr class="total"><td>TOTAL</td><td>${s.scans}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`
         : '';
-    const empty = report.daily.length === 0 ? '<tr><td colspan="8" class="empty">No data in the selected range.</td></tr>' : '';
+    const empty = report.daily.length === 0 ? '<tr><td colspan="14" class="empty">No data in the selected range.</td></tr>' : '';
     body = `
   <table class="summary">
     <tr><td>Total scans</td><td>${s.scans}</td><td>Checked IN</td><td>${s.in}</td><td>Checked OUT</td><td>${s.out}</td></tr>
@@ -195,7 +195,7 @@ export function buildReportHtml(report: ReportData): string {
     <tr><td>At-risk students (&lt;80%)</td><td>${s.atRiskCount}</td><td colspan="4"></td></tr>
   </table>
   <table class="left1">
-    <thead><tr><th>Day</th><th>Scans</th><th>IN</th><th>OUT</th><th>Late</th><th>Early</th><th>Absent</th><th>Present</th></tr></thead>
+    <thead><tr><th>Day</th><th>Scans</th><th>AM IN</th><th>AM OUT</th><th>PM IN</th><th>PM OUT</th><th>AM Late</th><th>AM Early</th><th>PM Late</th><th>PM Early</th><th>AM Absent</th><th>PM Absent</th><th>Present</th></tr></thead>
     <tbody>${rows}${totals}${empty}</tbody>
   </table>`;
   } else if (report.type === 'per-student') {
@@ -203,31 +203,44 @@ export function buildReportHtml(report: ReportData): string {
       esc(r.fullName),
       esc(r.gradeSection),
       String(r.daysPresent),
-      String(r.daysLate),
-      String(r.daysAbsent),
+      String(r.daysLateAm),
+      String(r.daysLatePm),
+      String(r.daysAbsentAm),
+      String(r.daysAbsentPm),
       pct(r.attendanceRate),
-      String(r.totalIn),
-      String(r.totalOut),
-      String(r.totalMinutesLate),
+      String(r.totalInAm),
+      String(r.totalInPm),
+      String(r.totalOutAm),
+      String(r.totalOutPm),
+      String(r.totalMinutesLateAm),
+      String(r.totalMinutesLatePm),
       String(r.smsCount),
       r.lastSmsStatus ?? '—',
       esc(r.parentPhone),
     ]);
     body = stdTable(
-      ['Student', 'Section', 'Present', 'Late', 'Absent', 'Rate', 'IN', 'OUT', 'Min late', 'SMS', 'Last SMS', 'Phone'],
+      ['Student', 'Section', 'Present', 'Late AM', 'Late PM', 'Absent AM', 'Absent PM', 'Rate', 'IN AM', 'IN PM', 'OUT AM', 'OUT PM', 'Min late AM', 'Min late PM', 'SMS', 'Last SMS', 'Phone'],
       rows,
     );
   } else if (report.type === 'per-section') {
     const rows = report.perSection.map((r) => [
       esc(r.gradeSection),
       String(r.enrolled),
-      String(r.present),
-      String(r.absent),
-      String(r.late),
-      String(r.early),
+      String(r.presentAm),
+      String(r.presentPm),
+      String(r.absentAm),
+      String(r.absentPm),
+      String(r.lateAm),
+      String(r.latePm),
+      String(r.earlyAm),
+      String(r.earlyPm),
       pct(r.attendanceRate),
+      String(r.totalInAm),
+      String(r.totalInPm),
+      String(r.totalOutAm),
+      String(r.totalOutPm),
     ]);
-    body = stdTable(['Section', 'Enrolled', 'Present', 'Absent', 'Late', 'Early', 'Rate'], rows);
+    body = stdTable(['Section', 'Enrolled', 'Present AM', 'Present PM', 'Absent AM', 'Absent PM', 'Late AM', 'Late PM', 'Early AM', 'Early PM', 'Rate', 'IN AM', 'IN PM', 'OUT AM', 'OUT PM'], rows);
   } else if (report.type === 'register') {
     body = registerTable(report);
     body += `<p class="legend">* = late arrival · A = absent (no scan) · IN/OUT times shown as HH:MM. ` +
@@ -236,21 +249,23 @@ export function buildReportHtml(report: ReportData): string {
     const totalRows = report.absenteeTotals.map((r) => [
       esc(r.fullName),
       esc(r.gradeSection),
-      String(r.daysAbsent),
+      String(r.daysAbsentAm),
+      String(r.daysAbsentPm),
       esc(r.parentPhone),
     ]);
     const rows = report.absentee.map((r) => [
       esc(r.day),
       esc(r.fullName),
       esc(r.gradeSection),
+      r.session === 'FULL' ? 'Full day' : r.session === 'AM' ? 'AM' : 'PM',
       esc(r.parentPhone),
       r.smsSent ? 'Yes' : 'No',
     ]);
     body =
       `<h3>Absent days per student</h3>` +
-      stdTable(['Student', 'Section', 'Days absent', 'Phone'], totalRows) +
+      stdTable(['Student', 'Section', 'Absent AM', 'Absent PM', 'Phone'], totalRows) +
       `<h3>Absence records (day by day)</h3>` +
-      stdTable(['Day', 'Student', 'Section', 'Phone', 'SMS sent'], rows);
+      stdTable(['Day', 'Student', 'Section', 'Session', 'Phone', 'SMS sent'], rows);
   } else if (report.type === 'tardiness') {
     const freqRows = report.tardinessFrequency.map((r) => [
       esc(r.fullName),
@@ -303,27 +318,37 @@ export function buildReportHtml(report: ReportData): string {
         `<tr><td>Section</td><td>${esc(rec.gradeSection)}</td><td>Phone</td><td>${esc(rec.parentPhone)}</td></tr>` +
         `</table>` +
         `<table class="summary">` +
-        `<tr><td>Present days</td><td>${rec.summary.daysPresent}</td><td>Late days</td><td>${rec.summary.daysLate}</td><td>Absent days</td><td>${rec.summary.daysAbsent}</td></tr>` +
-        `<tr><td>Attendance rate</td><td>${pct(rec.summary.attendanceRate)}</td><td>Total IN</td><td>${rec.summary.totalIn}</td><td>Total OUT</td><td>${rec.summary.totalOut}</td></tr>` +
-        `<tr><td>Minutes late</td><td>${rec.summary.totalMinutesLate}</td><td>SMS sent</td><td>${rec.summary.smsCount}</td><td>Last SMS</td><td>${esc(rec.summary.lastSmsStatus ?? '—')}</td></tr>` +
+        `<tr><td>Present days</td><td>${rec.summary.daysPresent}</td><td>Late AM</td><td>${rec.summary.daysLateAm}</td><td>Late PM</td><td>${rec.summary.daysLatePm}</td></tr>` +
+        `<tr><td>Absent AM</td><td>${rec.summary.daysAbsentAm}</td><td>Absent PM</td><td>${rec.summary.daysAbsentPm}</td><td>Attendance rate</td><td>${pct(rec.summary.attendanceRate)}</td></tr>` +
+        `<tr><td>IN AM</td><td>${rec.summary.totalInAm}</td><td>IN PM</td><td>${rec.summary.totalInPm}</td><td>OUT AM</td><td>${rec.summary.totalOutAm}</td><td>OUT PM</td><td>${rec.summary.totalOutPm}</td></tr>` +
+        `<tr><td>Min late AM</td><td>${rec.summary.totalMinutesLateAm}</td><td>Min late PM</td><td>${rec.summary.totalMinutesLatePm}</td><td>SMS sent</td><td>${rec.summary.smsCount}</td><td>Last SMS</td><td>${esc(rec.summary.lastSmsStatus ?? '—')}</td></tr>` +
         `</table>` +
         `<h3>Day by day</h3>` +
         `<table class="left1">` +
-        `<thead><tr><th>Day</th><th>Weekday</th><th>Status</th><th>IN</th><th>OUT</th><th>Late</th><th>Early</th><th>Scans</th></tr></thead>` +
+        `<thead><tr><th>Day</th><th>Weekday</th><th>Status</th><th>AM IN</th><th>AM OUT</th><th>PM IN</th><th>PM OUT</th><th>AM Late</th><th>PM Late</th><th>AM Early</th><th>PM Early</th><th>Scans</th></tr></thead>` +
         `<tbody>` +
         rec.days
           .map((d, i) => {
-            const status = !d.present
-              ? d.schoolDay
-                ? 'ABSENT'
-                : '—'
-              : d.late
-                ? 'LATE'
-                : 'PRESENT';
-            const cls = d.present && d.late ? 'late' : !d.present && d.schoolDay ? 'abs' : i % 2 === 1 ? 'alt' : '';
+            const absent = !d.present && d.schoolDay;
+            const amAbsent = d.schoolDay && !d.amPresent;
+            const pmAbsent = d.schoolDay && !d.pmPresent;
+            const status = absent
+              ? 'ABSENT'
+              : amAbsent
+                ? 'AM ABSENT'
+                : pmAbsent
+                  ? 'PM ABSENT'
+                  : d.late
+                    ? 'LATE'
+                    : 'PRESENT';
+            const cls = absent ? 'abs' : d.late ? 'late' : i % 2 === 1 ? 'alt' : '';
             return `<tr class="${cls}"><td>${esc(d.day)}</td><td>${dow[new Date(d.day + 'T00:00:00').getDay()]}</td>` +
-              `<td>${status}</td><td>${esc(d.firstIn ?? '—')}</td><td>${esc(d.lastOut ?? '—')}</td>` +
-              `<td>${d.late ? '✓' : '—'}</td><td>${d.early ? '✓' : '—'}</td><td>${d.scans.length}</td></tr>`;
+              `<td>${status}</td>` +
+              `<td>${esc(d.morningIn ?? '—')}</td><td>${esc(d.morningOut ?? '—')}</td>` +
+              `<td>${esc(d.afternoonIn ?? '—')}</td><td>${esc(d.afternoonOut ?? '—')}</td>` +
+              `<td>${d.amLate ? '✓' : '—'}</td><td>${d.pmLate ? '✓' : '—'}</td>` +
+              `<td>${d.amEarly ? '✓' : '—'}</td><td>${d.pmEarly ? '✓' : '—'}</td>` +
+              `<td>${d.scans.length}</td></tr>`;
           })
           .join('') +
         `</tbody></table>`;

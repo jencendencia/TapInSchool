@@ -154,32 +154,109 @@ export async function getPerSectionReport(sections: string[], from: string, to: 
     readBellSettings(),
   ]);
 
+  // Compute midpoint for AM/PM split
+  const parseHM = (s: string) => { const parts = s.split(':').map(Number); return parts[0] * 60 + parts[1]; };
+  const amOutMin = bell.am_time_out ? parseHM(bell.am_time_out) : NaN;
+  let midMin = !Number.isNaN(amOutMin) ? amOutMin : 720;
+  if (Number.isNaN(amOutMin)) {
+    const amInMin = bell.am_time_in ? parseHM(bell.am_time_in) : NaN;
+    const pmOutMin = bell.pm_time_out ? parseHM(bell.pm_time_out) : NaN;
+    if (!Number.isNaN(amInMin) && !Number.isNaN(pmOutMin)) midMin = Math.round((amInMin + pmOutMin) / 2);
+  }
+  const midHH = String(Math.floor(midMin / 60)).padStart(2, '0');
+  const midMM = String(midMin % 60).padStart(2, '0');
+  const midStr = `${midHH}:${midMM}`;
+
   const enrolled = new Map(enrolledRows.map((r) => [r.grade_section, Number(r.c)]));
   const present = new Map<string, Set<number>>();
+  const presentAm = new Map<string, Set<number>>();
+  const presentPm = new Map<string, Set<number>>();
   const late = new Map<string, Set<number>>();
+  const lateAm = new Map<string, Set<number>>();
+  const latePm = new Map<string, Set<number>>();
   const early = new Map<string, Set<number>>();
+  const earlyAm = new Map<string, Set<number>>();
+  const earlyPm = new Map<string, Set<number>>();
+  const totalIn = new Map<string, number>();
+  const totalInAm = new Map<string, number>();
+  const totalInPm = new Map<string, number>();
+  const totalOut = new Map<string, number>();
+  const totalOutAm = new Map<string, number>();
+  const totalOutPm = new Map<string, number>();
   for (const sc of scans) {
     const sec = sc.grade_section;
     if (!present.has(sec)) present.set(sec, new Set());
     if (!late.has(sec)) late.set(sec, new Set());
     if (!early.has(sec)) early.set(sec, new Set());
     present.get(sec)!.add(sc.student_id);
+    const scanTime = sc.scanned_at.slice(11, 16); // 'HH:MM'
+    const isAm = scanTime < midStr;
+    if (isAm) {
+      if (!presentAm.has(sec)) presentAm.set(sec, new Set());
+      presentAm.get(sec)!.add(sc.student_id);
+    } else {
+      if (!presentPm.has(sec)) presentPm.set(sec, new Set());
+      presentPm.get(sec)!.add(sc.student_id);
+    }
     const f = computeScanFlag(sc.entry_type, new Date(sc.scanned_at.replace(' ', 'T')), bell);
-    if (f === 'LATE') late.get(sec)!.add(sc.student_id);
-    if (f === 'EARLY') early.get(sec)!.add(sc.student_id);
+    if (f === 'LATE') {
+      late.get(sec)!.add(sc.student_id);
+      if (isAm) {
+        if (!lateAm.has(sec)) lateAm.set(sec, new Set());
+        lateAm.get(sec)!.add(sc.student_id);
+      } else {
+        if (!latePm.has(sec)) latePm.set(sec, new Set());
+        latePm.get(sec)!.add(sc.student_id);
+      }
+    }
+    if (f === 'EARLY') {
+      early.get(sec)!.add(sc.student_id);
+      if (isAm) {
+        if (!earlyAm.has(sec)) earlyAm.set(sec, new Set());
+        earlyAm.get(sec)!.add(sc.student_id);
+      } else {
+        if (!earlyPm.has(sec)) earlyPm.set(sec, new Set());
+        earlyPm.get(sec)!.add(sc.student_id);
+      }
+    }
+    totalIn.set(sec, (totalIn.get(sec) ?? 0) + (sc.entry_type === 'IN' ? 1 : 0));
+    totalOut.set(sec, (totalOut.get(sec) ?? 0) + (sc.entry_type === 'OUT' ? 1 : 0));
+    if (sc.entry_type === 'IN') {
+      if (isAm) totalInAm.set(sec, (totalInAm.get(sec) ?? 0) + 1);
+      else totalInPm.set(sec, (totalInPm.get(sec) ?? 0) + 1);
+    } else {
+      if (isAm) totalOutAm.set(sec, (totalOutAm.get(sec) ?? 0) + 1);
+      else totalOutPm.set(sec, (totalOutPm.get(sec) ?? 0) + 1);
+    }
   }
 
   const rows: PerSectionRow[] = list.map((sec) => {
     const presentCount = present.get(sec)?.size ?? 0;
     const enrolledCount = enrolled.get(sec) ?? 0;
+    const presentAmCount = presentAm.get(sec)?.size ?? 0;
+    const presentPmCount = presentPm.get(sec)?.size ?? 0;
     return {
       gradeSection: sec,
       enrolled: enrolledCount,
       present: presentCount,
       absent: Math.max(0, enrolledCount - presentCount),
       late: late.get(sec)?.size ?? 0,
+      lateAm: lateAm.get(sec)?.size ?? 0,
+      latePm: latePm.get(sec)?.size ?? 0,
       early: early.get(sec)?.size ?? 0,
+      earlyAm: earlyAm.get(sec)?.size ?? 0,
+      earlyPm: earlyPm.get(sec)?.size ?? 0,
       attendanceRate: schoolDaysCount > 0 ? Math.round((presentCount / enrolledCount / schoolDaysCount) * 100000) / 1000 : null,
+      presentAm: presentAmCount,
+      presentPm: presentPmCount,
+      absentAm: Math.max(0, enrolledCount - presentAmCount),
+      absentPm: Math.max(0, enrolledCount - presentPmCount),
+      totalIn: totalIn.get(sec) ?? 0,
+      totalInAm: totalInAm.get(sec) ?? 0,
+      totalInPm: totalInPm.get(sec) ?? 0,
+      totalOut: totalOut.get(sec) ?? 0,
+      totalOutAm: totalOutAm.get(sec) ?? 0,
+      totalOutPm: totalOutPm.get(sec) ?? 0,
     };
   });
 

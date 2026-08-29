@@ -26,7 +26,7 @@ export function SubjectsPage() {
 
   const handleSave = async (input: SubjectInputInfo) => {
     try {
-      if (modal && 'subject' in modal) {
+      if (modal && typeof modal === 'object' && 'subject' in modal) {
         await api.updateSubject(modal.subject.id, input);
         setToast('Subject updated');
       } else {

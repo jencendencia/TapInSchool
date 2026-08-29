@@ -14,6 +14,8 @@ export type ScanSource = 'SCANNER' | 'WEBCAM' | 'MANUAL';
  * that entry type regardless of history. Resets to 'auto' on app restart.
  */
 export type ScanMode = 'auto' | 'in' | 'out';
+/** Manual AM/PM session override. 'auto' = use current time; 'am'/'pm' = force that session. */
+export type SessionMode = 'auto' | 'am' | 'pm';
 
 /** Attendance quality flag derived from bell times ('' when on time). */
 export type AttendanceFlag = '' | 'LATE' | 'EARLY';
@@ -345,8 +347,14 @@ export interface Settings {
   cloud_endpoint: string;
   sms_template: string;
   /** Bell / attendance-intelligence settings (Phase 2, 4.1 + 4.2). */
-  bell_time_in: string;
-  bell_time_out: string;
+  /** AM session start — IN scans after this + grace are flagged LATE. */
+  am_time_in: string;
+  /** AM session end — OUT scans before this are flagged EARLY. */
+  am_time_out: string;
+  /** PM session start — IN scans after this + grace are flagged LATE. */
+  pm_time_in: string;
+  /** PM session end — OUT scans before this are flagged EARLY. */
+  pm_time_out: string;
   bell_grace_minutes: number;
   absence_detect: boolean;
   absence_sms: boolean;
@@ -552,12 +560,32 @@ export interface ReportDailyRow {
   scans: number;
   in: number;
   out: number;
+  /** Morning IN count (scans before the midpoint of bell times). */
+  morningIn: number;
+  /** Morning OUT count. */
+  morningOut: number;
+  /** Afternoon IN count. */
+  afternoonIn: number;
+  /** Afternoon OUT count. */
+  afternoonOut: number;
   /** Live-computed IN-after-cutoff scans that day. */
   late: number;
+  /** AM late (morning IN after cutoff). */
+  amLate: number;
+  /** PM late (afternoon IN after cutoff). */
+  pmLate: number;
   /** Live-computed OUT-before-dismissal scans that day. */
   early: number;
+  /** AM early (morning OUT before dismissal). */
+  amEarly: number;
+  /** PM early (afternoon OUT before dismissal). */
+  pmEarly: number;
   /** Active students with zero scans that day (scan-derived; 0 on non-gate days). */
   absent: number;
+  /** Students with zero AM scans on a school day. */
+  amAbsent: number;
+  /** Students with zero PM scans on a school day. */
+  pmAbsent: number;
   /** Distinct students with ≥1 scan that day (gate-used days only). */
   present: number;
 }
@@ -572,14 +600,30 @@ export interface PerStudentRow {
   daysPresent: number;
   /** Distinct days with ≥1 flagged-late IN (a second IN after returning also flags the day). */
   daysLate: number;
+  /** Distinct days with ≥1 flagged-late IN during AM. */
+  daysLateAm: number;
+  /** Distinct days with ≥1 flagged-late IN during PM. */
+  daysLatePm: number;
   /** schoolDays − daysPresent (≥ 0). */
   daysAbsent: number;
+  /** Days absent during AM session. */
+  daysAbsentAm: number;
+  /** Days absent during PM session. */
+  daysAbsentPm: number;
   /** daysPresent / schoolDays × 100; null when there are no school days. */
   attendanceRate: number | null;
   totalIn: number;
+  totalInAm: number;
+  totalInPm: number;
   totalOut: number;
+  totalOutAm: number;
+  totalOutPm: number;
   /** Sum of minutes past the cutoff on flagged IN scans. */
   totalMinutesLate: number;
+  /** Sum of minutes past the AM late cutoff on flagged IN scans. */
+  totalMinutesLateAm: number;
+  /** Sum of minutes past the PM late cutoff on flagged IN scans. */
+  totalMinutesLatePm: number;
   smsCount: number;
   /** Status of that student's most recent SMS in range (null when none). */
   lastSmsStatus: SmsStatus | null;
@@ -595,10 +639,38 @@ export interface PerSectionRow {
   absent: number;
   /** Distinct students with ≥1 flagged-late IN. */
   late: number;
+  /** Distinct students with ≥1 flagged-late IN during AM. */
+  lateAm: number;
+  /** Distinct students with ≥1 flagged-late IN during PM. */
+  latePm: number;
   /** Distinct students with ≥1 flagged-early OUT. */
   early: number;
+  /** Distinct students with ≥1 flagged-early OUT during AM. */
+  earlyAm: number;
+  /** Distinct students with ≥1 flagged-early OUT during PM. */
+  earlyPm: number;
   /** Σ daily present / (enrolled × schoolDays) × 100; null when undefined. */
   attendanceRate: number | null;
+  /** Distinct students with ≥1 AM scan. */
+  presentAm: number;
+  /** Distinct students with ≥1 PM scan. */
+  presentPm: number;
+  /** Enrolled students with zero AM scans. */
+  absentAm: number;
+  /** Enrolled students with zero PM scans. */
+  absentPm: number;
+  /** Total IN scans. */
+  totalIn: number;
+  /** Total IN scans during AM. */
+  totalInAm: number;
+  /** Total IN scans during PM. */
+  totalInPm: number;
+  /** Total OUT scans. */
+  totalOut: number;
+  /** Total OUT scans during AM. */
+  totalOutAm: number;
+  /** Total OUT scans during PM. */
+  totalOutPm: number;
 }
 
 /** One (student, day) cell in the SF2-style register matrix. */
@@ -610,6 +682,20 @@ export interface RegisterRow {
   firstIn: string | null;
   /** Last OUT time 'HH:MM' or null. */
   lastOut: string | null;
+  /** Morning (before midpoint) IN/OUT times. */
+  morningIn: string | null;
+  morningOut: string | null;
+  /** Afternoon (after midpoint) IN/OUT times. */
+  afternoonIn: string | null;
+  afternoonOut: string | null;
+  /** True when the morning IN scan was flagged late. */
+  amLate: boolean;
+  /** True when the afternoon IN scan was flagged late. */
+  pmLate: boolean;
+  /** True when the morning OUT scan was flagged early. */
+  amEarly: boolean;
+  /** True when the afternoon OUT scan was flagged early. */
+  pmEarly: boolean;
 }
 
 export interface ReportRegister {
@@ -633,6 +719,8 @@ export interface AbsenteeRow {
   day: string;
   /** Whether a scan-triggered SMS was sent for that student that day. */
   smsSent: boolean;
+  /** 'AM' when the student had zero AM scans, 'PM' when zero PM scans, 'FULL' when zero scans all day. */
+  session: 'FULL' | 'AM' | 'PM';
 }
 
 export interface AbsenteeTotalsRow {
@@ -643,6 +731,10 @@ export interface AbsenteeTotalsRow {
   parentPhone: string;
   /** Number of absent days for this student in the range. */
   daysAbsent: number;
+  /** Days absent during AM session. */
+  daysAbsentAm: number;
+  /** Days absent during PM session. */
+  daysAbsentPm: number;
 }
 
 export interface TardinessRow {
@@ -675,6 +767,8 @@ export interface StudentScanRow {
   /** '' when on time. */
   flag: AttendanceFlag;
   source: ScanSource;
+  /** Minutes late on a flagged-late IN scan; undefined for OUT or on-time scans. */
+  minsLate?: number;
 }
 
 /** One calendar day inside a single-student attendance record. */
@@ -689,10 +783,28 @@ export interface StudentDayRow {
   late: boolean;
   /** ≥1 flagged-early OUT that day. */
   early: boolean;
+  /** Morning IN was flagged late. */
+  amLate: boolean;
+  /** Afternoon IN was flagged late. */
+  pmLate: boolean;
+  /** Morning OUT was flagged early. */
+  amEarly: boolean;
+  /** Afternoon OUT was flagged early. */
+  pmEarly: boolean;
+  /** Morning present (had at least one AM scan). */
+  amPresent: boolean;
+  /** Afternoon present (had at least one PM scan). */
+  pmPresent: boolean;
   /** First IN time 'HH:MM' or null. */
   firstIn: string | null;
   /** Last OUT time 'HH:MM' or null. */
   lastOut: string | null;
+  /** Morning (before midpoint) IN/OUT times. */
+  morningIn: string | null;
+  morningOut: string | null;
+  /** Afternoon (after midpoint) IN/OUT times. */
+  afternoonIn: string | null;
+  afternoonOut: string | null;
   /** Every scan that day, oldest first. */
   scans: StudentScanRow[];
 }
@@ -710,14 +822,30 @@ export interface StudentRecord {
     daysPresent: number;
     /** Distinct days with ≥1 flagged-late IN. */
     daysLate: number;
+    /** Distinct days with ≥1 flagged-late IN during AM. */
+    daysLateAm: number;
+    /** Distinct days with ≥1 flagged-late IN during PM. */
+    daysLatePm: number;
     /** schoolDays − daysPresent (≥ 0). */
     daysAbsent: number;
+    /** Days absent during AM session. */
+    daysAbsentAm: number;
+    /** Days absent during PM session. */
+    daysAbsentPm: number;
     /** daysPresent / schoolDays × 100; null when no school days. */
     attendanceRate: number | null;
     totalIn: number;
+    totalInAm: number;
+    totalInPm: number;
     totalOut: number;
+    totalOutAm: number;
+    totalOutPm: number;
     /** Sum of minutes past the late cutoff on flagged IN scans. */
     totalMinutesLate: number;
+    /** Sum of minutes past the AM late cutoff on flagged IN scans. */
+    totalMinutesLateAm: number;
+    /** Sum of minutes past the PM late cutoff on flagged IN scans. */
+    totalMinutesLatePm: number;
     smsCount: number;
     lastSmsStatus: SmsStatus | null;
   };
@@ -1528,6 +1656,10 @@ export interface TapinApi {
   getScanMode(): Promise<ScanMode>;
   /** Sets the kiosk gate-direction mode; applies to every scan path. */
   setScanMode(mode: ScanMode): Promise<ScanMode>;
+  /** The manual AM/PM session override ('auto' | 'am' | 'pm'). */
+  getSessionMode(): Promise<SessionMode>;
+  /** Sets the manual AM/PM session override. */
+  setSessionMode(mode: SessionMode): Promise<SessionMode>;
   getRecentActivity(limit?: number): Promise<ActivityItem[]>;
   setKioskMode(active: boolean): Promise<void>;
   toggleFullscreen(): Promise<void>;

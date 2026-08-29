@@ -134,8 +134,22 @@ export interface PerSectionRow {
   present: number;
   absent: number;
   late: number;
+  lateAm: number;
+  latePm: number;
   early: number;
+  earlyAm: number;
+  earlyPm: number;
   attendanceRate: number | null;
+  presentAm: number;
+  presentPm: number;
+  absentAm: number;
+  absentPm: number;
+  totalIn: number;
+  totalInAm: number;
+  totalInPm: number;
+  totalOut: number;
+  totalOutAm: number;
+  totalOutPm: number;
 }
 
 export interface PerSectionReport {

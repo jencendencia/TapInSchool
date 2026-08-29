@@ -5,7 +5,9 @@ import type { GsmModem, JobsConfig, SchoolYear, Settings } from '../../../shared
 import { api } from '../../lib/api';
 import { Spinner, Toast } from '../../components/shared';
 import { UpdatePanel } from '../../components/UpdatePanel';
+import jeLogo from '../../../JE_logo.png';
 import { ActivationPanel } from '../../components/ActivationPanel';
+import { HowToGuide } from '../../components/HowToGuide';
 import { useSchoolYear } from './schoolYear';
 
 // Reads an image file, downscales it to a small thumbnail and returns it as a
@@ -65,6 +67,7 @@ const [settings, setSettings] = useState<Settings | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [logoError, setLogoError] = useState<string | null>(null);
   const [testingEmail, setTestingEmail] = useState(false);
+  const [howToOpen, setHowToOpen] = useState(false);
   const [schoolYears, setSchoolYears] = useState<SchoolYear[]>([]);
   const [newYear, setNewYear] = useState('');
   const [yearBusy, setYearBusy] = useState(false);
@@ -273,8 +276,8 @@ setTestingEmail(true);
         <div>
           <h2>Settings</h2>
           <p className="text-dim">Global kiosk configuration</p>
-        </div>
-<div className="page-actions">
+        </div>        <div className="page-actions">
+          <button className="btn-ghost" onClick={() => setHowToOpen(true)}>📖 How To</button>
           <button className="btn-primary" disabled={!dirty} onClick={() => void save()}>💾 Save Settings</button>
         </div>
       </div>
@@ -380,18 +383,29 @@ setTestingEmail(true);
             </div>
           </div>
 
+          <div className="settings-row" style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
           <div className="settings-card">
           <h3>Bell times &amp; absence detection</h3>
-          <div className="field-row">
+          <div className="settings-grid">
             <div className="field">
-              <label>School start time</label>
-              <input type="time" value={settings.bell_time_in} onChange={(e) => set('bell_time_in', e.target.value)} />
-              <p className="field-hint">IN scans after this + grace are marked <b>LATE</b>.</p>
+              <label>☀️ AM start time (IN)</label>
+              <input type="time" value={settings.am_time_in} onChange={(e) => set('am_time_in', e.target.value)} />
+              <p className="field-hint">AM IN scans after this + grace are marked <b>LATE</b>.</p>
             </div>
             <div className="field">
-              <label>Dismissal time</label>
-              <input type="time" value={settings.bell_time_out} onChange={(e) => set('bell_time_out', e.target.value)} />
-              <p className="field-hint">OUT scans before this are marked <b>EARLY</b>.</p>
+              <label>☀️ AM end time (OUT)</label>
+              <input type="time" value={settings.am_time_out} onChange={(e) => set('am_time_out', e.target.value)} />
+              <p className="field-hint">AM OUT scans before this are marked <b>EARLY</b>.</p>
+            </div>
+            <div className="field">
+              <label>🌙 PM start time (IN)</label>
+              <input type="time" value={settings.pm_time_in} onChange={(e) => set('pm_time_in', e.target.value)} />
+              <p className="field-hint">PM IN scans after this + grace are marked <b>LATE</b>.</p>
+            </div>
+            <div className="field">
+              <label>🌙 PM end time (OUT)</label>
+              <input type="time" value={settings.pm_time_out} onChange={(e) => set('pm_time_out', e.target.value)} />
+              <p className="field-hint">PM OUT scans before this are marked <b>EARLY</b>.</p>
             </div>
           </div>
           <div className="field">
@@ -427,12 +441,94 @@ setTestingEmail(true);
               <p className="field-hint">Absence detection runs after dismissal, but SMS to parents is only sent at this time (e.g. 18:00). Absence records are still created immediately.</p>
             </div>
           )}
-<p className="field-hint">One message per student per day, using the template above with “was marked absent today”.</p>
+<p className="field-hint">One message per student per day, using the template above with "was marked absent today".</p>
         </div>
 
         <div className="settings-card">
-          <h3>App updates</h3>
-          <UpdatePanel />
+          <h3>Email (report delivery)</h3>
+          <div className="field">
+            <label>SMTP server</label>
+            <input value={settings.smtp_host} onChange={(e) => set('smtp_host', e.target.value)} placeholder="smtp.gmail.com" />
+            <p className="field-hint">
+              Pre-configured for <b>Gmail</b> — just enter your Gmail address and App Password below.
+            </p>
+          </div>
+          <div className="field-row">
+            <div className="field">
+              <label>Port</label>
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                value={settings.smtp_port}
+                onChange={(e) => set('smtp_port', Number(e.target.value))}
+              />
+            </div>
+            <div className="field">
+              <label>&nbsp;</label>
+              <label className="switch-row">
+                <span>Secure (SSL/TLS)</span>
+                <span
+                  className={`switch ${settings.smtp_secure ? 'on' : ''}`}
+                  onClick={() => set('smtp_secure', !settings.smtp_secure)}
+                >
+                  <span className="switch-knob" />
+                </span>
+              </label>
+            </div>
+          </div>
+          <p className="field-hint">
+            Port <b>587</b> with the secure toggle <b>off</b> (STARTTLS) is the most common — Gmail / Office 365.
+            Turn it <b>on</b> for implicit TLS on port <b>465</b>.
+          </p>
+          <div className="field">
+            <label>Username</label>
+            <input value={settings.smtp_user} onChange={(e) => set('smtp_user', e.target.value)} placeholder="you@school.edu.ph" />
+          </div>
+          <div className="field">
+            <label>Password / app password</label>
+            <input
+              type="password"
+              value={settings.smtp_password}
+              onChange={(e) => set('smtp_password', e.target.value)}
+              placeholder="••••••••"
+            />
+            <p className="field-hint">
+              Gmail / Google Workspace need an <b>app password</b> (enable 2-Step Verification → App passwords).
+              The password is stored in this PC's settings table, like the cloud SMS API key.
+            </p>
+          </div>
+          <label className="switch-row">
+            <span>Allow self-signed certificates</span>
+            <span
+              className={`switch ${settings.smtp_allow_self_signed ? 'on' : ''}`}
+              onClick={() => set('smtp_allow_self_signed', !settings.smtp_allow_self_signed)}
+            >
+              <span className="switch-knob" />
+            </span>
+          </label>
+          <p className="field-hint">
+            Turn on only if the school's own mail server uses a self-signed certificate — otherwise keep it off.
+          </p>
+          <div className="field">
+            <label>From address (optional — defaults to the username)</label>
+            <input value={settings.email_from} onChange={(e) => set('email_from', e.target.value)} placeholder="you@school.edu.ph" />
+          </div>
+          <div className="field">
+            <label>Report recipient(s)</label>
+            <input
+              value={settings.email_recipient}
+              onChange={(e) => set('email_recipient', e.target.value)}
+              placeholder="admin@school.edu.ph"
+            />
+            <p className="field-hint">Separate multiple addresses with commas. Used by the “Email report” button in Reports.</p>
+          </div>
+          <div className="page-actions" style={{ marginTop: 4 }}>
+            <button className="btn-ghost" disabled={testingEmail} onClick={() => void testEmail()}>
+              {testingEmail ? 'Sending…' : '✉ Send test email'}
+            </button>
+          </div>
+        </div>
         </div>
 
         <div className="settings-card">
@@ -580,89 +676,37 @@ setTestingEmail(true);
         </div>
 
         <div className="settings-card">
-          <h3>Email (report delivery)</h3>
-          <div className="field">
-            <label>SMTP server</label>
-            <input value={settings.smtp_host} onChange={(e) => set('smtp_host', e.target.value)} placeholder="smtp.gmail.com" />
-            <p className="field-hint">
-              Pre-configured for <b>Gmail</b> — just enter your Gmail address and App Password below.
-            </p>
-          </div>
-          <div className="field-row">
-            <div className="field">
-              <label>Port</label>
-              <input
-                type="number"
-                min={1}
-                max={65535}
-                value={settings.smtp_port}
-                onChange={(e) => set('smtp_port', Number(e.target.value))}
-              />
+          <h3>About</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <img src={jeLogo} alt="JE Logo" className="about-logo" title="Joel M. Encendencia — Developer" />
+              <p style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
+                TapIn — School Attendance Kiosk
+              </p>
             </div>
-            <div className="field">
-              <label>&nbsp;</label>
-              <label className="switch-row">
-                <span>Secure (SSL/TLS)</span>
-                <span
-                  className={`switch ${settings.smtp_secure ? 'on' : ''}`}
-                  onClick={() => set('smtp_secure', !settings.smtp_secure)}
-                >
-                  <span className="switch-knob" />
-                </span>
-              </label>
+            <p style={{ fontSize: 13, color: 'var(--text-dim, #888)', margin: 0, lineHeight: 1.5 }}>
+              A modern biometric-free attendance system for schools. TapIn uses RFID card scanning to track student
+              check-in/check-out, sends real-time SMS alerts to parents, detects late arrivals and early dismissals,
+              generates attendance reports, and supports multi-kiosk setups across campus.
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+              <div style={{ fontSize: 14 }}>
+                <span style={{ fontWeight: 600 }}>Developer:</span> Joel M. Encendencia
+              </div>
+              <div style={{ fontSize: 14 }}>
+                <span style={{ fontWeight: 600 }}>Email:</span>{' '}
+                <a href="mailto:jencendencia@gmail.com" style={{ color: 'var(--accent, #4a90d9)' }}>jencendencia@gmail.com</a>
+              </div>
+              <div style={{ fontSize: 14 }}>
+                <span style={{ fontWeight: 600 }}>Contact:</span> 09108904115
+              </div>
             </div>
           </div>
-          <p className="field-hint">
-            Port <b>587</b> with the secure toggle <b>off</b> (STARTTLS) is the most common — Gmail / Office 365.
-            Turn it <b>on</b> for implicit TLS on port <b>465</b>.
-          </p>
-          <div className="field">
-            <label>Username</label>
-            <input value={settings.smtp_user} onChange={(e) => set('smtp_user', e.target.value)} placeholder="you@school.edu.ph" />
-          </div>
-          <div className="field">
-            <label>Password / app password</label>
-            <input
-              type="password"
-              value={settings.smtp_password}
-              onChange={(e) => set('smtp_password', e.target.value)}
-              placeholder="••••••••"
-            />
-            <p className="field-hint">
-              Gmail / Google Workspace need an <b>app password</b> (enable 2-Step Verification → App passwords).
-              The password is stored in this PC's settings table, like the cloud SMS API key.
-            </p>
-          </div>
-          <label className="switch-row">
-            <span>Allow self-signed certificates</span>
-            <span
-              className={`switch ${settings.smtp_allow_self_signed ? 'on' : ''}`}
-              onClick={() => set('smtp_allow_self_signed', !settings.smtp_allow_self_signed)}
-            >
-              <span className="switch-knob" />
-            </span>
-          </label>
-          <p className="field-hint">
-            Turn on only if the school's own mail server uses a self-signed certificate — otherwise keep it off.
-          </p>
-          <div className="field">
-            <label>From address (optional — defaults to the username)</label>
-            <input value={settings.email_from} onChange={(e) => set('email_from', e.target.value)} placeholder="you@school.edu.ph" />
-          </div>
-          <div className="field">
-            <label>Report recipient(s)</label>
-            <input
-              value={settings.email_recipient}
-              onChange={(e) => set('email_recipient', e.target.value)}
-              placeholder="admin@school.edu.ph"
-            />
-            <p className="field-hint">Separate multiple addresses with commas. Used by the “Email report” button in Reports.</p>
-          </div>
-          <div className="page-actions" style={{ marginTop: 4 }}>
-            <button className="btn-ghost" disabled={testingEmail} onClick={() => void testEmail()}>
-              {testingEmail ? 'Sending…' : '✉ Send test email'}
-            </button>
-          </div>
+        </div>
+
+        <div className="settings-card">
+          <h3>App updates</h3>
+          <UpdatePanel />
         </div>
 
         <div className="settings-card">
@@ -706,6 +750,7 @@ setTestingEmail(true);
       </div>
 
       {toast && <Toast message={toast} />}
+      <HowToGuide open={howToOpen} onClose={() => setHowToOpen(false)} />
     </div>
   );
 }
@@ -755,15 +800,10 @@ function GsmModemSettings({
       {modems.map((m, idx) => (
         <div key={idx} className="gsm-modem-row">
           <div className="gsm-modem-header">
-            <label className="switch-row" style={{ margin: 0 }}>
-              <span style={{ fontWeight: 600 }}>{m.label || `Modem ${idx + 1}`}</span>
-              <span className={`switch ${m.enabled ? 'on' : ''}`} onClick={() => toggleModem(idx)}>
-                <span className="switch-knob" />
-              </span>
-            </label>
-            <button type="button" className="btn-icon danger" title="Remove modem" onClick={() => removeModem(idx)}>
-              🗑
-            </button>
+            <span style={{ fontWeight: 600 }}>{m.label || `Modem ${idx + 1}`}</span>
+            <span className={`switch ${m.enabled ? 'on' : ''}`} onClick={() => toggleModem(idx)}>
+              <span className="switch-knob" />
+            </span>
           </div>
           {m.enabled && (
             <div className="gsm-modem-fields">
@@ -784,6 +824,11 @@ function GsmModemSettings({
               </div>
             </div>
           )}
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button type="button" className="btn-icon danger" title="Remove modem" onClick={() => removeModem(idx)} style={{ marginTop: 4 }}>
+              🗑
+            </button>
+          </div>
         </div>
       ))}
       <div className="page-actions" style={{ marginTop: 8 }}>

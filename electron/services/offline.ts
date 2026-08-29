@@ -408,24 +408,33 @@ export function drainOfflineQueue(): Promise<number> {
             console.warn('[tapin] dropped offline scan for missing student', ev.studentId);
             continue;
           }
-          const insert = await db.execute(
-            'INSERT INTO attendance_logs (student_id, entry_type, source, scanned_at) VALUES (?, ?, ?, ?)',
-            [ev.studentId, ev.entryType, ev.source, ev.scannedAt],
-          );
-          if (ev.smsQueued && ev.parentPhone) {
-            const message = buildSmsMessage(resolveTemplate(settings), {
-              fullName: ev.fullName ?? '',
-              gradeSection: ev.gradeSection ?? '',
-              entryType: ev.entryType,
-              flag: ev.flag,
-              scannedAt: new Date(ev.scannedAt),
-              school: settings.school_name,
-            });
-            await db.execute(
-              "INSERT INTO sms_logs (attendance_id, parent_phone, message, status) VALUES (?, ?, ?, 'PENDING')",
-              [insert.insertId, ev.parentPhone, message],
-            );
-          }
+          await db.withConnection(async (conn) => {
+            await conn.beginTransaction();
+            try {
+              const [insert] = await conn.execute(
+                'INSERT INTO attendance_logs (student_id, entry_type, source, scanned_at) VALUES (?, ?, ?, ?)',
+                [ev.studentId, ev.entryType, ev.source, ev.scannedAt],
+              );
+              if (ev.smsQueued && ev.parentPhone) {
+                const message = buildSmsMessage(resolveTemplate(settings), {
+                  fullName: ev.fullName ?? '',
+                  gradeSection: ev.gradeSection ?? '',
+                  entryType: ev.entryType,
+                  flag: ev.flag,
+                  scannedAt: new Date(ev.scannedAt),
+                  school: settings.school_name,
+                });
+                await conn.execute(
+                  "INSERT INTO sms_logs (attendance_id, parent_phone, message, status) VALUES (?, ?, ?, 'PENDING')",
+                  [(insert as { insertId: number }).insertId, ev.parentPhone, message],
+                );
+              }
+              await conn.commit();
+            } catch (err) {
+              await conn.rollback().catch(() => undefined);
+              throw err;
+            }
+          });
           done.add(ev.id);
           replayed++;
           // Reflect the replayed scan in the offline snapshot: the pre-drain

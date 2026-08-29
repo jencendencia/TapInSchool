@@ -44,6 +44,8 @@ function tryLoadSerialport(): SerialPortModule | null {
 
 const PROBE_BAUDS = [9600, 115200];
 const PROBE_COOLDOWN_MS = 15_000;
+const MODEM_COOLDOWN_MS = 60_000;
+const HEALTH_INTERVAL_MS = 45_000;
 
 function waitOpen(port: SerialPortLike, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -93,6 +95,28 @@ async function probePortAtBaud(mod: SerialPortModule, path: string, baud: number
     await closePort(port);
     return false;
   }
+}
+
+function waitForResponse(
+  port: SerialPortLike,
+  timeoutMs: number,
+  matches: (response: string) => boolean,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let response = '';
+    const finish = (done: () => void) => {
+      clearTimeout(timer);
+      port.removeListener('data', onData);
+      done();
+    };
+    const onData = (chunk: Buffer | string) => {
+      response += chunk.toString();
+      if (matches(response)) finish(() => resolve(response));
+      else if (response.includes('ERROR')) finish(() => reject(new Error(`GSM error: ${response.trim()}`)));
+    };
+    const timer = setTimeout(() => finish(() => reject(new Error('GSM response timeout'))), timeoutMs);
+    port.on('data', onData);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -161,56 +185,51 @@ class ModemInstance {
     return run;
   }
 
+  async healthCheck(): Promise<void> {
+    const run = this.sendQueue.then(() => this.doHealthCheck());
+    this.sendQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async doHealthCheck(): Promise<void> {
+    const registration = await this.atCommand('AT+CREG?', 3000, 'OK');
+    const match = /\+CREG:\s*\d,(\d+)/.exec(registration);
+    if (match && !['1', '5'].includes(match[1])) {
+      throw new Error(`${this.label}: GSM network not registered (status ${match[1]})`);
+    }
+    await this.atCommand('AT+CSQ', 3000, 'OK');
+  }
+
   private async doSend(phone: string, message: string): Promise<void> {
     if (!this.port || !this.port.isOpen) throw new Error(`${this.label}: port not open`);
-    this.buffer = '';
-    const deadline = Date.now() + 8000;
-
     // AT+CMGS prompts with ">"
-    this.port.write(`AT+CMGS="${phone}"\r`);
-    await new Promise<void>((resolve, reject) => {
-      const poll = () => {
-        if (this.buffer.includes('>')) return resolve();
-        if (Date.now() > deadline) return reject(new Error(`${this.label}: GSM did not prompt for message (>)`));
-        setTimeout(poll, 50);
-      };
-      poll();
-    });
+    await this.writeAndWait(`AT+CMGS="${phone}"
+`, 8000, (response) => response.includes('>'));
 
     // Message body + Ctrl+Z (0x1A)
-    this.buffer = '';
-    this.port.write(Buffer.concat([Buffer.from(message, 'utf8'), Buffer.from([0x1a])]));
-    await new Promise<void>((resolve, reject) => {
-      const poll = () => {
-        if (this.bufferHas('OK') || this.bufferHas('CMGS')) return resolve();
-        if (this.buffer.includes('ERROR')) return reject(new Error(`${this.label}: GSM send error: ${this.buffer.trim()}`));
-        if (Date.now() > deadline) return reject(new Error(`${this.label}: GSM send timeout`));
-        setTimeout(poll, 100);
-      };
-      poll();
-    });
+    await this.writeAndWait(
+      Buffer.concat([Buffer.from(message, 'utf8'), Buffer.from([0x1a])]),
+      8000,
+      (response) => /(^|\r\n)OK(\r\n|$)/.test(response) || /\+CMGS:\s*\d+/.test(response),
+    );
   }
 
-  private atCommand(cmd: string, timeoutMs: number, expect: string): Promise<void> {
+  private atCommand(cmd: string, timeoutMs: number, expect: string): Promise<string> {
     if (!this.port) throw new Error(`${this.label}: port not open`);
-    this.buffer = '';
-    const deadline = Date.now() + timeoutMs;
-    return new Promise<void>((resolve, reject) => {
-      this.port!.write(cmd + '\r', (err) => { if (err) reject(err); });
-      const poll = () => {
-        if (this.bufferHas(expect)) return resolve();
-        if (this.buffer.includes('ERROR')) return reject(new Error(`AT error: ${this.buffer.trim()}`));
-        if (Date.now() > deadline) return reject(new Error(`AT timeout: ${this.buffer.trim()}`));
-        setTimeout(poll, 50);
-      };
-      poll();
-    });
+    return this.writeAndWait(cmd + '\r', timeoutMs, (response) =>
+      expect === 'OK' ? /(^|\r\n)OK(\r\n|$)/.test(response) : response.includes(expect),
+    );
   }
 
-  private bufferHas(expect: string): boolean {
-    if (expect === 'OK') return /(^|\r\n)OK(\r\n|$)/.test(this.buffer);
-    if (expect === 'CMGS') return /\+CMGS:\s*\d+/.test(this.buffer);
-    return this.buffer.includes(expect);
+  private async writeAndWait(
+    data: string | Uint8Array,
+    timeoutMs: number,
+    matches: (response: string) => boolean,
+  ): Promise<string> {
+    if (!this.port) throw new Error(`${this.label}: port not open`);
+    const response = waitForResponse(this.port, timeoutMs, matches);
+    await new Promise<void>((resolve, reject) => this.port!.write(data, (err) => err ? reject(err) : resolve()));
+    return response;
   }
 }
 
@@ -229,8 +248,28 @@ export class GsmSerialProvider implements SmsProvider {
   private detectedPort = '';
   private detectedBaud = 0;
   private lastProbeAt = 0;
+  private readonly disabledUntil = new Map<string, number>();
+  private readonly failureCount = new Map<string, number>();
+  private healthTimer: NodeJS.Timeout | null = null;
+
+  start(getSettings: () => Settings): void {
+    if (this.healthTimer) return;
+    this.healthTimer = setInterval(() => void this.verify(getSettings()), HEALTH_INTERVAL_MS);
+  }
+
+  stop(): void {
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = null;
+  }
 
   // ---- Status ---------------------------------------------------------------
+
+  getRecommendedConcurrency(settings: Settings): number {
+    const configured = this.getEnabledModems(settings);
+    if (configured.length === 0) return this.isCoolingDown(this.detectedPort) ? 0 : 1;
+    const open = configured.filter((m) => this.pool.get(m.port)?.isOpen && !this.isCoolingDown(m.port)).length;
+    return open || 1;
+  }
 
   getStatus(settings: Settings): ProviderStatus {
     if (!tryLoadSerialport()) {
@@ -269,8 +308,16 @@ export class GsmSerialProvider implements SmsProvider {
     if (modems.length > 0) {
       // Probe each configured modem
       for (const m of modems) {
+        if (this.isCoolingDown(m.port)) continue;
         if (!this.pool.get(m.port)?.isOpen) {
           try { await this.openModem(m.port, m.baud, m.label); } catch { /* best effort */ }
+        }
+        const inst = this.pool.get(m.port);
+        if (inst?.isOpen) {
+          try { await inst.healthCheck(); } catch (err) {
+            this.recordFailure(m.port, inst, err);
+            await inst.close();
+          }
         }
       }
     } else {
@@ -282,6 +329,13 @@ export class GsmSerialProvider implements SmsProvider {
       ) {
         this.lastProbeAt = Date.now();
         try { await this.openDetected(settings); } catch { /* best effort */ }
+      }
+      const inst = this.pool.get(this.detectedPort);
+      if (inst?.isOpen) {
+        try { await inst.healthCheck(); } catch (err) {
+          this.recordFailure(this.detectedPort, inst, err);
+          await inst.close();
+        }
       }
     }
     return this.getStatus(settings);
@@ -298,13 +352,24 @@ export class GsmSerialProvider implements SmsProvider {
         const idx = (start + i) % modems.length;
         this.nextIdx = (idx + 1) % modems.length;
         const m = modems[idx];
+        if (this.isCoolingDown(m.port)) continue;
         let inst = this.pool.get(m.port);
         if (!inst?.isOpen) {
           try { await this.openModem(m.port, m.baud, m.label); inst = this.pool.get(m.port); } catch { continue; }
         }
         if (inst?.isOpen) {
-          await inst.send(phone, message);
-          return;
+          try {
+            await inst.send(phone, message);
+            this.recordSuccess(m.port);
+            return;
+          } catch (err) {
+            // Force a clean AT session on the next attempt. Do not silently
+            // fail over after an unknown-result CMGS timeout: the modem may
+            // already have accepted the SMS, so retrying could duplicate it.
+            this.recordFailure(m.port, inst, err);
+            await inst.close();
+            throw err;
+          }
         }
       }
       throw new Error('No GSM modem available in the pool');
@@ -313,7 +378,35 @@ export class GsmSerialProvider implements SmsProvider {
     await this.open(settings);
     const inst = this.pool.get(this.detectedPort || settings.gsm_com_port);
     if (!inst?.isOpen) throw new Error('GSM modem not open');
-    await inst.send(phone, message);
+    try {
+      await inst.send(phone, message);
+      this.recordSuccess(inst.portPath);
+    } catch (err) {
+      this.recordFailure(inst.portPath, inst, err);
+      await inst.close();
+      throw err;
+    }
+  }
+
+  private isCoolingDown(port: string): boolean {
+    const until = this.disabledUntil.get(port) ?? 0;
+    if (until <= Date.now()) {
+      this.disabledUntil.delete(port);
+      return false;
+    }
+    return true;
+  }
+
+  private recordFailure(port: string, inst: ModemInstance, err: unknown): void {
+    inst.lastError = (err as Error).message;
+    const failures = (this.failureCount.get(port) ?? 0) + 1;
+    this.failureCount.set(port, failures);
+    if (failures >= 3) this.disabledUntil.set(port, Date.now() + MODEM_COOLDOWN_MS);
+  }
+
+  private recordSuccess(port: string): void {
+    this.failureCount.delete(port);
+    this.disabledUntil.delete(port);
   }
 
   // ---- Pool management ------------------------------------------------------

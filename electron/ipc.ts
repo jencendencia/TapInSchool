@@ -7,7 +7,7 @@ import { currentConfig, db, getSavedConfig, type DbConfig } from './db/connectio
 import { clearDbConfig, saveDbConfig } from './db/config';
 import { settingsStore } from './db/settings';
 import { enqueueScan, getRecentActivity } from './services/attendance';
-import { getScanMode, setScanMode } from './services/scan-mode';
+import { getScanMode, setScanMode, getSessionMode, setSessionMode } from './services/scan-mode';
 import {
   createUser as authCreateUser,
   deleteUser as authDeleteUser,
@@ -92,6 +92,7 @@ import type {
   ScanMode,
   ScanResult,
   ScanSource,
+  SessionMode,
   SchoolYear,
   Section,
   SectionInput,
@@ -246,6 +247,12 @@ export function registerIpc(scanner: ScannerHook): void {
 
   ipcMain.handle('tapin:setScanMode', async (_e, mode: ScanMode): Promise<ScanMode> => {
     return setScanMode(mode);
+  });
+
+  ipcMain.handle('tapin:getSessionMode', async (): Promise<SessionMode> => getSessionMode());
+
+  ipcMain.handle('tapin:setSessionMode', async (_e, mode: SessionMode): Promise<SessionMode> => {
+    return setSessionMode(mode);
   });
 
   ipcMain.handle('tapin:getRecentActivity', async (_e, limit = 5): Promise<ActivityItem[]> => {
@@ -1203,10 +1210,28 @@ export function registerIpc(scanner: ScannerHook): void {
        ORDER BY a.id DESC LIMIT 5000`,
       [...flagParams, ...params],
     );
-    const header = 'ID,Student No,Full Name,Grade Section,Type,Source,Flag,Scanned At';
+    // Compute midpoint for AM/PM session column.
+    const settings = settingsStore.get();
+    const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+    const csvAmOut = settings.am_time_out ? parseHHMM(settings.am_time_out) : NaN;
+    let midMin = !Number.isNaN(csvAmOut) ? csvAmOut : 720;
+    if (Number.isNaN(csvAmOut)) {
+      const csvAmIn = settings.am_time_in ? parseHHMM(settings.am_time_in) : NaN;
+      const csvPmOut = settings.pm_time_out ? parseHHMM(settings.pm_time_out) : NaN;
+      if (!Number.isNaN(csvAmIn) && !Number.isNaN(csvPmOut)) midMin = Math.round((csvAmIn + csvPmOut) / 2);
+    }
+    const midH = String(Math.floor(midMin / 60)).padStart(2, '0');
+    const midM = String(midMin % 60).padStart(2, '0');
+    const midTime = `${midH}:${midM}`;
+    const sessionOf = (scannedAt: string): string => {
+      const parts = String(scannedAt).split('T');
+      const hm = parts.length > 1 ? parts[1].slice(0, 5) : '';
+      return hm < midTime ? 'AM' : 'PM';
+    };
+    const header = 'ID,Student No,Full Name,Grade Section,Session,Type,Source,Flag,Scanned At';
     const body = rows
       .map((r) =>
-        [r.id, r.student_no, `"${r.full_name}"`, `"${r.grade_section}"`, r.entry_type, r.source, r.flag, r.scanned_at].join(','),
+        [r.id, r.student_no, `"${r.full_name}"`, `"${r.grade_section}"`, sessionOf(r.scanned_at), r.entry_type, r.source, r.flag, r.scanned_at].join(','),
       )
       .join('\n');
     return `${header}\n${body}`;

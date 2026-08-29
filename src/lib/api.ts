@@ -54,6 +54,7 @@ import type {
   ScanMode,
   ScanResult,
   ScanSource,
+  SessionMode,
   SchoolYear,
   Section,
   SectionInput,
@@ -199,8 +200,10 @@ school_name: 'TapIn School',
   cloud_endpoint: '',
   sms_template:
     '{{school}} Alert: {{name}} ({{section}}) {{action}} at {{time}}. Please advise. - {{school}}',
-  bell_time_in: '07:00',
-  bell_time_out: '16:00',
+  am_time_in: '07:00',
+  am_time_out: '12:00',
+  pm_time_in: '13:00',
+  pm_time_out: '16:00',
   bell_grace_minutes: 15,
   absence_detect: true,
   absence_sms: true,
@@ -288,6 +291,7 @@ class MockApi implements TapinApi {
   private lastScanByVisitor = new Map<number, { time: number; type: EntryType }>();
   // Kiosk gate-direction mode (mirrors electron/services/scan-mode.ts).
   private scanMode: ScanMode = 'auto';
+  private sessionMode: SessionMode = 'auto';
   private scanCbs = new Set<(r: ScanResult) => void>();
   private activityCbs = new Set<(items: ActivityItem[]) => void>();
   private statusCbs = new Set<(s: SystemStatus) => void>();
@@ -580,8 +584,8 @@ class MockApi implements TapinApi {
       const [h, m] = raw.split(':').map(Number);
       return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
     };
-    const late = this.settings.bell_time_in ? parse(this.settings.bell_time_in) : null;
-    const early = this.settings.bell_time_out ? parse(this.settings.bell_time_out) : null;
+    const late = this.settings.am_time_in ? parse(this.settings.am_time_in) : null;
+    const early = this.settings.pm_time_out ? parse(this.settings.pm_time_out) : null;
     const mins = at.getHours() * 60 + at.getMinutes();
     if (entryType === 'IN' && late !== null && mins > late + Math.max(0, this.settings.bell_grace_minutes)) return 'LATE';
     if (entryType === 'OUT' && early !== null && mins < early) return 'EARLY';
@@ -848,7 +852,21 @@ class MockApi implements TapinApi {
     const entryType: EntryType =
       this.scanMode === 'in' ? 'IN' : this.scanMode === 'out' ? 'OUT' : last?.type === 'IN' ? 'OUT' : 'IN';
     this.lastScanByStudent.set(student.id, { time: now, type: entryType });
-    const log = this.addLog(student, entryType, new Date(), true);
+    // Apply session mode: adjust scan time to fall within the correct session.
+    let scanTime = new Date();
+    if (this.sessionMode === 'am' || this.sessionMode === 'pm') {
+      const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+      const amIn = this.settings.am_time_in ? parseHHMM(this.settings.am_time_in) : 420;
+      const amOut = this.settings.am_time_out ? parseHHMM(this.settings.am_time_out) : 720;
+      const pmIn = this.settings.pm_time_in ? parseHHMM(this.settings.pm_time_in) : 780;
+      const pmOut = this.settings.pm_time_out ? parseHHMM(this.settings.pm_time_out) : 960;
+      const targetMin = this.sessionMode === 'am'
+        ? Math.round((amIn + amOut) / 2)
+        : Math.round((pmIn + pmOut) / 2);
+      scanTime = new Date();
+      scanTime.setHours(Math.floor(targetMin / 60), targetMin % 60, 0, 0);
+    }
+    const log = this.addLog(student, entryType, scanTime, true);
     this.sortLogs();
     const result: ScanResult = {
       kind: 'SUCCESS',
@@ -875,6 +893,15 @@ class MockApi implements TapinApi {
   async setScanMode(mode: ScanMode): Promise<ScanMode> {
     this.scanMode = mode === 'in' || mode === 'out' ? mode : 'auto';
     return this.scanMode;
+  }
+
+  async getSessionMode(): Promise<SessionMode> {
+    return this.sessionMode;
+  }
+
+  async setSessionMode(mode: SessionMode): Promise<SessionMode> {
+    this.sessionMode = mode === 'am' || mode === 'pm' ? mode : 'auto';
+    return this.sessionMode;
   }
 
   async setKioskMode(_active: boolean): Promise<void> {
@@ -1396,8 +1423,18 @@ class MockApi implements TapinApi {
 
   async exportLogsCsv(filter: LogFilter = {}): Promise<string> {
     const { rows } = await this.listLogs({ ...filter, limit: 5000 });
-    const header = 'ID,Student No,Full Name,Grade Section,Type,Source,Flag,Scanned At';
-    return [header, ...rows.map((r) => [r.id, r.student_no, `"${r.full_name}"`, `"${r.grade_section}"`, r.entry_type, r.source, r.flag, r.scanned_at].join(','))].join('\n');
+    const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+    const amOut = this.settings.am_time_out ? parseHHMM(this.settings.am_time_out) : NaN;
+    let midMin = !Number.isNaN(amOut) ? amOut : 720;
+    if (Number.isNaN(amOut)) { const a = this.settings.am_time_in ? parseHHMM(this.settings.am_time_in) : NaN; const p = this.settings.pm_time_out ? parseHHMM(this.settings.pm_time_out) : NaN; if (!Number.isNaN(a) && !Number.isNaN(p)) midMin = Math.round((a + p) / 2); }
+    const midStr = `${String(Math.floor(midMin / 60)).padStart(2, '0')}:${String(midMin % 60).padStart(2, '0')}`;
+    const sessOf = (scannedAt: string) => {
+      const parts = String(scannedAt).split('T');
+      const hm = parts.length > 1 ? parts[1].slice(0, 5) : '';
+      return hm < midStr ? 'AM' : 'PM';
+    };
+    const header = 'ID,Student No,Full Name,Grade Section,Session,Type,Source,Flag,Scanned At';
+    return [header, ...rows.map((r) => [r.id, r.student_no, `"${r.full_name}"`, `"${r.grade_section}"`, sessOf(r.scanned_at), r.entry_type, r.source, r.flag, r.scanned_at].join(','))].join('\n');
   }
 
   async listSms(filter: SmsFilter = {}): Promise<{ rows: SmsLogRow[]; total: number }> {
@@ -1982,8 +2019,8 @@ async deleteSchoolYear(name: string): Promise<void> {
       return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
     };
     const grace = Math.max(0, Number(this.settings.bell_grace_minutes) || 0);
-    const lateMins = this.settings.bell_time_in ? parseT(this.settings.bell_time_in)! + grace : null;
-    const earlyMins = this.settings.bell_time_out ? parseT(this.settings.bell_time_out)! : null;
+    const lateMins = this.settings.am_time_in ? parseT(this.settings.am_time_in)! + grace : null;
+    const earlyMins = this.settings.pm_time_out ? parseT(this.settings.pm_time_out)! : null;
     const toHms = (mins: number) => `${pad(Math.floor(mins / 60))}:${pad(mins % 60)}:00`;
     const cutoffs = { late: lateMins === null ? '' : toHms(lateMins), early: earlyMins === null ? '' : toHms(earlyMins) };
 
@@ -2017,14 +2054,35 @@ async deleteSchoolYear(name: string): Promise<void> {
       const dayLogs = logs.filter((l) => dayOf(l.scanned_at) === day);
       const presentDay = dayPresent.get(day)?.size ?? 0;
       if (dayLogs.length > 0) schoolDayList.push(day);
+      const parseHHMMD = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+      const bellInD = this.settings.am_time_out ? parseHHMMD(this.settings.am_time_out) : NaN;
+      const midMinD = !Number.isNaN(bellInD) ? bellInD : 720;
+      const midStrD = `${String(Math.floor(midMinD / 60)).padStart(2, '0')}:${String(midMinD % 60).padStart(2, '0')}`;
+      const timeOf = (scan: AttendanceLogRow) => {
+        const parts = scan.scanned_at.split('T');
+        return parts.length > 1 ? parts[1].slice(0, 5) : '';
+      };
+      const isAM = (scan: AttendanceLogRow) => timeOf(scan) < midStrD;
+      const amStudents = new Set(dayLogs.filter((l) => isAM(l)).map((l) => l.student_id));
+      const pmStudents = new Set(dayLogs.filter((l) => !isAM(l)).map((l) => l.student_id));
       daily.push({
         day,
         scans: dayLogs.length,
         in: dayLogs.filter((l) => l.entry_type === 'IN').length,
         out: dayLogs.filter((l) => l.entry_type === 'OUT').length,
+        morningIn: dayLogs.filter((l) => l.entry_type === 'IN' && isAM(l)).length,
+        morningOut: dayLogs.filter((l) => l.entry_type === 'OUT' && isAM(l)).length,
+        afternoonIn: dayLogs.filter((l) => l.entry_type === 'IN' && !isAM(l)).length,
+        afternoonOut: dayLogs.filter((l) => l.entry_type === 'OUT' && !isAM(l)).length,
         late: dayLogs.filter((l) => l.entry_type === 'IN' && flag(l) === 'LATE').length,
+        amLate: dayLogs.filter((l) => l.entry_type === 'IN' && flag(l) === 'LATE' && isAM(l)).length,
+        pmLate: dayLogs.filter((l) => l.entry_type === 'IN' && flag(l) === 'LATE' && !isAM(l)).length,
         early: dayLogs.filter((l) => l.entry_type === 'OUT' && flag(l) === 'EARLY').length,
+        amEarly: dayLogs.filter((l) => l.entry_type === 'OUT' && flag(l) === 'EARLY' && isAM(l)).length,
+        pmEarly: dayLogs.filter((l) => l.entry_type === 'OUT' && flag(l) === 'EARLY' && !isAM(l)).length,
         absent: dayLogs.length > 0 ? Math.max(0, active.length - presentDay) : 0,
+        amAbsent: dayLogs.length > 0 ? Math.max(0, active.length - amStudents.size) : 0,
+        pmAbsent: dayLogs.length > 0 ? Math.max(0, active.length - pmStudents.size) : 0,
         present: presentDay,
       });
     }
@@ -2086,11 +2144,21 @@ async deleteSchoolYear(name: string): Promise<void> {
           parentPhone: phone(s.parent_phone),
           daysPresent: presentDays,
           daysLate: lateDays,
+          daysLateAm: 0,
+          daysLatePm: 0,
           daysAbsent: Math.max(0, schoolDays - presentDays),
+          daysAbsentAm: 0,
+          daysAbsentPm: 0,
           attendanceRate: schoolDays > 0 ? (presentDays / schoolDays) * 100 : null,
           totalIn: sLogs.filter((l) => l.entry_type === 'IN').length,
+          totalInAm: 0,
+          totalInPm: 0,
           totalOut: sLogs.filter((l) => l.entry_type === 'OUT').length,
+          totalOutAm: 0,
+          totalOutPm: 0,
           totalMinutesLate: lateMinutes,
+          totalMinutesLateAm: 0,
+          totalMinutesLatePm: 0,
           smsCount: smsForStudent.get(s.id) ?? 0,
           lastSmsStatus: (lastSmsForStudent.get(s.id)?.status as SmsStatus) ?? null,
         });
@@ -2115,14 +2183,51 @@ async deleteSchoolYear(name: string): Promise<void> {
           dayPresentSum.get(d)!.add(l.student_id);
         }
         const sumPres = [...dayPresentSum.values()].reduce((sum, set) => sum + set.size, 0);
+        // Compute AM/PM midpoint from settings
+        const parseHM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+        const amOutMin = this.settings.am_time_out ? parseHM(this.settings.am_time_out) : NaN;
+        let midMin = !Number.isNaN(amOutMin) ? amOutMin : 720;
+        if (Number.isNaN(amOutMin)) {
+          const amInMin = this.settings.am_time_in ? parseHM(this.settings.am_time_in) : NaN;
+          const pmOutMin = this.settings.pm_time_out ? parseHM(this.settings.pm_time_out) : NaN;
+          if (!Number.isNaN(amInMin) && !Number.isNaN(pmOutMin)) midMin = Math.round((amInMin + pmOutMin) / 2);
+        }
+        const midHH = String(Math.floor(midMin / 60)).padStart(2, '0');
+        const midMM = String(midMin % 60).padStart(2, '0');
+        const midTime = `${midHH}:${midMM}`;
+        const isAm = (d: Date) => hm(d) < midTime;
+        const lateStuds = new Set(sectionLogs.filter((l) => l.entry_type === 'IN' && flag(l) === 'LATE').map((l) => l.student_id));
+        const lateAm = new Set(sectionLogs.filter((l) => l.entry_type === 'IN' && flag(l) === 'LATE' && isAm(scanOf(l))).map((l) => l.student_id));
+        const latePm = new Set(sectionLogs.filter((l) => l.entry_type === 'IN' && flag(l) === 'LATE' && !isAm(scanOf(l))).map((l) => l.student_id));
+        const earlyStuds = new Set(sectionLogs.filter((l) => l.entry_type === 'OUT' && flag(l) === 'EARLY').map((l) => l.student_id));
+        const earlyAm = new Set(sectionLogs.filter((l) => l.entry_type === 'OUT' && flag(l) === 'EARLY' && isAm(scanOf(l))).map((l) => l.student_id));
+        const earlyPm = new Set(sectionLogs.filter((l) => l.entry_type === 'OUT' && flag(l) === 'EARLY' && !isAm(scanOf(l))).map((l) => l.student_id));
+        const amPresent = new Set(sectionLogs.filter((l) => isAm(scanOf(l))).map((l) => l.student_id)).size;
+        const pmPresent = new Set(sectionLogs.filter((l) => !isAm(scanOf(l))).map((l) => l.student_id)).size;
+        const inLogs = sectionLogs.filter((l) => l.entry_type === 'IN');
+        const outLogs = sectionLogs.filter((l) => l.entry_type === 'OUT');
         perSection.push({
           gradeSection,
           enrolled: studs.length,
           present,
           absent: Math.max(0, studs.length - present),
-          late: new Set(sectionLogs.filter((l) => l.entry_type === 'IN' && flag(l) === 'LATE').map((l) => l.student_id)).size,
-          early: new Set(sectionLogs.filter((l) => l.entry_type === 'OUT' && flag(l) === 'EARLY').map((l) => l.student_id)).size,
+          late: lateStuds.size,
+          lateAm: lateAm.size,
+          latePm: latePm.size,
+          early: earlyStuds.size,
+          earlyAm: earlyAm.size,
+          earlyPm: earlyPm.size,
           attendanceRate: studs.length > 0 && schoolDays > 0 ? (sumPres / (studs.length * schoolDays)) * 100 : null,
+          presentAm: amPresent,
+          presentPm: pmPresent,
+          absentAm: Math.max(0, studs.length - amPresent),
+          absentPm: Math.max(0, studs.length - pmPresent),
+          totalIn: inLogs.length,
+          totalInAm: inLogs.filter((l) => isAm(scanOf(l))).length,
+          totalInPm: inLogs.filter((l) => !isAm(scanOf(l))).length,
+          totalOut: outLogs.length,
+          totalOutAm: outLogs.filter((l) => isAm(scanOf(l))).length,
+          totalOutPm: outLogs.filter((l) => !isAm(scanOf(l))).length,
         });
       }
     } else if (type === 'register') {
@@ -2149,23 +2254,67 @@ async deleteSchoolYear(name: string): Promise<void> {
         rows: [],
       };
       const windowLogs = logs.filter((l) => dayOf(l.scanned_at) >= windowFrom && dayOf(l.scanned_at) <= windowTo);
-      const byKey = new Map<string, { firstIn: string | null; lastOut: string | null }>();
+      // Midpoint for morning/afternoon split (default 12:00)
+      const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+      const bellIn = this.settings.am_time_out ? parseHHMM(this.settings.am_time_out) : NaN;
+      const midMinutes = !Number.isNaN(bellIn) ? bellIn : 720;
+      const midHH = String(Math.floor(midMinutes / 60)).padStart(2, '0');
+      const midMM = String(midMinutes % 60).padStart(2, '0');
+      const midTime = `${midHH}:${midMM}`;
+
+      interface DayCell { firstIn: string | null; lastOut: string | null; morningIn: string | null; morningOut: string | null; afternoonIn: string | null; afternoonOut: string | null; amLate: boolean; pmLate: boolean; amEarly: boolean; pmEarly: boolean }
+      const byKey = new Map<string, DayCell>();
       for (const l of windowLogs) {
         if (!activeSection.some((s) => s.id === l.student_id)) continue;
         const key = `${l.student_id}:${dayOf(l.scanned_at)}`;
-        const cur = byKey.get(key) ?? { firstIn: null, lastOut: null };
-        if (l.entry_type === 'IN') cur.firstIn = cur.firstIn === null || hm(scanOf(l)) < cur.firstIn ? hm(scanOf(l)) : cur.firstIn;
-        if (l.entry_type === 'OUT') cur.lastOut = cur.lastOut === null || hm(scanOf(l)) > cur.lastOut ? hm(scanOf(l)) : cur.lastOut;
+        const cur = byKey.get(key) ?? { firstIn: null, lastOut: null, morningIn: null, morningOut: null, afternoonIn: null, afternoonOut: null, amLate: false, pmLate: false, amEarly: false, pmEarly: false };
+        const t = hm(scanOf(l));
+        const isMorning = t < midTime;
+        if (l.entry_type === 'IN') {
+          cur.firstIn = cur.firstIn === null || t < cur.firstIn ? t : cur.firstIn;
+          if (isMorning) cur.morningIn = cur.morningIn === null || t < cur.morningIn ? t : cur.morningIn;
+          else cur.afternoonIn = cur.afternoonIn === null || t < cur.afternoonIn ? t : cur.afternoonIn;
+          if (flag(l) === 'LATE') { if (isMorning) cur.amLate = true; else cur.pmLate = true; }
+        }
+        if (l.entry_type === 'OUT') {
+          cur.lastOut = cur.lastOut === null || t > cur.lastOut ? t : cur.lastOut;
+          if (isMorning) cur.morningOut = cur.morningOut === null || t > cur.morningOut ? t : cur.morningOut;
+          else cur.afternoonOut = cur.afternoonOut === null || t > cur.afternoonOut ? t : cur.afternoonOut;
+          if (flag(l) === 'EARLY') { if (isMorning) cur.amEarly = true; else cur.pmEarly = true; }
+        }
         byKey.set(key, cur);
       }
       for (const [key, cell] of byKey) {
         const [sid, day] = key.split(':');
-        register.rows.push({ studentId: Number(sid), day, firstIn: cell.firstIn, lastOut: cell.lastOut });
+        register.rows.push({
+          studentId: Number(sid), day,
+          firstIn: cell.firstIn, lastOut: cell.lastOut,
+          morningIn: cell.morningIn, morningOut: cell.morningOut,
+          afternoonIn: cell.afternoonIn, afternoonOut: cell.afternoonOut,
+          amLate: cell.amLate, pmLate: cell.pmLate,
+          amEarly: cell.amEarly, pmEarly: cell.pmEarly,
+        });
       }
     } else if (type === 'absentee') {
+      // Compute midpoint for AM/PM session split.
+      const parseHMAbs = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+      const amOutMin = this.settings.am_time_out ? parseHMAbs(this.settings.am_time_out) : NaN;
+      let midMinAbs = !Number.isNaN(amOutMin) ? amOutMin : 720;
+      if (Number.isNaN(amOutMin)) {
+        const aMin = this.settings.am_time_in ? parseHMAbs(this.settings.am_time_in) : NaN;
+        const pMin = this.settings.pm_time_out ? parseHMAbs(this.settings.pm_time_out) : NaN;
+        if (!Number.isNaN(aMin) && !Number.isNaN(pMin)) midMinAbs = Math.round((aMin + pMin) / 2);
+      }
+      const midTimeAbs = `${String(Math.floor(midMinAbs / 60)).padStart(2, '0')}:${String(midMinAbs % 60).padStart(2, '0')}`;
+
       for (const d of [...schoolDayList].sort().reverse()) {
         for (const s of activeSection) {
-          if (logs.some((l) => l.student_id === s.id && dayOf(l.scanned_at) === d)) continue;
+          // Check AM and PM presence separately.
+          const dayLogs = logs.filter((l) => l.student_id === s.id && dayOf(l.scanned_at) === d);
+          const hasAm = dayLogs.some((l) => hm(scanOf(l)) < midTimeAbs);
+          const hasPm = dayLogs.some((l) => hm(scanOf(l)) >= midTimeAbs);
+          if (hasAm && hasPm) continue; // fully present, skip
+          const session = !hasAm && !hasPm ? 'FULL' : !hasAm ? 'AM' : 'PM';
           const smsSent = this.sms.some((sm) => {
             const log = this.logs.find((l) => l.id === sm.attendance_id);
             return log && log.student_id === s.id && dayOf(log.scanned_at) === d;
@@ -2178,24 +2327,33 @@ async deleteSchoolYear(name: string): Promise<void> {
             parentPhone: phone(s.parent_phone),
             day: d,
             smsSent,
+            session,
           });
           if (absentee.length >= 3000) break;
         }
         if (absentee.length >= 3000) break;
       }
-      // Per-student absent-day totals — the "who to call" summary.
+      // Per-student absent-day totals — AM and PM counts.
       for (const s of activeSection) {
-        const daysAbsent = schoolDayList.filter(
-          (d) => !logs.some((l) => l.student_id === s.id && dayOf(l.scanned_at) === d),
-        ).length;
-        if (daysAbsent <= 0) continue;
+        let daysAbsentAm = 0;
+        let daysAbsentPm = 0;
+        for (const d of schoolDayList) {
+          const dayLogs = logs.filter((l) => l.student_id === s.id && dayOf(l.scanned_at) === d);
+          const hasAm = dayLogs.some((l) => hm(scanOf(l)) < midTimeAbs);
+          const hasPm = dayLogs.some((l) => hm(scanOf(l)) >= midTimeAbs);
+          if (!hasAm) daysAbsentAm++;
+          if (!hasPm) daysAbsentPm++;
+        }
+        if (daysAbsentAm <= 0 && daysAbsentPm <= 0) continue;
         absenteeTotals.push({
           studentId: s.id,
           studentNo: s.student_no,
           fullName: s.full_name,
           gradeSection: secOf(s),
           parentPhone: phone(s.parent_phone),
-          daysAbsent,
+          daysAbsent: Math.max(daysAbsentAm, daysAbsentPm),
+          daysAbsentAm,
+          daysAbsentPm,
         });
       }
       absenteeTotals.sort(
@@ -2290,19 +2448,64 @@ async deleteSchoolYear(name: string): Promise<void> {
           presentDays.add(d);
         }
         const days: StudentDayRow[] = [];
+        // Compute midpoint for morning/afternoon split
+        const parseHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+        const bellInM = this.settings.am_time_out ? parseHHMM(this.settings.am_time_out) : NaN;
+        const midMin = !Number.isNaN(bellInM) ? bellInM : 720;
+        const midStr = `${String(Math.floor(midMin / 60)).padStart(2, '0')}:${String(midMin % 60).padStart(2, '0')}`;
+
         for (let t = new Date(`${from}T00:00:00`); t <= end; t.setDate(t.getDate() + 1)) {
           const d = dayOf(t.toISOString());
           const scans = byDay.get(d) ?? [];
+          const am = scans.filter((x) => x.time < midStr);
+          const pm = scans.filter((x) => x.time >= midStr);
           days.push({
             day: d,
             schoolDay: dayPresent.has(d),
             present: scans.length > 0,
             late: scans.some((x) => x.flag === 'LATE'),
             early: scans.some((x) => x.flag === 'EARLY'),
+            amLate: am.some((x) => x.entryType === 'IN' && x.flag === 'LATE'),
+            pmLate: pm.some((x) => x.entryType === 'IN' && x.flag === 'LATE'),
+            amEarly: am.some((x) => x.entryType === 'OUT' && x.flag === 'EARLY'),
+            pmEarly: pm.some((x) => x.entryType === 'OUT' && x.flag === 'EARLY'),
+            amPresent: am.length > 0,
+            pmPresent: pm.length > 0,
             firstIn: scans.find((x) => x.entryType === 'IN')?.time ?? null,
             lastOut: [...scans].reverse().find((x) => x.entryType === 'OUT')?.time ?? null,
+            morningIn: am.find((x) => x.entryType === 'IN')?.time ?? null,
+            morningOut: [...am].reverse().find((x) => x.entryType === 'OUT')?.time ?? null,
+            afternoonIn: pm.find((x) => x.entryType === 'IN')?.time ?? null,
+            afternoonOut: [...pm].reverse().find((x) => x.entryType === 'OUT')?.time ?? null,
             scans,
           });
+        }
+        // Compute AM/PM late days and absent days from the per-day data.
+        const lateDaysAm = new Set<string>();
+        const lateDaysPm = new Set<string>();
+        let totalInAm = 0;
+        let totalInPm = 0;
+        let totalOutAm = 0;
+        let totalOutPm = 0;
+        for (const [day, dayScans] of byDay) {
+          for (const sc of dayScans) {
+            const isAm = sc.time < midStr;
+            if (sc.entryType === 'IN') {
+              if (isAm) totalInAm++; else totalInPm++;
+              if (sc.flag === 'LATE') {
+                if (isAm) lateDaysAm.add(day); else lateDaysPm.add(day);
+              }
+            } else {
+              if (isAm) totalOutAm++; else totalOutPm++;
+            }
+          }
+        }
+        let daysAbsentAm = 0;
+        let daysAbsentPm = 0;
+        for (const [day] of dayPresent) {
+          const scans = byDay.get(day) ?? [];
+          if (!scans.some((x) => x.time < midStr)) daysAbsentAm++;
+          if (!scans.some((x) => x.time >= midStr)) daysAbsentPm++;
         }
         studentRecord = {
           studentId: s.id,
@@ -2313,11 +2516,21 @@ async deleteSchoolYear(name: string): Promise<void> {
           summary: {
             daysPresent: presentDays.size,
             daysLate: lateDays.size,
+            daysLateAm: lateDaysAm.size,
+            daysLatePm: lateDaysPm.size,
             daysAbsent: Math.max(0, schoolDays - presentDays.size),
+            daysAbsentAm,
+            daysAbsentPm,
             attendanceRate: schoolDays > 0 ? (presentDays.size / schoolDays) * 100 : null,
             totalIn,
+            totalInAm,
+            totalInPm,
             totalOut,
+            totalOutAm,
+            totalOutPm,
             totalMinutesLate,
+            totalMinutesLateAm: 0,
+            totalMinutesLatePm: 0,
             smsCount: smsForStudent.get(s.id) ?? 0,
             lastSmsStatus: (lastSmsForStudent.get(s.id)?.status as SmsStatus) ?? null,
           },
@@ -2458,7 +2671,7 @@ async deleteSchoolYear(name: string): Promise<void> {
       return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
     };
     const grace = Math.max(0, Number(this.settings.bell_grace_minutes) || 0);
-    const lateMins = this.settings.bell_time_in ? parseT(this.settings.bell_time_in)! + grace : null;
+    const lateMins = this.settings.am_time_in ? parseT(this.settings.am_time_in)! + grace : null;
 
     const logs = this.logs.filter((l) => dayOf(l.scanned_at) >= from && dayOf(l.scanned_at) <= to);
     const active = this.students.filter((s) => s.is_active && (!section || secOf(s) === section));

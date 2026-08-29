@@ -143,6 +143,8 @@ button { font-family: inherit; }
 .pill-late    { background: var(--amber-soft); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.4); }
 .pill-early   { background: rgba(56, 189, 248, 0.12); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.4); }
 .pill-dim     { background: rgba(148, 163, 184, 0.1); color: var(--text-dim); border: 1px solid var(--border); }
+.pill-am      { background: rgba(251, 191, 36, 0.12); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.35); }
+.pill-pm      { background: rgba(165, 180, 252, 0.12); color: #a5b4fc; border: 1px solid rgba(165, 180, 252, 0.35); }
 .pill-pulse   { animation: pillPulse 1.4s ease-in-out infinite; }
 @keyframes pillPulse {
   0%, 100% { opacity: 1; }
@@ -638,6 +640,29 @@ button { font-family: inherit; }
 
 /* ---- Kiosk gate-direction mode (Auto / IN / OUT) ---- */
 .gate-mode-card { flex: none; }
+.gate-mode-session-toggle {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 5px;
+  margin-bottom: 8px;
+}
+.gate-mode-session-btn {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 0;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.gate-mode-session-btn:hover { background: var(--surface-2); }
 .gate-mode-seg {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1863,6 +1888,18 @@ input[type='checkbox'] {
   display: flex; flex-direction: column; gap: 14px;
 }
 .settings-card h3 { font-size: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.about-logo {
+  width: 56px; height: 56px;
+  border-radius: 10px;
+  border: 2px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.about-logo:hover {
+  transform: scale(1.1);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+}
 
 /* Portal address shown in Settings for teachers to connect */
 .portal-address {
@@ -2954,6 +2991,18 @@ input[type='checkbox'] {
 .guardian-detail-student-name { font-weight: 650; font-size: 14px; }
 .guardian-detail-empty { font-size: 13px; padding: 12px 0; }
 
+/* ---- Register sub-headers (AM/PM columns) -------------------------------- */
+.reg-sub-hdr {
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 6px !important;
+  white-space: nowrap;
+}
+.reg-sub-hdr.am { color: #fbbf24 !important; }
+.reg-sub-hdr.pm { color: #a5b4fc !important; }
+
 /* ---- GSM multi-modem settings -------------------------------------------- */
 .gsm-modem-row {
   background: var(--surface-2, rgba(255,255,255,0.04));
@@ -2973,4 +3022,160 @@ input[type='checkbox'] {
 .gsm-modem-fields .field:last-child {
   grid-column: 1 / -1;
   max-width: 160px;
+}
+
+/* ===========================================================================
+   HOW TO GUIDE
+   =========================================================================== */
+.howto-guide {
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 0 2px 24px;
+}
+.howto-toc {
+  margin-bottom: 28px;
+}
+.howto-toc h3 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+  letter-spacing: 0.03em;
+}
+.howto-toc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+}
+.howto-toc-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.15s ease;
+}
+.howto-toc-link:hover {
+  border-color: rgba(16, 185, 129, 0.55);
+  background: rgba(16, 185, 129, 0.08);
+  transform: translateY(-1px);
+}
+.howto-toc-icon { font-size: 16px; }
+.howto-toc-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.howto-section {
+  margin-bottom: 28px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.howto-section:last-of-type {
+  border-bottom: none;
+}
+.howto-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 19px;
+  font-weight: 750;
+  margin-bottom: 14px;
+  color: var(--text);
+}
+.howto-section-icon { font-size: 22px; }
+.howto-section-content {
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+.howto-section-content h4 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 18px 0 8px;
+}
+.howto-section-content h4:first-child {
+  margin-top: 0;
+}
+.howto-section-content p {
+  margin-bottom: 10px;
+}
+.howto-section-content ul,
+.howto-section-content ol {
+  margin: 6px 0 12px;
+  padding-left: 22px;
+}
+.howto-section-content li {
+  margin-bottom: 6px;
+}
+.howto-section-content b {
+  color: var(--text);
+}
+.howto-section-content code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 13px;
+}
+.howto-mockup {
+  margin: 16px 0;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.howto-mockup-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  letter-spacing: 0.03em;
+}
+.howto-mockup svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.howto-footer {
+  text-align: center;
+  padding: 20px 0 0;
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+}
+.howto-footer p { margin-bottom: 4px; }
+
+/* Back-to-top floating button inside the How To modal */
+.howto-back-to-top {
+  position: sticky;
+  bottom: 16px;
+  float: right;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+  z-index: 2;
+}
+.howto-back-to-top:hover {
+  background: var(--surface-2);
+  border-color: var(--emerald);
+  transform: translateY(-2px);
+}
+.howto-back-to-top:active {
+  transform: translateY(0);
 }

@@ -50,7 +50,7 @@ function addDays(d: Date, n: number): Date {
  *  time configured → treat detection as always eligible (absence_detect is
  *  the master switch, and the gate-used heuristic still guards holidays). */
 function isPastCutoff(settings: Settings): boolean {
-  const outMin = settings.bell_time_out ? parseTime(settings.bell_time_out) : NaN;
+  const outMin = settings.pm_time_out ? parseTime(settings.pm_time_out) : NaN;
   if (Number.isNaN(outMin)) return true;
   const now = new Date();
   return now.getHours() * 60 + now.getMinutes() >= outMin + DETECT_BUFFER_MIN;

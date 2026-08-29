@@ -10,6 +10,7 @@ import type {
   KioskPhotoStyle,
   ScanMode,
   ScanResult,
+  SessionMode,
   Settings,
   Student,
   StudentBadgeSummary,
@@ -44,6 +45,12 @@ const SCAN_MODES: { value: ScanMode; label: string; title: string }[] = [
   { value: 'auto', label: '↔ Auto', title: 'Smart IN/OUT — the last scan of the day decides' },
   { value: 'in', label: '✓ IN', title: 'Force every scan to CHECK-IN' },
   { value: 'out', label: '⟲ OUT', title: 'Force every scan to CHECK-OUT' },
+];
+
+const SESSION_MODES: { value: SessionMode; label: string; color: string }[] = [
+  { value: 'auto', label: 'AUTO', color: 'var(--text-dim)' },
+  { value: 'am', label: 'AM', color: '#fbbf24' },
+  { value: 'pm', label: 'PM', color: '#a5b4fc' },
 ];
 
 function StatusDot({ ok, label, title, onClick }: { ok: boolean; label: string; title: string; onClick?: () => void }) {
@@ -471,6 +478,8 @@ export function KioskScreen({ onOpenAdmin, onOpenDbConnect }: { onOpenAdmin: () 
   // Set once the staff flips the gate mode — the mount-time getScanMode()
   // fetch must not clobber a quick interaction with a stale value.
   const scanModeDirty = useRef(false);
+  const [sessionMode, setSessionModeState] = useState<SessionMode>('auto');
+  const sessionModeDirty = useRef(false);
   // Holds the latest showResult so the mount effect (which must run exactly
   // once) can call it without being re-created on every settings change.
   const showResultRef = useRef<(r: ScanResult) => void>(() => undefined);
@@ -539,12 +548,21 @@ const armAnnounceIdle = useCallback(() => {
     void api.setScanMode(mode);
   }, []);
 
+  const handleSessionModeChange = useCallback((mode: SessionMode) => {
+    sessionModeDirty.current = true;
+    setSessionModeState(mode);
+    void api.setSessionMode(mode);
+  }, []);
+
   useEffect(() => {
     void api.getRecentActivity(5).then(setActivity);
     void api.getStatus().then(setStatus);
     void api.getSettings().then(setSettings);
     void api.getScanMode().then((m) => {
       if (!scanModeDirty.current) setScanMode(m);
+    });
+    void api.getSessionMode().then((m) => {
+      if (!sessionModeDirty.current) setSessionModeState(m);
     });
     void api.setKioskMode(true);
     const offScan = api.onScanResult((r) => {
@@ -840,6 +858,31 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
                 </span>
               )}
             </div>
+            <div className="gate-mode-session-toggle" role="radiogroup" aria-label="Session">
+              {SESSION_MODES.map((s) => {
+                const isOn = sessionMode === s.value;
+                const bgColor = isOn && s.value !== 'auto' ? `${s.color}22` : 'transparent';
+                const borderColor = isOn && s.value !== 'auto' ? `${s.color}88` : 'var(--border)';
+                return (
+                  <button
+                    key={s.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={isOn}
+                    className="gate-mode-session-btn"
+                    style={{
+                      background: bgColor,
+                      color: isOn ? s.color : 'var(--text-dim)',
+                      borderColor,
+                      fontWeight: isOn ? 800 : 500,
+                    }}
+                    onClick={() => handleSessionModeChange(s.value)}
+                  >
+                    {s.label}
+                  </button>
+                );
+              })}
+            </div>
             <div className="gate-mode-seg" role="radiogroup" aria-label="Gate scan direction">
               {SCAN_MODES.map((m) => (
                 <button
@@ -856,11 +899,17 @@ if (announceTimer.current) clearTimeout(announceTimer.current);
               ))}
             </div>
             <p className="gate-mode-hint">
+              {sessionMode !== 'auto' && (
+                <span style={{ color: sessionMode === 'am' ? '#fbbf24' : '#a5b4fc', fontWeight: 700 }}>
+                  {sessionMode === 'am' ? '☀️ AM' : '🌙 PM'} session selected — 
+                </span>
+              )}
               {scanMode === 'in'
-                ? 'Every scan is recorded as CHECK-IN. Switch back to Auto after the morning rush.'
+                ? 'Every scan is recorded as CHECK-IN.'
                 : scanMode === 'out'
-                  ? 'Every scan is recorded as CHECK-OUT — ideal when a student forgot their morning swipe.'
-                  : 'Auto: the last scan of the day decides IN/OUT. Use IN/OUT to override for students who forgot to swipe.'}
+                  ? 'Every scan is recorded as CHECK-OUT.'
+                  : 'Auto: the last scan decides IN/OUT.'}
+              {' '}Switch to Auto when done.
             </p>
           </div>
           <div className="side-card">

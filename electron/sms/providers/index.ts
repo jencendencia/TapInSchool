@@ -11,6 +11,11 @@ export interface SmsProvider {
   /** Live status check (may do lightweight network verification). */
   verify(settings: Settings): Promise<ProviderStatus>;
   send(settings: Settings, phone: string, message: string): Promise<void>;
+  /** Optional dispatch capacity used to size outbox claims. */
+  getRecommendedConcurrency?(settings: Settings): number;
+  /** Optional background health/reconnect lifecycle. */
+  start?(getSettings: () => Settings): void;
+  stop?(): void;
 }
 
 import { SimulatorProvider } from './simulator';

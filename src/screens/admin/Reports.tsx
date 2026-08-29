@@ -2,7 +2,7 @@
 // eight types — summary, SF2-style daily register, per-student, per-section,
 // absentee list, tardiness, SMS audit and trends — each exportable as PDF,
 // styled Excel, or emailed as a PDF attachment.
-import { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import type {
   AdviserSendResult,
@@ -268,7 +268,26 @@ function SummaryView({ report, onCardClick }: { report: ReportData; onCardClick:
         <table className="table">
           <thead>
             <tr>
-              <th>Day</th><th>Scans</th><th>IN</th><th>OUT</th><th>Late</th><th>Early</th><th>Absent</th><th>Present</th>
+              <th rowSpan={2}>Day</th>
+              <th rowSpan={2}>Scans</th>
+              <th colSpan={2} className="reg-sub-hdr am">Morning</th>
+              <th colSpan={2} className="reg-sub-hdr pm">Afternoon</th>
+              <th colSpan={2} className="reg-sub-hdr am">AM</th>
+              <th colSpan={2} className="reg-sub-hdr pm">PM</th>
+              <th colSpan={2} className="reg-sub-hdr" style={{ color: '#FB7185' }}>Absent</th>
+              <th rowSpan={2}>Present</th>
+            </tr>
+            <tr>
+              <th className="reg-sub-hdr am">IN</th>
+              <th className="reg-sub-hdr am">OUT</th>
+              <th className="reg-sub-hdr pm">IN</th>
+              <th className="reg-sub-hdr pm">OUT</th>
+              <th className="reg-sub-hdr am">Late</th>
+              <th className="reg-sub-hdr am">Early</th>
+              <th className="reg-sub-hdr pm">Late</th>
+              <th className="reg-sub-hdr pm">Early</th>
+              <th className="reg-sub-hdr" style={{ color: '#FB7185' }}>AM</th>
+              <th className="reg-sub-hdr" style={{ color: '#FB7185' }}>PM</th>
             </tr>
           </thead>
           <tbody>
@@ -276,16 +295,21 @@ function SummaryView({ report, onCardClick }: { report: ReportData; onCardClick:
               <tr key={d.day}>
                 <td className="mono">{d.day}</td>
                 <td className="num">{d.scans}</td>
-                <td className="num" style={{ color: '#34D399' }}>{d.in}</td>
-                <td className="num" style={{ color: '#A5B4FC' }}>{d.out}</td>
-                <td className="num" style={{ color: '#FBBF24' }}>{d.late}</td>
-                <td className="num" style={{ color: '#7DD3FC' }}>{d.early}</td>
-                <td className="num" style={{ color: '#FB7185' }}>{d.absent}</td>
+                <td className="num" style={{ color: '#34D399' }}>{d.morningIn}</td>
+                <td className="num" style={{ color: '#A5B4FC' }}>{d.morningOut}</td>
+                <td className="num" style={{ color: '#34D399' }}>{d.afternoonIn}</td>
+                <td className="num" style={{ color: '#A5B4FC' }}>{d.afternoonOut}</td>
+                <td className="num" style={{ color: '#FBBF24' }}>{d.amLate}</td>
+                <td className="num" style={{ color: '#38BDF8' }}>{d.amEarly}</td>
+                <td className="num" style={{ color: '#FBBF24' }}>{d.pmLate}</td>
+                <td className="num" style={{ color: '#38BDF8' }}>{d.pmEarly}</td>
+                <td className="num" style={{ color: '#FB7185' }}>{d.amAbsent}</td>
+                <td className="num" style={{ color: '#FB7185' }}>{d.pmAbsent}</td>
                 <td className="num" style={{ color: '#94A3B8' }}>{d.present}</td>
               </tr>
             ))}
             {report.daily.length === 0 && (
-              <tr><td colSpan={8} className="empty-cell">No data in the selected range.</td></tr>
+              <tr><td colSpan={14} className="empty-cell">No data in the selected range.</td></tr>
             )}
           </tbody>
         </table>
@@ -295,24 +319,45 @@ function SummaryView({ report, onCardClick }: { report: ReportData; onCardClick:
 }
 
 function RegisterView({ report }: { report: ReportData }) {
-  const { register, cutoffs } = report;
+  const { register } = report;
   const dayLabel = (day: string) => (day || '—').slice(5).replace('-', '/');
   const byKey = new Map(register.rows.map((r) => [`${r.studentId}:${r.day}`, r] as const));
-  const cell = (row: RegisterRow | undefined) => {
-    if (!row) return <span className="reg-cell absent">A</span>;
-    const late = cutoffs.late && row.firstIn ? row.firstIn > cutoffs.late : false;
+
+  /** Render a single time cell: morning IN/OUT or afternoon IN/OUT. */
+  const timeCell = (time: string | null, isLate = false) => (
+    <span className={`reg-cell ${isLate ? 'late' : ''}`}>
+      {time ?? '—'}
+    </span>
+  );
+
+  /** Render the full 4-cell block for one student × one day. */
+  const dayCells = (row: RegisterRow | undefined) => {
+    if (!row) {
+      return (
+        <>
+          <td><span className="reg-cell absent">A</span></td>
+          <td><span className="reg-cell absent">A</span></td>
+          <td><span className="reg-cell absent">A</span></td>
+          <td><span className="reg-cell absent">A</span></td>
+        </>
+      );
+    }
     return (
-      <span className={`reg-cell ${late ? 'late' : ''}`}>
-        {row.firstIn ? `${row.firstIn}${late ? ' ⚠' : ''}` : '—'}/{row.lastOut ?? '—'}
-      </span>
+      <>
+        <td>{timeCell(row.morningIn, row.amLate)}</td>
+        <td>{timeCell(row.morningOut, row.amEarly)}</td>
+        <td>{timeCell(row.afternoonIn, row.pmLate)}</td>
+        <td>{timeCell(row.afternoonOut, row.pmEarly)}</td>
+      </>
     );
   };
+
   return (
     <>
       <p className="field-hint" style={{ marginTop: 0 }}>
         Window: {register.windowFrom} → {register.windowTo}
         {register.capped && ' — the matrix is capped at the last 35 days; narrow the date range to see more.'}
-        {' '}Cell = IN time / OUT time · ⚠ late · A absent.
+        {' '}Cells = AM IN · AM OUT · PM IN · PM OUT · ⚠ AM/PM late/early · A absent.
       </p>
       {register.days.length === 0 ? (
         <div className="report-empty">No scans in the selected window.</div>
@@ -321,8 +366,20 @@ function RegisterView({ report }: { report: ReportData }) {
           <table className="table register-table">
             <thead>
               <tr>
-                <th className="reg-sticky">Student</th>
-                {register.days.map((d) => <th key={d} className="reg-day" title={d}>{dayLabel(d)}</th>)}
+                <th className="reg-sticky" rowSpan={2}>Student</th>
+                {register.days.map((d) => (
+                  <th key={d} className="reg-day" colSpan={4} title={d}>{dayLabel(d)}</th>
+                ))}
+              </tr>
+              <tr>
+                {register.days.map((d) => (
+                  <React.Fragment key={d}>
+                    <th className="reg-sub-hdr am">AM IN</th>
+                    <th className="reg-sub-hdr am">AM OUT</th>
+                    <th className="reg-sub-hdr pm">PM IN</th>
+                    <th className="reg-sub-hdr pm">PM OUT</th>
+                  </React.Fragment>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -332,7 +389,9 @@ function RegisterView({ report }: { report: ReportData }) {
                     <div className="reg-name">{st.fullName}</div>
                     <div className="reg-sub">{st.studentNo} · {st.gradeSection}</div>
                   </td>
-                  {register.days.map((d) => <td key={d}>{cell(byKey.get(`${st.studentId}:${d}`))}</td>)}
+                  {register.days.map((d) => (
+                    <React.Fragment key={d}>{dayCells(byKey.get(`${st.studentId}:${d}`))}</React.Fragment>
+                  ))}
                 </tr>
               ))}
             </tbody>
@@ -349,8 +408,20 @@ function PerStudentView({ report }: { report: ReportData }) {
       <table className="table per-student-table">
         <thead>
           <tr>
-            <th>Student</th><th>Section</th><th>Present</th><th>Late</th><th>Absent</th><th>Rate</th>
-            <th>IN</th><th>OUT</th><th>Min late</th><th>SMS</th><th>Last SMS</th><th>Phone</th>
+            <th rowSpan={2}>Student</th><th rowSpan={2}>Section</th><th rowSpan={2}>Present</th>
+            <th colSpan={2} className="reg-sub-hdr am">Late</th>
+            <th colSpan={2} className="reg-sub-hdr">Absent</th>
+            <th rowSpan={2}>Rate</th>
+            <th colSpan={2} className="reg-sub-hdr am">IN</th>
+            <th colSpan={2} className="reg-sub-hdr pm">OUT</th>
+            <th colSpan={2} className="reg-sub-hdr" style={{ color: '#FBBF24' }}>Min late</th><th rowSpan={2}>SMS</th><th rowSpan={2}>Last SMS</th><th rowSpan={2}>Phone</th>
+          </tr>
+          <tr>
+            <th className="reg-sub-hdr am">AM</th><th className="reg-sub-hdr pm">PM</th>
+            <th className="reg-sub-hdr am">AM</th><th className="reg-sub-hdr pm">PM</th>
+            <th className="reg-sub-hdr am">AM</th><th className="reg-sub-hdr pm">PM</th>
+            <th className="reg-sub-hdr am">AM</th><th className="reg-sub-hdr pm">PM</th>
+            <th className="reg-sub-hdr am">AM</th><th className="reg-sub-hdr pm">PM</th>
           </tr>
         </thead>
         <tbody>
@@ -359,12 +430,17 @@ function PerStudentView({ report }: { report: ReportData }) {
               <td>{r.fullName}</td>
               <td>{r.gradeSection}</td>
               <td className="num">{r.daysPresent}</td>
-              <td className="num" style={{ color: '#FBBF24' }}>{r.daysLate}</td>
-              <td className="num" style={{ color: '#FB7185' }}>{r.daysAbsent}</td>
+              <td className="num" style={{ color: '#FBBF24' }}>{r.daysLateAm}</td>
+              <td className="num" style={{ color: '#FBBF24' }}>{r.daysLatePm}</td>
+              <td className="num" style={{ color: '#FB7185' }}>{r.daysAbsentAm}</td>
+              <td className="num" style={{ color: '#FB7185' }}>{r.daysAbsentPm}</td>
               <td><RateBar rate={r.attendanceRate} /></td>
-              <td className="num">{r.totalIn}</td>
-              <td className="num">{r.totalOut}</td>
-              <td className="num">{r.totalMinutesLate}</td>
+              <td className="num" style={{ color: '#34D399' }}>{r.totalInAm}</td>
+              <td className="num" style={{ color: '#34D399' }}>{r.totalInPm}</td>
+              <td className="num" style={{ color: '#A5B4FC' }}>{r.totalOutAm}</td>
+              <td className="num" style={{ color: '#A5B4FC' }}>{r.totalOutPm}</td>
+              <td className="num" style={{ color: '#FBBF24' }}>{r.totalMinutesLateAm}</td>
+              <td className="num" style={{ color: '#FBBF24' }}>{r.totalMinutesLatePm}</td>
               <td className="num">{r.smsCount}</td>
               <td>
                 {r.lastSmsStatus === 'SENT' && <span className="badge ok">SENT</span>}
@@ -376,7 +452,7 @@ function PerStudentView({ report }: { report: ReportData }) {
             </tr>
           ))}
           {report.perStudent.length === 0 && (
-            <tr><td colSpan={12} className="empty-cell">No active students{report.section ? ` in ${report.section}` : ''}.</td></tr>
+            <tr><td colSpan={17} className="empty-cell">No active students{report.section ? ` in ${report.section}` : ''}.</td></tr>
           )}
         </tbody>
       </table>
@@ -389,22 +465,48 @@ function PerSectionView({ report }: { report: ReportData }) {
     <div className="table-wrap">
       <table className="table">
         <thead>
-          <tr><th>Section</th><th>Enrolled</th><th>Present</th><th>Absent</th><th>Late</th><th>Early</th><th>Rate</th></tr>
+          <tr>
+            <th rowSpan={2}>Section</th>
+            <th rowSpan={2}>Enrolled</th>
+            <th colSpan={2}>Present</th>
+            <th colSpan={2}>Absent</th>
+            <th colSpan={2}>Late</th>
+            <th colSpan={2}>Early</th>
+            <th rowSpan={2}>Rate</th>
+            <th colSpan={2}>IN</th>
+            <th colSpan={2}>OUT</th>
+          </tr>
+          <tr>
+            <th>AM</th><th>PM</th>
+            <th>AM</th><th>PM</th>
+            <th>AM</th><th>PM</th>
+            <th>AM</th><th>PM</th>
+            <th>AM</th><th>PM</th>
+            <th>AM</th><th>PM</th>
+          </tr>
         </thead>
         <tbody>
           {report.perSection.map((r) => (
             <tr key={r.gradeSection}>
               <td>{r.gradeSection}</td>
               <td className="num">{r.enrolled}</td>
-              <td className="num" style={{ color: '#34D399' }}>{r.present}</td>
-              <td className="num" style={{ color: '#FB7185' }}>{r.absent}</td>
-              <td className="num" style={{ color: '#FBBF24' }}>{r.late}</td>
-              <td className="num" style={{ color: '#7DD3FC' }}>{r.early}</td>
+              <td className="num" style={{ color: '#34D399' }}>{r.presentAm}</td>
+              <td className="num" style={{ color: '#34D399' }}>{r.presentPm}</td>
+              <td className="num" style={{ color: '#FB7185' }}>{r.absentAm}</td>
+              <td className="num" style={{ color: '#FB7185' }}>{r.absentPm}</td>
+              <td className="num" style={{ color: '#FBBF24' }}>{r.lateAm}</td>
+              <td className="num" style={{ color: '#FBBF24' }}>{r.latePm}</td>
+              <td className="num" style={{ color: '#7DD3FC' }}>{r.earlyAm}</td>
+              <td className="num" style={{ color: '#7DD3FC' }}>{r.earlyPm}</td>
               <td><RateBar rate={r.attendanceRate} /></td>
+              <td className="num">{r.totalInAm}</td>
+              <td className="num">{r.totalInPm}</td>
+              <td className="num">{r.totalOutAm}</td>
+              <td className="num">{r.totalOutPm}</td>
             </tr>
           ))}
           {report.perSection.length === 0 && (
-            <tr><td colSpan={7} className="empty-cell">No sections found.</td></tr>
+            <tr><td colSpan={14} className="empty-cell">No sections found.</td></tr>
           )}
         </tbody>
       </table>
@@ -419,19 +521,20 @@ function AbsenteeView({ report }: { report: ReportData }) {
       <div className="table-wrap">
         <table className="table">
           <thead>
-            <tr><th>Student</th><th>Section</th><th>Days absent</th><th>Phone</th></tr>
+            <tr><th>Student</th><th>Section</th><th>Absent AM</th><th>Absent PM</th><th>Phone</th></tr>
           </thead>
           <tbody>
             {report.absenteeTotals.map((r) => (
               <tr key={r.studentId}>
                 <td>{r.fullName}</td>
                 <td>{r.gradeSection}</td>
-                <td className="num" style={{ color: r.daysAbsent >= 5 ? '#F43F5E' : '#FBBF24' }}>{r.daysAbsent}</td>
+                <td className="num" style={{ color: r.daysAbsentAm >= 3 ? '#F43F5E' : '#FBBF24' }}>{r.daysAbsentAm}</td>
+                <td className="num" style={{ color: r.daysAbsentPm >= 3 ? '#F43F5E' : '#FBBF24' }}>{r.daysAbsentPm}</td>
                 <td className="mono">{r.parentPhone}</td>
               </tr>
             ))}
             {report.absenteeTotals.length === 0 && (
-              <tr><td colSpan={4} className="empty-cell">No absences recorded in the range.</td></tr>
+              <tr><td colSpan={5} className="empty-cell">No absences recorded in the range.</td></tr>
             )}
           </tbody>
         </table>
@@ -440,7 +543,7 @@ function AbsenteeView({ report }: { report: ReportData }) {
       <div className="table-wrap">
         <table className="table">
           <thead>
-            <tr><th>Day</th><th>Student</th><th>Section</th><th>Phone</th><th>SMS sent</th></tr>
+            <tr><th>Day</th><th>Student</th><th>Section</th><th>Session</th><th>Phone</th><th>SMS sent</th></tr>
           </thead>
           <tbody>
             {report.absentee.map((r, i) => (
@@ -448,12 +551,17 @@ function AbsenteeView({ report }: { report: ReportData }) {
                 <td className="mono">{r.day}</td>
                 <td>{r.fullName}</td>
                 <td>{r.gradeSection}</td>
+                <td>
+                  <span className="badge" style={{ color: r.session === 'AM' ? '#FBBF24' : r.session === 'PM' ? '#7DD3FC' : '#FB7185' }}>
+                    {r.session === 'FULL' ? 'FULL DAY' : r.session === 'AM' ? 'AM' : 'PM'}
+                  </span>
+                </td>
                 <td className="mono">{r.parentPhone}</td>
                 <td>{r.smsSent ? <span className="badge ok">SENT</span> : <span className="badge muted">—</span>}</td>
               </tr>
             ))}
             {report.absentee.length === 0 && (
-              <tr><td colSpan={5} className="empty-cell">No absence records.</td></tr>
+              <tr><td colSpan={6} className="empty-cell">No absence records.</td></tr>
             )}
           </tbody>
         </table>
@@ -609,12 +717,17 @@ function StudentView({ report }: { report: ReportData }) {
       </div>
       <div className="stat-grid">
         <StatCard label="Present days" value={s.daysPresent} accent="#34D399" />
-        <StatCard label="Late days" value={s.daysLate} accent="#F59E0B" />
-        <StatCard label="Absent days" value={s.daysAbsent} accent={s.daysAbsent > 0 ? '#FB7185' : '#94A3B8'} />
+        <StatCard label="Late AM" value={s.daysLateAm} accent="#F59E0B" />
+        <StatCard label="Late PM" value={s.daysLatePm} accent="#F59E0B" />
+        <StatCard label="Absent AM" value={s.daysAbsentAm} accent={s.daysAbsentAm > 0 ? '#FB7185' : '#94A3B8'} />
+        <StatCard label="Absent PM" value={s.daysAbsentPm} accent={s.daysAbsentPm > 0 ? '#FB7185' : '#94A3B8'} />
         <StatCard label="Attendance rate" value={pct(s.attendanceRate)} accent="#34D399" />
-        <StatCard label="Total IN" value={s.totalIn} accent="#6366F1" />
-        <StatCard label="Total OUT" value={s.totalOut} accent="#A5B4FC" />
-        <StatCard label="Minutes late" value={s.totalMinutesLate} accent={s.totalMinutesLate > 0 ? '#FBBF24' : '#94A3B8'} />
+        <StatCard label="IN AM" value={s.totalInAm} accent="#34D399" />
+        <StatCard label="IN PM" value={s.totalInPm} accent="#34D399" />
+        <StatCard label="OUT AM" value={s.totalOutAm} accent="#A5B4FC" />
+        <StatCard label="OUT PM" value={s.totalOutPm} accent="#A5B4FC" />
+        <StatCard label="Min late AM" value={s.totalMinutesLateAm} accent={s.totalMinutesLateAm > 0 ? '#FBBF24' : '#94A3B8'} />
+        <StatCard label="Min late PM" value={s.totalMinutesLatePm} accent={s.totalMinutesLatePm > 0 ? '#FBBF24' : '#94A3B8'} />
         <StatCard label="SMS sent" value={s.smsCount} accent="#2DD4BF" hint="Parent alert texts sent for this student in the range" />
         <StatCard label="Last SMS" value={s.lastSmsStatus ?? '—'} accent="#A5B4FC" hint="Status of the student's most recent parent alert in the range" />
       </div>
@@ -623,31 +736,56 @@ function StudentView({ report }: { report: ReportData }) {
       <div className="table-wrap">
         <table className="table">
           <thead>
-            <tr><th>Day</th><th>Weekday</th><th>Status</th><th>IN</th><th>OUT</th><th>Late</th><th>Early</th><th>Scans</th></tr>
+            <tr>
+              <th rowSpan={2}>Day</th>
+              <th rowSpan={2}>Weekday</th>
+              <th rowSpan={2}>Status</th>
+              <th colSpan={2} className="reg-sub-hdr am">Morning</th>
+              <th colSpan={2} className="reg-sub-hdr pm">Afternoon</th>
+              <th rowSpan={2}>AM Late</th>
+              <th rowSpan={2}>PM Late</th>
+              <th rowSpan={2}>AM Early</th>
+              <th rowSpan={2}>PM Early</th>
+              <th rowSpan={2}>Scans</th>
+            </tr>
+            <tr>
+              <th className="reg-sub-hdr am">IN</th>
+              <th className="reg-sub-hdr am">OUT</th>
+              <th className="reg-sub-hdr pm">IN</th>
+              <th className="reg-sub-hdr pm">OUT</th>
+            </tr>
           </thead>
           <tbody>
             {rec.days.map((d) => {
-              const status = !d.present ? (d.schoolDay ? 'ABSENT' : '—') : d.late ? 'LATE' : 'PRESENT';
+              const absent = !d.present && d.schoolDay;
+              const amAbsent = d.schoolDay && !d.amPresent;
+              const pmAbsent = d.schoolDay && !d.pmPresent;
               return (
-                <tr key={d.day} className={!d.present && d.schoolDay ? 'row-absent' : d.late ? 'row-late' : undefined}>
+                <tr key={d.day} className={absent ? 'row-absent' : d.late ? 'row-late' : undefined}>
                   <td className="mono">{d.day}</td>
                   <td>{dow[new Date(d.day + 'T00:00:00').getDay()]}</td>
                   <td>
-                    {status === 'ABSENT' && <span className="badge err">ABSENT</span>}
-                    {status === 'LATE' && <span className="badge warn">LATE</span>}
-                    {status === 'PRESENT' && <span className="badge ok">PRESENT</span>}
-                    {status === '—' && <span className="text-dim">—</span>}
+                    {absent && <span className="badge err">ABSENT</span>}
+                    {!absent && amAbsent && <span className="badge warn">AM ABSENT</span>}
+                    {!absent && !amAbsent && pmAbsent && <span className="badge warn">PM ABSENT</span>}
+                    {!absent && !amAbsent && !pmAbsent && d.late && <span className="badge warn">LATE</span>}
+                    {!absent && !amAbsent && !pmAbsent && !d.late && <span className="badge ok">PRESENT</span>}
+                    {!d.schoolDay && <span className="text-dim">—</span>}
                   </td>
-                  <td className="mono">{d.firstIn ?? '—'}</td>
-                  <td className="mono">{d.lastOut ?? '—'}</td>
-                  <td className="num">{d.late ? '✓' : '—'}</td>
-                  <td className="num">{d.early ? '✓' : '—'}</td>
+                  <td className="mono">{d.morningIn ?? '—'}</td>
+                  <td className="mono">{d.morningOut ?? '—'}</td>
+                  <td className="mono">{d.afternoonIn ?? '—'}</td>
+                  <td className="mono">{d.afternoonOut ?? '—'}</td>
+                  <td className="num">{d.amLate ? <span className="pill pill-late">LATE</span> : '—'}</td>
+                  <td className="num">{d.pmLate ? <span className="pill pill-late">LATE</span> : '—'}</td>
+                  <td className="num">{d.amEarly ? <span className="pill pill-early">EARLY</span> : '—'}</td>
+                  <td className="num">{d.pmEarly ? <span className="pill pill-early">EARLY</span> : '—'}</td>
                   <td className="num">{d.scans.length}</td>
                 </tr>
               );
             })}
             {rec.days.length === 0 && (
-              <tr><td colSpan={8} className="empty-cell">No days in the selected range.</td></tr>
+              <tr><td colSpan={13} className="empty-cell">No days in the selected range.</td></tr>
             )}
           </tbody>
         </table>

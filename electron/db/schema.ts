@@ -77,9 +77,12 @@ CREATE TABLE IF NOT EXISTS sms_logs (
   provider VARCHAR(20) DEFAULT NULL,
   attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
   error TEXT DEFAULT NULL,
+  claimed_by VARCHAR(64) DEFAULT NULL,
+  claimed_at TIMESTAMP(3) NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   sent_at TIMESTAMP NULL DEFAULT NULL,
   KEY idx_sms_status (status),
+  KEY idx_sms_claim (status, id),
   KEY idx_sms_created (created_at),
   CONSTRAINT fk_sms_attendance FOREIGN KEY (attendance_id) REFERENCES attendance_logs(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -593,4 +596,22 @@ export async function ensureSchema(query: (sql: string, params?: unknown[]) => P
   if (!String(smsStatusCols[0]?.COLUMN_TYPE ?? '').includes('IN_PROGRESS')) {
     await query("ALTER TABLE sms_logs MODIFY status ENUM('PENDING','IN_PROGRESS','SENT','FAILED') NOT NULL DEFAULT 'PENDING'");
   }
+
+  // ---- Idempotent migration: SMS delivery leases (B3) ---------------------
+  const smsColumns = (await query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sms_logs'
+       AND COLUMN_NAME IN ('claimed_by', 'claimed_at')`,
+  )) as { COLUMN_NAME: string }[];
+  if (!smsColumns.some((r) => r.COLUMN_NAME === 'claimed_by')) {
+    await query("ALTER TABLE sms_logs ADD COLUMN claimed_by VARCHAR(64) DEFAULT NULL AFTER error");
+  }
+  if (!smsColumns.some((r) => r.COLUMN_NAME === 'claimed_at')) {
+    await query("ALTER TABLE sms_logs ADD COLUMN claimed_at TIMESTAMP(3) NULL DEFAULT NULL AFTER claimed_by");
+  }
+  const smsIndexes = (await query(
+    `SELECT INDEX_NAME FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sms_logs' AND INDEX_NAME = 'idx_sms_claim'`,
+  )) as { INDEX_NAME: string }[];
+  if (!smsIndexes.length) await query('ALTER TABLE sms_logs ADD KEY idx_sms_claim (status, id)');
 }
